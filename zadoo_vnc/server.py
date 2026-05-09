@@ -22,6 +22,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.port = port
         self.secondary_port = secondary_port
         self.tunnel_manager = None
+        self.enable_tunnel = True
         self.screen_capturer = None
         self.current_quality = 75
         self.current_fps = 60
@@ -120,8 +121,8 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         else:
             print("❌ Screen capturer not initialized")
         
-        # Start a tunnel only when one wasn't injected by app.main().
-        if not self.tunnel_manager:
+        # Start a tunnel only when enabled and one wasn't injected by app.main().
+        if self.enable_tunnel and not self.tunnel_manager:
             self.tunnel_manager = CloudflareTunnelManager(self.port)
             threading.Thread(target=self.tunnel_manager.start_primary_tunnel, daemon=True).start()
                 

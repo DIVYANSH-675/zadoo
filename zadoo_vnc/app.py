@@ -230,7 +230,7 @@ def main():
     print(f"Local network: http://{local_ip}:{desired_web_port}")
     print(f"Selected web server port: {desired_web_port}")
 
-    use_tunnel = True
+    use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
     tunnel_manager = None
     if use_tunnel:
         print(f"Selected tunnel port (single): {desired_web_port}")
@@ -250,6 +250,7 @@ def main():
 
     random_secondary = random_free_port(desired_web_port + 100)
     vnc_server = VNCServer(desired_web_port, random_secondary)
+    vnc_server.enable_tunnel = use_tunnel
     try:
         if tunnel_manager:
             tunnel_manager.email_port = random_secondary
@@ -295,3 +296,7 @@ def main():
     if vnc_server.tunnel_manager:
         vnc_server.tunnel_manager.cleanup()
     print("Goodbye!")
+
+
+if __name__ == "__main__":
+    main()
