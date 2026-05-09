@@ -1429,10 +1429,11 @@
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/></svg>
                                 <span class="btn-label">Off</span>
                             </button>
-                            <select class="futuristic-select" id="perf-region" onchange="sendPerformanceSettings()" title="Performance Region">
+                            <select class="futuristic-select" id="perf-region" onchange="handlePerformanceRegionChange()" title="Performance Region">
                                 <option value="full">Full</option>
                                 <option value="center_0.75">Center 75%</option>
                                 <option value="center_0.5">Center 50%</option>
+                                <option value="custom">Custom Area</option>
                             </select>
                         </div>
                         <div class="perf-row">
@@ -1725,6 +1726,8 @@
     const WSS_URL = `${WSS_PROTOCOL}://${window.location.host}`;
     const MAX_FRAME_RATE = 60;
     let performanceModeEnabled = false;
+    let performanceCustomRect = null;
+    window.performanceCustomRect = null;
     // User-blocked keys (configured via Keyboard Configure popup)
     const KB_BLOCKED_STORAGE = 'kb_blocked_v1';
     window.kbBlockedSet = new Set();
@@ -3690,6 +3693,81 @@
         if (box) box.style.display = 'none';
     }
 
+    function beginPerformanceCustomSelection() {
+        if (!canvas.width || !canvas.height) return;
+        performanceModeEnabled = true;
+        const perfBtn = document.getElementById('perf-toggle');
+        if (perfBtn) {
+            perfBtn.classList.add('active');
+            const label = perfBtn.querySelector('.btn-label');
+            if (label) label.textContent = 'On';
+        }
+        window.__snapSelecting = true;
+        window.__perfSelecting = true;
+        canvas.classList.add('snapshot-selecting');
+        let startClient = null;
+        let startNorm = null;
+
+        const cleanup = () => {
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('mousemove', onMove, true);
+            document.removeEventListener('mouseup', onUp, true);
+            document.removeEventListener('keydown', onKey, true);
+            window.__perfSelecting = false;
+            clearSnapshotSelection();
+        };
+        const onKey = (ev) => {
+            if (ev.key === 'Escape') {
+                cleanup();
+                const region = document.getElementById('perf-region');
+                if (region && !performanceCustomRect) region.value = 'full';
+                sendPerformanceSettings();
+            }
+        };
+        const onDown = (ev) => {
+            if (ev.button !== 0 || ev.target !== canvas) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            startClient = { clientX: ev.clientX, clientY: ev.clientY };
+            startNorm = pointToSnapshotNorm(ev);
+            setSnapshotBox(startClient, startClient);
+        };
+        const onMove = (ev) => {
+            if (!startClient) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            setSnapshotBox(startClient, { clientX: ev.clientX, clientY: ev.clientY });
+        };
+        const onUp = (ev) => {
+            if (!startClient) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const endNorm = pointToSnapshotNorm(ev);
+            const dx = Math.abs(ev.clientX - startClient.clientX);
+            const dy = Math.abs(ev.clientY - startClient.clientY);
+            cleanup();
+            if (dx < 4 || dy < 4) {
+                const region = document.getElementById('perf-region');
+                if (region && !performanceCustomRect) region.value = 'full';
+                sendPerformanceSettings();
+                return;
+            }
+            performanceCustomRect = {
+                x0: Math.min(startNorm.x, endNorm.x),
+                y0: Math.min(startNorm.y, endNorm.y),
+                x1: Math.max(startNorm.x, endNorm.x),
+                y1: Math.max(startNorm.y, endNorm.y)
+            };
+            window.performanceCustomRect = performanceCustomRect;
+            sendPerformanceSettings();
+        };
+
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+        document.addEventListener('keydown', onKey, true);
+    }
+
     async function downloadSnapshotFromUrl(url, btn, originalText) {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         try {
@@ -4125,15 +4203,28 @@
             const region = (document.getElementById('perf-region') || {}).value || 'full';
             const scaleDiv = parseInt((document.getElementById('perf-scale') || {}).value || '1', 10);
             const gray = !!((document.getElementById('perf-gray') || {}).checked);
-            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
-                window.videoSocket.send(JSON.stringify({
-                    action: 'set_performance',
-                    enabled: performanceModeEnabled,
-                    region: region,
-                    scale_div: scaleDiv,
-                    grayscale: gray
-                }));
+            const payload = {
+                action: 'set_performance',
+                enabled: performanceModeEnabled,
+                region: region,
+                scale_div: scaleDiv,
+                grayscale: gray
+            };
+            if (region === 'custom' && performanceCustomRect) {
+                payload.rect_norm = performanceCustomRect;
             }
+            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
+                window.videoSocket.send(JSON.stringify(payload));
+            }
+        }
+
+        function handlePerformanceRegionChange() {
+            const region = (document.getElementById('perf-region') || {}).value || 'full';
+            if (region === 'custom' && !window.__perfSelecting) {
+                beginPerformanceCustomSelection();
+                return;
+            }
+            sendPerformanceSettings();
         }
 
         function togglePerformanceMode(event) {
@@ -4143,6 +4234,11 @@
                 btn.classList.toggle('active', performanceModeEnabled);
                 const label = btn.querySelector('.btn-label');
                 if (label) label.textContent = performanceModeEnabled ? 'On' : 'Off';
+            }
+            const region = (document.getElementById('perf-region') || {}).value || 'full';
+            if (performanceModeEnabled && region === 'custom' && !performanceCustomRect && !window.__perfSelecting) {
+                beginPerformanceCustomSelection();
+                return;
             }
             sendPerformanceSettings();
         }

@@ -458,7 +458,9 @@ class MediaMixin:
                             if rect_norm and isinstance(rect_norm, dict):
                                 self.screen_capturer.set_custom_region(rect_norm)
                             self.screen_capturer.set_grayscale(grayscale)
-                            print(f" Performance mode: enabled={enabled} region={region} scale_div={scale_div} gray={grayscale} custom={bool(rect_norm)}")
+                            msg = f"Performance mode: enabled={enabled} region={region} scale_div={scale_div} gray={grayscale} custom={bool(rect_norm)}"
+                            logging.getLogger("performance").info(msg)
+                            print(f" {msg}")
                     elif action == 'get_capture_stats':
                         if self.screen_capturer:
                             stats = self.screen_capturer.get_capture_stats()
