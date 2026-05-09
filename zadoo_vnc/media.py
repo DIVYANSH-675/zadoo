@@ -90,7 +90,7 @@ class MediaMixin:
                                 self._audio_stream = loop.recorder(samplerate=want_samplerate, channels=2)
                                 self._audio_stream.__enter__()
                                 current_loop = loop
-                                log.info(f"🎵 Loopback device: {loop.name} @ {want_samplerate} Hz")
+                                log.info(f" Loopback device: {loop.name} @ {want_samplerate} Hz")
                             except Exception as e:
                                 log.warning(f"Loopback open failed ({e}); retrying...")
                                 current_loop = None
@@ -157,7 +157,7 @@ class MediaMixin:
                 self._audio_stream = None
                 self._audio_running = False
                 self.audio_running = False
-                log.info("🎵 System-audio worker stopped")
+                log.info(" System-audio worker stopped")
 
         t = threading.Thread(target=_audio_worker, daemon=True)
         t.start()
@@ -186,7 +186,7 @@ class MediaMixin:
             pass
         self._audio_stream = None
         self._audio_thread = None
-        logging.info("🎵 Audio capture stopped")
+        logging.info(" Audio capture stopped")
 
     def _start_mic_capture(self, samplerate=48000, blocksize=960, channels=1):
         """
@@ -195,6 +195,9 @@ class MediaMixin:
         """
         if self.mic_running:
             return True
+        if sd is None:
+            logging.error("Failed to start microphone capture: sounddevice is not installed")
+            return False
         self.mic_running = True
         self.mic_samplerate = int(samplerate)
         self.mic_blocksize = int(blocksize)
@@ -205,32 +208,69 @@ class MediaMixin:
                 if status:
                     logging.debug(f"Mic status: {status}")
                 x = indata
-                if x.ndim == 2 and x.shape[1] > 1:
-                    x = x[:, 0]
+                if x.ndim == 2:
+                    if x.shape[1] > 1:
+                        x = x[:, 0]
+                    else:
+                        x = x.reshape(-1)
                 x = (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16)
                 if not self.mic_queue.full():
                     self.mic_queue.put(x.tobytes())
             except Exception:
                 logging.error("Mic callback error", exc_info=True)
 
+        default_samplerate = self.mic_samplerate
+        max_input_channels = 1
         try:
-            self.mic_stream = sd.InputStream(
-                samplerate=self.mic_samplerate,
-                channels=2,
-                dtype='float32',
-                blocksize=self.mic_blocksize,
-                callback=mic_callback,
-                device=None,
-                latency='low'
-            )
-            self.mic_stream.start()
-            print(f"🎙️ Mic capture started @ {self.mic_samplerate} Hz (block={self.mic_blocksize})")
-            return True
-        except Exception:
-            logging.error("Failed to start microphone capture", exc_info=True)
-            self.mic_running = False
-            self.mic_stream = None
-            return False
+            default_input = sd.query_devices(kind='input')
+            max_input_channels = max(1, int(default_input.get('max_input_channels') or 1))
+            if default_input.get('default_samplerate'):
+                default_samplerate = int(default_input['default_samplerate'])
+        except Exception as exc:
+            logging.warning("Unable to query default microphone device; using requested mic format: %s", exc)
+
+        requested_channels = max(1, int(channels or 1))
+        channel_candidates = [min(requested_channels, max_input_channels)]
+        if max_input_channels >= 2 and 2 not in channel_candidates:
+            channel_candidates.append(2)
+        samplerate_candidates = [self.mic_samplerate]
+        if default_samplerate and default_samplerate not in samplerate_candidates:
+            samplerate_candidates.append(default_samplerate)
+
+        attempts = []
+        for sr in samplerate_candidates:
+            for ch in channel_candidates:
+                pair = (int(sr), int(ch))
+                if pair not in attempts:
+                    attempts.append(pair)
+
+        last_error = None
+        try:
+            for sr, ch in attempts:
+                try:
+                    self.mic_stream = sd.InputStream(
+                        samplerate=sr,
+                        channels=ch,
+                        dtype='float32',
+                        blocksize=self.mic_blocksize,
+                        callback=mic_callback,
+                        device=None,
+                        latency='low'
+                    )
+                    self.mic_stream.start()
+                    self.mic_samplerate = sr
+                    print(f"Mic capture started @ {self.mic_samplerate} Hz input_channels={ch} block={self.mic_blocksize}")
+                    return True
+                except Exception as exc:
+                    last_error = exc
+                    self.mic_stream = None
+                    logging.warning("Mic open attempt failed sr=%s channels=%s: %s", sr, ch, exc)
+        finally:
+            if self.mic_stream is None:
+                self.mic_running = False
+
+        logging.error("Failed to start microphone capture after trying %s: %s", attempts, last_error)
+        return False
 
     def _stop_mic_capture(self):
         try:
@@ -251,7 +291,7 @@ class MediaMixin:
             logging.error("Failed to stop mic capture", exc_info=True)
 
     async def audio_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
-        print(f"🔊 New audio client connected from {websocket.remote_address}")
+        print(f" New audio client connected from {websocket.remote_address}")
         self.audio_clients.add(websocket)
 
         # Start capture on first client
@@ -285,36 +325,36 @@ class MediaMixin:
             print(f"Error in audio_stream_handler: {e}")
         finally:
             self.audio_clients.discard(websocket)
-            print(f"🔊 Removed audio client, {len(self.audio_clients)} clients remaining")
+            print(f" Removed audio client, {len(self.audio_clients)} clients remaining")
             if not self.audio_clients and getattr(self, "_audio_running", False):
                 self._stop_audio_capture()
                 with self.audio_queue.mutex:
                     self.audio_queue.queue.clear()
-                print("🎵 Audio capture stopped (no clients)")
+                print(" Audio capture stopped (no clients)")
 
     async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
-        print(f"🎤 New mic client connected from {getattr(websocket, 'remote_address', None)}")
-        # Send format header mirroring /audio
-        hdr = {
-            "type": "audio_format",
-            "samplerate": int(self.mic_samplerate),
-            "channels": 1,
-            "samplefmt": "s16le",
-            "blocksize": int(self.mic_blocksize)
-        }
+        print(f"New mic client connected from {getattr(websocket, 'remote_address', None)}")
         try:
-            await websocket.send(json.dumps(hdr).encode('utf-8'))
-            print(f"🎤 Mic header sent: sr={hdr['samplerate']} ch={hdr['channels']} fmt={hdr['samplefmt']} block={hdr['blocksize']}")
-
             if not self.mic_running:
                 ok = self._start_mic_capture(samplerate=48000, blocksize=960, channels=1)
                 if not ok:
-                    print("❌ Mic open failed")
+                    print("Mic open failed")
                     try:
                         await websocket.close(code=1011, reason="Mic open failed")
                     except Exception:
                         pass
                     return
+
+            # Send format header after opening so the samplerate reflects the actual stream.
+            hdr = {
+                "type": "audio_format",
+                "samplerate": int(self.mic_samplerate),
+                "channels": 1,
+                "samplefmt": "s16le",
+                "blocksize": int(self.mic_blocksize)
+            }
+            await websocket.send(json.dumps(hdr).encode('utf-8'))
+            print(f"Mic header sent: sr={hdr['samplerate']} ch={hdr['channels']} fmt={hdr['samplefmt']} block={hdr['blocksize']}")
 
             while True:
                 try:
@@ -333,10 +373,10 @@ class MediaMixin:
         finally:
             # Stop mic when client disconnects
             self._stop_mic_capture()
-            print("🎤 Mic client disconnected; mic capture stopped")
+            print("Mic client disconnected; mic capture stopped")
 
     async def video_stream_handler(self, websocket):
-        print(f"📺 New video client connected from {websocket.remote_address}")
+        print(f" New video client connected from {websocket.remote_address}")
         self.video_clients.add(websocket)
         
         try:
@@ -353,20 +393,20 @@ class MediaMixin:
                         await self.handle_get_url_via_websocket(websocket)
                     elif action == 'set_quality':
                         value = self._apply_quality(event.get('value', 75))
-                        print(f"🎨 Quality set to: {value}%")
+                        print(f" Quality set to: {value}%")
                     elif action == 'set_fps':
                         value = self._apply_fps(event.get('value', 30))
-                        print(f"🎬 FPS set to: {value}")
+                        print(f" FPS set to: {value}")
                     elif action == 'set_capture_method':
                         method = event.get('method', 'auto')
                         if self.screen_capturer:
                             success = self.screen_capturer.set_capture_method(method)
                             if success:
-                                print(f"📹 Capture method changed to: {method}")
+                                print(f" Capture method changed to: {method}")
                             else:
-                                print(f"❌ Failed to set capture method to: {method}")
+                                print(f" Failed to set capture method to: {method}")
                         else:
-                            print("❌ Screen capturer not available")
+                            print(" Screen capturer not available")
                     elif action == 'get_available_capture_methods':
                         if self.screen_capturer:
                             methods = self.screen_capturer.get_available_methods()
@@ -393,7 +433,7 @@ class MediaMixin:
                             if rect_norm and isinstance(rect_norm, dict):
                                 self.screen_capturer.set_custom_region(rect_norm)
                             self.screen_capturer.set_grayscale(grayscale)
-                            print(f"⚙️ Performance mode: enabled={enabled} region={region} scale_div={scale_div} gray={grayscale} custom={bool(rect_norm)}")
+                            print(f" Performance mode: enabled={enabled} region={region} scale_div={scale_div} gray={grayscale} custom={bool(rect_norm)}")
                     elif action == 'get_capture_stats':
                         if self.screen_capturer:
                             stats = self.screen_capturer.get_capture_stats()
@@ -430,7 +470,7 @@ class MediaMixin:
                         else:
                             self.audio_samplerate_target = 48000
                         # Restart capture with new rate on next client connect
-                        print(f"🎧 Audio quality set: {self.audio_samplerate_target} Hz")
+                        print(f" Audio quality set: {self.audio_samplerate_target} Hz")
                     elif action == 'toggle_keystroke_capture':
                         enabled = event.get('enabled')
                         if enabled is None:
@@ -450,19 +490,19 @@ class MediaMixin:
                     print(f"Error handling video client message: {e}")
 
         except websockets.exceptions.ConnectionClosed:
-            print(f"📺 Video client {websocket.remote_address} disconnected")
+            print(f" Video client {websocket.remote_address} disconnected")
         except Exception as e:
             print(f"Error in video_stream_handler: {e}")
         finally:
             self.video_clients.discard(websocket)
-            print(f"📺 Removed video client, {len(self.video_clients)} clients remaining")
+            print(f" Removed video client, {len(self.video_clients)} clients remaining")
 
     async def webcam_stream_handler(self, websocket):
         """Stream JPEG frames from the server's webcam (DirectShow on Windows) to the client."""
-        print(f"🎥 Webcam client connected from {websocket.remote_address}")
+        print(f" Webcam client connected from {websocket.remote_address}")
         # Prefer PyAV (FFmpeg) on Windows via DirectShow
         if not HAS_AV:
-            print("❌ PyAV not available; webcam streaming disabled")
+            print(" PyAV not available; webcam streaming disabled")
             try:
                 await websocket.send(b"")
             except Exception:
@@ -485,7 +525,7 @@ class MediaMixin:
                         self.selected_camera = str(selected_device).strip() if selected_device else None
                         self.selected_camera_id = str(selected_id).strip() if selected_id else None
                         if self.selected_camera_id or self.selected_camera:
-                            print(f"🎥 Client selected camera id={self.selected_camera_id or ''} device={self.selected_camera or ''}")
+                            print(f" Client selected camera id={self.selected_camera_id or ''} device={self.selected_camera or ''}")
                 except Exception:
                     pass
             except asyncio.TimeoutError:
@@ -533,7 +573,7 @@ class MediaMixin:
                 try:
                     devices = normalize_camera_devices(self.enumerate_cameras())
                 except Exception as e:
-                    print(f"⚠️  Camera enumeration failed while opening webcam: {e}")
+                    print(f"  Camera enumeration failed while opening webcam: {e}")
 
                 selected_device = resolve_camera_selection(
                     getattr(self, 'selected_camera_id', None),
@@ -570,16 +610,16 @@ class MediaMixin:
                         try:
                             device = f"video={name}"
                             if opts is None:
-                                print(f"🎯 Trying dshow open: {device} opts=None")
+                                print(f" Trying dshow open: {device} opts=None")
                                 container = av.open(device, format='dshow')
                             else:
-                                print(f"🎯 Trying dshow open: {device} opts={opts}")
+                                print(f" Trying dshow open: {device} opts={opts}")
                                 container = av.open(device, format='dshow', options=opts)
                             open_ok = True
-                            print(f"✅ Opened webcam via dshow device: {device} opts={opts}")
+                            print(f" Opened webcam via dshow device: {device} opts={opts}")
                             break
                         except Exception as e:
-                            print(f"⚠️  Open failed: {device} opts={opts} err={e}")
+                            print(f"  Open failed: {device} opts={opts} err={e}")
                             container = None
                             continue
                     if open_ok:
@@ -590,16 +630,16 @@ class MediaMixin:
                         for opts in option_sets:
                             try:
                                 if opts is None:
-                                    print(f"🎯 Trying dshow open: {generic} opts=None")
+                                    print(f" Trying dshow open: {generic} opts=None")
                                     container = av.open(generic, format='dshow')
                                 else:
-                                    print(f"🎯 Trying dshow open: {generic} opts={opts}")
+                                    print(f" Trying dshow open: {generic} opts={opts}")
                                     container = av.open(generic, format='dshow', options=opts)
                                 open_ok = True
-                                print(f"✅ Opened webcam via dshow generic: {generic} opts={opts}")
+                                print(f" Opened webcam via dshow generic: {generic} opts={opts}")
                                 break
                             except Exception as e:
-                                print(f"⚠️  Open failed: {generic} opts={opts} err={e}")
+                                print(f"  Open failed: {generic} opts={opts} err={e}")
                                 container = None
                                 continue
                         if open_ok:
@@ -615,15 +655,15 @@ class MediaMixin:
                         for opts in option_sets:
                             try:
                                 if opts is None:
-                                    print(f"🎯 Trying MediaPlayer open: video={name} opts=None")
+                                    print(f" Trying MediaPlayer open: video={name} opts=None")
                                     player = MediaPlayer(f"video={name}", format='dshow')
                                 else:
-                                    print(f"🎯 Trying MediaPlayer open: video={name} opts={opts}")
+                                    print(f" Trying MediaPlayer open: video={name} opts={opts}")
                                     player = MediaPlayer(f"video={name}", format='dshow', options=opts)
-                                print(f"✅ Opened webcam via aiortc MediaPlayer: video={name} opts={opts}")
+                                print(f" Opened webcam via aiortc MediaPlayer: video={name} opts={opts}")
                                 break
                             except Exception as e:
-                                print(f"⚠️  MediaPlayer open failed: video={name} opts={opts} err={e}")
+                                print(f"  MediaPlayer open failed: video={name} opts={opts} err={e}")
                                 player = None
                                 continue
                         if player is not None:
@@ -633,15 +673,15 @@ class MediaMixin:
                             for opts in option_sets:
                                 try:
                                     if opts is None:
-                                        print(f"🎯 Trying MediaPlayer open: {generic} opts=None")
+                                        print(f" Trying MediaPlayer open: {generic} opts=None")
                                         player = MediaPlayer(generic, format='dshow')
                                     else:
-                                        print(f"🎯 Trying MediaPlayer open: {generic} opts={opts}")
+                                        print(f" Trying MediaPlayer open: {generic} opts={opts}")
                                         player = MediaPlayer(generic, format='dshow', options=opts)
-                                    print(f"✅ Opened webcam via aiortc MediaPlayer: {generic} opts={opts}")
+                                    print(f" Opened webcam via aiortc MediaPlayer: {generic} opts={opts}")
                                     break
                                 except Exception as e:
-                                    print(f"⚠️  MediaPlayer open failed: {generic} opts={opts} err={e}")
+                                    print(f"  MediaPlayer open failed: {generic} opts={opts} err={e}")
                                     player = None
                                     continue
                             if player is not None:
@@ -654,7 +694,7 @@ class MediaMixin:
                     import cv2
                 except Exception as e:
                     cv2 = None
-                    print(f"⚠️  OpenCV not available for webcam fallback: {e}")
+                    print(f"  OpenCV not available for webcam fallback: {e}")
                 if cv2 is not None:
                     for index in cv2_indices:
                         try:
@@ -664,7 +704,7 @@ class MediaMixin:
                                     cap.release()
                                 except Exception:
                                     pass
-                                print(f"⚠️  OpenCV webcam open failed: index={index}")
+                                print(f"  OpenCV webcam open failed: index={index}")
                                 continue
                             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -672,14 +712,14 @@ class MediaMixin:
                             ok, frame = cap.read()
                             if not ok or frame is None:
                                 cap.release()
-                                print(f"⚠️  OpenCV webcam produced no frame: index={index}")
+                                print(f"  OpenCV webcam produced no frame: index={index}")
                                 continue
                             cv2_capture = cap
                             cv2_first_frame = frame
-                            print(f"✅ Opened webcam via OpenCV DirectShow index={index}")
+                            print(f" Opened webcam via OpenCV DirectShow index={index}")
                             break
                         except Exception as e:
-                            print(f"⚠️  OpenCV webcam open failed: index={index} err={e}")
+                            print(f"  OpenCV webcam open failed: index={index} err={e}")
                             try:
                                 cap.release()
                             except Exception:
@@ -687,7 +727,7 @@ class MediaMixin:
                             cv2_capture = None
 
             if container is None and player is None and cv2_capture is None:
-                print("❌ No webcam device could be opened")
+                print(" No webcam device could be opened")
                 try:
                     await websocket.send(b"")
                 except Exception:
@@ -751,7 +791,7 @@ class MediaMixin:
                 # aiortc MediaPlayer path
                 video_track = getattr(player, 'video', None)
                 if video_track is None:
-                    print("❌ MediaPlayer has no video track")
+                    print(" MediaPlayer has no video track")
                     return
                 while True:
                     try:
@@ -949,45 +989,79 @@ class MediaMixin:
             pass
 
     async def broadcast_frames(self):
-        """Broadcast video frames to all connected video clients"""
+        """Broadcast new video frames to connected clients."""
         frame_count = 0
         last_debug = 0
-        
-        while not self.stop_event.is_set():
-            if self.screen_capturer and self.screen_capturer.latest_frame_jpeg:
-                frame = self.screen_capturer.latest_frame_jpeg
-                if frame and self.video_clients:
-                    try:
-                        # Send frame to all connected video clients
-                        disconnected = []
-                        for ws in self.video_clients.copy():
-                            try:
-                                await ws.send(frame)
-                                frame_count += 1
-                            except websockets.exceptions.ConnectionClosed:
-                                disconnected.append(ws)
-                            except Exception as e:
-                                print(f"Error sending frame to client: {e}")
-                                disconnected.append(ws)
-                        
-                        # Remove disconnected clients
-                        for ws in disconnected:
-                            self.video_clients.discard(ws)
-                        
-                        # Debug output every 30 frames (roughly every second at 30fps)
-                        if frame_count - last_debug >= 30:
-                            logging.debug("Sent %s frames to %s video client(s)", frame_count, len(self.video_clients))
-                            last_debug = frame_count
-                            
-                    except Exception as e:
-                        print(f"Error in broadcast_frames: {e}")
-            elif self.video_clients and frame_count == 0:
-                # Only show this once when we have clients but no frames
-                print(f"⚠️  {len(self.video_clients)} video clients waiting, but no frames available")
-                frame_count = 1  # Prevent repeated messages
-            
-            await asyncio.sleep(1/max(self.current_fps, 1))  # Prevent division by zero
+        last_sequence = 0
 
+        while not self.stop_event.is_set():
+            try:
+                event = getattr(self, "frame_ready_event", None)
+                if event is not None:
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=1.0)
+                        event.clear()
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(1 / max(int(self.current_fps or 1), 1))
+
+                if not self.screen_capturer:
+                    continue
+                if hasattr(self.screen_capturer, "get_latest_frame_packet"):
+                    sequence, frame = self.screen_capturer.get_latest_frame_packet()
+                else:
+                    sequence, frame = 0, self.screen_capturer.latest_frame_jpeg
+                if not frame or sequence == last_sequence:
+                    if self.video_clients and frame_count == 0:
+                        print(f"{len(self.video_clients)} video clients waiting, but no frames available")
+                        frame_count = 1
+                    continue
+                last_sequence = sequence
+
+                if not self.video_clients:
+                    continue
+
+                disconnected = []
+                send_tasks = []
+                for ws in self.video_clients.copy():
+                    try:
+                        transport = getattr(ws, "transport", None)
+                        if transport and transport.get_write_buffer_size() > 1_000_000:
+                            continue
+                        send_tasks.append((ws, asyncio.create_task(ws.send(frame))))
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.append(ws)
+                    except Exception as e:
+                        print(f"Error scheduling frame send: {e}")
+                        disconnected.append(ws)
+
+                for ws, task in send_tasks:
+                    try:
+                        await asyncio.wait_for(task, timeout=0.25)
+                        frame_count += 1
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.append(ws)
+                    except Exception as e:
+                        print(f"Error sending frame to client: {e}")
+                        task.cancel()
+                        disconnected.append(ws)
+
+                for ws in disconnected:
+                    self.video_clients.discard(ws)
+
+                if frame_count - last_debug >= 60:
+                    logging.debug(
+                        "Sent %s frames to %s video client(s); seq=%s bytes=%s",
+                        frame_count,
+                        len(self.video_clients),
+                        sequence,
+                        len(frame),
+                    )
+                    last_debug = frame_count
+            except Exception as e:
+                print(f"Error in broadcast_frames: {e}")
+                await asyncio.sleep(0.05)
     async def broadcast_cursor_position(self):
         """Broadcast cursor position and button states to subscribed clients"""
         while not self.stop_event.is_set():

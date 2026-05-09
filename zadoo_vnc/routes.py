@@ -1,4 +1,4 @@
-"""HTTP route and snapshot/OCR handlers."""
+"""HTTP route and snapshot handlers."""
 from __future__ import annotations
 
 import asyncio
@@ -180,7 +180,7 @@ class RoutesMixin:
     def _http_feature_for_route(self, route_path):
         if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
             return "public"
-        if route_path in {"/api/public-url", "/snapshot", "/api/ocr"}:
+        if route_path in {"/api/public-url", "/snapshot"}:
             return "view"
         if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
             return "control"
@@ -663,8 +663,6 @@ class RoutesMixin:
                         headers=headers,
                         body=b"Error generating snapshot",
                     )
-        elif path.startswith("/api/ocr"):
-            return self._coerce_response(await self.handle_ocr(path))
         else:
             headers = Headers()
             headers["Content-Type"] = "text/plain; charset=utf-8"
@@ -698,325 +696,21 @@ class RoutesMixin:
                 'error': f'Error getting URL: {str(e)}'
             })
 
-    async def handle_ocr(self, path):
-        """
-        HTTP GET /api/ocr?left=&top=&right=&bottom=[&full=1][&save=1][&trace=1]
-          - Uses RapidOCR by default; PaddleOCR can be forced with ZADOO_OCR_ENGINE=paddleocr.
-          - Writes extremely detailed logs under logger 'ocr'.
-          - Optional: &save=1 saves a debug image with OCR boxes to ./logs/.
-          - Optional: &trace=1 adds fine-grained line tracing for THIS function.
-        Response JSON:
-        {
-          "ok": true/false,
-          "engine": "paddleocr" | "rapidocr",
-          "rect": {"left":..., "top":..., "right":..., "bottom":...},
-          "image_size": {"w":..., "h":...},
-          "lines": [
-            {"text":"...", "confidence": 0.99, "box":[x0,y0,x1,y1,x2,y2,x3,y3]}
-          ],
-          "plain_text":"...\n..."
-        }
-        """
-        import io
-        import os
-        import json
-        import time
-        import math
-        import logging
-        import urllib.parse
-        from http import HTTPStatus
-
-        import numpy as np
-        from PIL import Image, ImageDraw
-
-        # Import cv2 locally (keeps module-level deps minimal)
-        try:
-            import cv2
-        except Exception:
-            cv2 = None
-
-        olog = logging.getLogger("ocr")
-        ocr_preference = os.getenv("ZADOO_OCR_ENGINE", "rapidocr").strip().lower()
-        prefer_paddle = (
-            ocr_preference in {"paddle", "paddleocr"}
-            and not getattr(self, "_paddle_ocr_disabled", False)
-        )
-        PaddleOCR = None
-        paddle_import_error = None
-        if prefer_paddle:
-            try:
-                from paddleocr import PaddleOCR
-            except Exception as e:
-                paddle_import_error = e
-                self._paddle_ocr_disabled = True
-                olog.warning("PaddleOCR import failed; using RapidOCR: %s", e, exc_info=True)
-
-        # --- optional per-call line trace (for "every line" visibility) -----------
-        def _make_line_tracer(files_whitelist=None):
-            def tracer(frame, event, arg):
-                if event != "line":
-                    return tracer
-                try:
-                    co = frame.f_code
-                    fname = co.co_filename or ""
-                    if (not files_whitelist) or any(x in fname for x in files_whitelist):
-                        olog.debug(f"[TRACE] {os.path.basename(fname)}:{frame.f_lineno} in {co.co_name}")
-                except Exception:
-                    pass
-                return tracer
-            return tracer
-
-        try:
-            t0_total = time.perf_counter()
-            parsed = urllib.parse.urlparse(path)
-            q = urllib.parse.parse_qs(parsed.query or "")
-            olog.debug(f"handle_ocr(): path={path}")
-            olog.debug(f"Query params: {q}")
-
-            # enable line tracing only for this coroutine if requested
-            trace_enabled = str(q.get("trace", ["0"])[0]).strip() in ("1", "true", "yes")
-            if trace_enabled:
-                import sys
-                sys.settrace(_make_line_tracer(files_whitelist=["zadoo_vnc_single.py"]))
-
-            # read coordinates
-            def _qi(name, default=None):
-                val = q.get(name, [None])[0]
-                if val is None:
-                    return default
-                try:
-                    return int(float(val))
-                except Exception:
-                    try:
-                        return int(val)
-                    except Exception:
-                        return default
-
-            full_flag = str(q.get("full", ["0"])[0]).strip() in ("1", "true", "yes")
-            save_flag = str(q.get("save", ["0"])[0]).strip() in ("1", "true", "yes")
-
-            left   = _qi("left")
-            top    = _qi("top")
-            right  = _qi("right")
-            bottom = _qi("bottom")
-
-            # obtain image (either full or cropped region)
-            t0_cap = time.perf_counter()
-            if full_flag:
-                region = None
-                olog.debug("Requested full-screen OCR (full=1)")
-            else:
-                # if any coord is missing, do a safe fallback to full screen to avoid 400 spam
-                if None in (left, top, right, bottom):
-                    olog.warning("Missing rect params → falling back to full screen OCR")
-                    region = None
-                else:
-                    # normalize RTL coordinates, clamp later
-                    x0, y0 = min(left, right), min(top, bottom)
-                    x1, y1 = max(left, right), max(top, bottom)
-                    region = (x0, y0, x1, y1)
-                    olog.debug(f"Requested region: {region}")
-
-            loop = asyncio.get_event_loop()
-            full_img = await loop.run_in_executor(None, self._capture_screen_image)
-            if full_img is None:
-                msg = "Screen capture returned None"
-                olog.error(msg)
-                body = json.dumps({"ok": False, "error": msg}).encode("utf-8")
-                return (HTTPStatus.INTERNAL_SERVER_ERROR,
-                        [("Content-Type", "application/json; charset=utf-8"),
-                         ("Cache-Control", "no-store")],
-                        body)
-
-            full_w, full_h = full_img.size
-            actual_region = None
-            if region is not None:
-                x0, y0, x1, y1 = region
-                x0 = max(0, min(full_w, int(x0)))
-                y0 = max(0, min(full_h, int(y0)))
-                x1 = max(0, min(full_w, int(x1)))
-                y1 = max(0, min(full_h, int(y1)))
-                if x1 > x0 and y1 > y0:
-                    actual_region = (x0, y0, x1, y1)
-                    pil_img = full_img.crop(actual_region)
-                else:
-                    pil_img = full_img
-                    region = None
-            else:
-                pil_img = full_img
-
-            cap_ms = (time.perf_counter() - t0_cap) * 1000.0
-            w, h = pil_img.size
-            olog.debug(f"Screen captured: size={w}x{h}, time_ms={cap_ms:.2f}")
-
-            # if caller provided absolute coords, re-derive the rect we actually used
-            if actual_region is None:
-                rect = {"left": 0, "top": 0, "right": full_w, "bottom": full_h}
-            else:
-                rect = {
-                    "left": int(actual_region[0]),
-                    "top": int(actual_region[1]),
-                    "right": int(actual_region[2]),
-                    "bottom": int(actual_region[3]),
-                }
-            olog.debug(f"Effective OCR rect: {rect}")
-
-            # ensure np array is in the format OCR engines expect (OpenCV BGR is fine)
-            np_img = np.array(pil_img)
-            if cv2 is not None:
-                if np_img.ndim == 2:
-                    img_bgr = cv2.cvtColor(np_img, cv2.COLOR_GRAY2BGR)
-                else:
-                    img_bgr = cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR)
-            else:
-                # The fallback OCR path can also handle RGB arrays if cv2 is missing.
-                img_bgr = np_img
-
-            # run OCR
-            t0_ocr = time.perf_counter()
-            raw = None
-            engine = "rapidocr"
-            if prefer_paddle and PaddleOCR is not None:
-                try:
-                    # lazy-create (and cache) a single PaddleOCR instance only when explicitly requested
-                    if not hasattr(self, "_paddle_ocr") or self._paddle_ocr is None:
-                        t0_init = time.perf_counter()
-                        try:
-                            import inspect as _inspect
-                            params = _inspect.signature(PaddleOCR).parameters
-                        except Exception:
-                            params = {}
-                        ocr_kwargs = {"lang": "en"}
-                        if "use_angle_cls" in params:
-                            ocr_kwargs["use_angle_cls"] = True
-                        elif "use_textline_orientation" in params:
-                            ocr_kwargs["use_textline_orientation"] = True
-                        if "show_log" in params:
-                            ocr_kwargs["show_log"] = False
-                        self._paddle_ocr = PaddleOCR(**ocr_kwargs)
-                        init_ms = (time.perf_counter() - t0_init) * 1000.0
-                        olog.info(f"PaddleOCR initialized (first use). init_ms={init_ms:.2f}")
-                    raw = self._paddle_ocr.ocr(img_bgr)
-                    engine = "paddleocr"
-                except Exception as paddle_error:
-                    self._paddle_ocr_disabled = True
-                    olog.warning("PaddleOCR runtime failed; falling back to RapidOCR: %s", paddle_error, exc_info=True)
-
-            if raw is None:
-                if paddle_import_error is not None:
-                    olog.warning("PaddleOCR unavailable; using RapidOCR: %s", paddle_import_error)
-                if not hasattr(self, "_rapid_ocr") or self._rapid_ocr is None:
-                    from rapidocr_onnxruntime import RapidOCR
-                    self._rapid_ocr = RapidOCR()
-                raw, _rapid_elapsed = self._rapid_ocr(img_bgr)
-            ocr_ms = (time.perf_counter() - t0_ocr) * 1000.0
-
-            # parse result (PaddleOCR legacy: [ [ (box, (text, conf)), ... ] ]; RapidOCR: [box, text, conf])
-            lines = []
-            plain = []
-            n_boxes = 0
-            if raw and isinstance(raw, list):
-                # single image case: raw[0] is list of lines
-                if (
-                    len(raw) > 0
-                    and isinstance(raw[0], list)
-                    and not (len(raw[0]) >= 3 and isinstance(raw[0][1], str))
-                ):
-                    items = raw[0]
-                else:
-                    items = raw
-                for item in items or []:
-                    try:
-                        if isinstance(item, dict):
-                            box = item.get("box") or item.get("dt_polys") or item.get("poly")
-                            txt = item.get("text") or item.get("rec_text") or ""
-                            conf = item.get("confidence") or item.get("score") or item.get("rec_score")
-                        elif isinstance(item, (list, tuple)) and len(item) >= 3 and isinstance(item[1], str):
-                            box, txt, conf = item[:3]
-                        else:
-                            box, (txt, conf) = item
-                        # flatten the 4-point polygon
-                        flat = []
-                        for (x, y) in box:
-                            flat.extend([int(round(x)), int(round(y))])
-
-                        line = {
-                            "text": (txt or "").strip(),
-                            "confidence": float(conf) if conf is not None else None,
-                            "box": flat,
-                        }
-                        if line["text"]:
-                            lines.append(line)
-                            plain.append(line["text"])
-                            n_boxes += 1
-                    except Exception as e:
-                        olog.warning(f"Skipping malformed OCR item: {item!r} ({e})")
-
-            olog.info(f"OCR done: boxes={n_boxes}, ocr_ms={ocr_ms:.2f}, total_ms={(time.perf_counter()-t0_total)*1000.0:.2f}")
-
-            # optional: save debug image with rectangles
-            if save_flag:
-                try:
-                    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-                    os.makedirs(logs_dir, exist_ok=True)
-                    stamp = time.strftime("%Y%m%d_%H%M%S")
-                    out_path = os.path.join(logs_dir, f"ocr_{stamp}_{w}x{h}.png")
-                    dbg = pil_img.copy()
-                    drw = ImageDraw.Draw(dbg)
-                    for line in lines:
-                        b = line["box"]  # [x0,y0,x1,y1,x2,y2,x3,y3]
-                        drw.polygon([(b[0], b[1]), (b[2], b[3]), (b[4], b[5]), (b[6], b[7])], outline=(0, 255, 0), width=2)
-                    dbg.save(out_path)
-                    olog.info(f"Saved OCR debug image → {out_path}")
-                except Exception as e:
-                    olog.warning(f"Failed to save OCR debug image: {e}")
-
-            payload = {
-                "ok": True,
-                "engine": engine,
-                "rect": rect,
-                "image_size": {"w": w, "h": h},
-                "lines": lines,
-                "plain_text": "\n".join(plain),
-            }
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            return (HTTPStatus.OK,
-                    [("Content-Type", "application/json; charset=utf-8"),
-                     ("Cache-Control", "no-store")],
-                    body)
-
-        except Exception as e:
-            olog = logging.getLogger("ocr")
-            olog.exception(f"OCR fatal error: {e}")
-            body = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
-            return (HTTPStatus.INTERNAL_SERVER_ERROR,
-                    [("Content-Type", "application/json; charset=utf-8"),
-                     ("Cache-Control", "no-store")],
-                    body)
-        finally:
-            # turn off per-call trace if it was enabled
-            if 'trace_enabled' in locals() and trace_enabled:
-                try:
-                    import sys
-                    sys.settrace(None)
-                except Exception:
-                    pass
-
     async def handle_refresh_tunnel(self):
         """API endpoint to refresh tunnel and get new URL."""
         try:
             if not self.tunnel_manager:
-                print("❌ No tunnel manager available")
+                print(" No tunnel manager available")
                 return json.dumps({"success": False, "error": "No tunnel manager available"})
 
-            print("🔄 Refreshing tunnel...")
+            print(" Refreshing tunnel...")
             loop = asyncio.get_event_loop()
             url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
             if not url:
-                print("❌ Failed to restart tunnel")
+                print(" Failed to restart tunnel")
                 return json.dumps({"success": False, "error": "Failed to refresh tunnel"})
 
-            print(f"🌍 New tunnel URL: {url}")
+            print(f" New tunnel URL: {url}")
             return json.dumps({
                 "success": True,
                 "url": url,
@@ -1058,7 +752,7 @@ class RoutesMixin:
         return http.HTTPStatus.BAD_REQUEST, {"Content-Type": "application/json; charset=utf-8"}, response_data
 
     def _capture_screen_image(self, rect_norm=None):
-        """One-shot snapshot; reuse instances and capture at source (dxcam region → MSS region)."""
+        """One-shot snapshot; reuse instances and capture at source (dxcam region  MSS region)."""
         import time as _t
         t0 = _t.perf_counter()
         # Track which backend we actually used for logging
@@ -1200,7 +894,7 @@ class RoutesMixin:
     def _generate_snapshot_png(self, rect_norm=None, fmt='png', quality=85, max_w=None, max_h=None):
         """
         Returns image bytes (PNG or JPEG) for the current (or region) snapshot.
-        Supports format/quality/downscale and logs capture→convert→encode timings.
+        Supports format/quality/downscale and logs captureconvertencode timings.
         """
         try:
             import time as _t, io as _io

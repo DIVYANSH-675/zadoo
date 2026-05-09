@@ -13,7 +13,7 @@ python -m pip install -r requirements.txt
 Optional feature groups are defined in `pyproject.toml`:
 
 ```powershell
-python -m pip install -e .[media,email,perf,ssh,ocr]
+python -m pip install -e .[media,email,perf,ssh]
 ```
 
 ## Run
@@ -46,4 +46,4 @@ The live smoke test assumes the app is already running.
 
 ## Notes
 
-The core dependency set covers screen sharing, remote input, text clipboard, templates, and local/tunnel web serving. Audio, webcam, OCR, email, SSH PTY, and faster capture backends are optional extras.
+The core dependency set covers screen sharing, remote input, text clipboard, templates, and local/tunnel web serving. Audio, webcam, email, SSH PTY, and faster capture backends are optional extras.

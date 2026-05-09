@@ -1,4 +1,4 @@
-﻿"""Remote input, clipboard, alerts, and hotkey controls."""
+"""Remote input, clipboard, alerts, and hotkey controls."""
 from __future__ import annotations
 
 import asyncio
@@ -92,7 +92,7 @@ class InputControlMixin:
             _log_except("_capture_backspace", e)
 
     async def input_event_handler(self, websocket):
-        print(f"🖱️ New input client connected from {websocket.remote_address}")
+        print(f" New input client connected from {websocket.remote_address}")
         self.input_clients.add(websocket)
         _log_try_ok("input_event_handler.connect", str(getattr(websocket, 'remote_address', '')))
         try:
@@ -174,12 +174,12 @@ class InputControlMixin:
                         if enabled:
                             self.cursor_subscribers.add(websocket)
                             self.cursor_broadcast_enabled = True
-                            print(f"🖱️ Cursor broadcast enabled for {websocket.remote_address}")
+                            print(f" Cursor broadcast enabled for {websocket.remote_address}")
                         else:
                             self.cursor_subscribers.discard(websocket)
                             if not self.cursor_subscribers:
                                 self.cursor_broadcast_enabled = False
-                            print(f"🖱️ Cursor broadcast disabled for {websocket.remote_address}")
+                            print(f" Cursor broadcast disabled for {websocket.remote_address}")
 
                 except json.JSONDecodeError:
                     logging.warning(f"Received non-JSON input message: {message}")
@@ -189,7 +189,7 @@ class InputControlMixin:
                     _log_except("input_event_handler.message", e)
         
         except websockets.exceptions.ConnectionClosed:
-            print(f"🖱️ Input client {websocket.remote_address} disconnected")
+            print(f" Input client {websocket.remote_address} disconnected")
             _log_try_ok("input_event_handler.disconnect", str(getattr(websocket, 'remote_address', '')))
         finally:
             # Clean up on disconnect and ALWAYS re-enable host input
@@ -201,7 +201,7 @@ class InputControlMixin:
     async def handle_refresh_via_websocket(self, websocket):
         """Handle tunnel refresh via WebSocket"""
         try:
-            print("🔄 WebSocket refresh request received")
+            print(" WebSocket refresh request received")
             await websocket.send(json.dumps({
                 'type': 'refresh_status',
                 'message': f'Refreshing tunnel on current port...'
@@ -209,13 +209,13 @@ class InputControlMixin:
             
             # Switch ports and get new URL
             loop = asyncio.get_event_loop()
-            print("🔄 Calling tunnel_manager.refresh_tunnel()...")
+            print(" Calling tunnel_manager.refresh_tunnel()...")
             new_url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
-            print(f"🔄 refresh_tunnel() returned: {new_url}")
+            print(f" refresh_tunnel() returned: {new_url}")
             
             if new_url:
                 current_port = self.tunnel_manager.primary_port
-                print(f"✅ Sending success response with URL: {new_url}")
+                print(f" Sending success response with URL: {new_url}")
                 await websocket.send(json.dumps({
                     'type': 'refresh_complete',
                     'success': True,
@@ -225,7 +225,7 @@ class InputControlMixin:
                     'email_status': (self.tunnel_manager.last_email_message if self.tunnel_manager else None)
                 }))
             else:
-                print("❌ No URL returned from refresh_tunnel()")
+                print(" No URL returned from refresh_tunnel()")
                 await websocket.send(json.dumps({
                     'type': 'refresh_complete',
                     'success': False,
@@ -233,7 +233,7 @@ class InputControlMixin:
                 }))
                 
         except Exception as e:
-            print(f"❌ Error in handle_refresh_via_websocket: {e}")
+            print(f" Error in handle_refresh_via_websocket: {e}")
             await websocket.send(json.dumps({
                 'type': 'refresh_complete',
                 'success': False,
@@ -395,7 +395,7 @@ class InputControlMixin:
                 "request_id": request_id,
                 "bytes": len(image_data),
             })
-            print(f"✅ Image copied to clipboard successfully ({len(image_data)} bytes)")
+            print(f" Image copied to clipboard successfully ({len(image_data)} bytes)")
         except Exception as e:
             self._send_clipboard_image_result(websocket, {
                 "type": "clipboard_image_result",
@@ -403,7 +403,7 @@ class InputControlMixin:
                 "request_id": request_id,
                 "error": str(e),
             })
-            print(f"⚠️ Failed to copy image to clipboard: {e}")
+            print(f" Failed to copy image to clipboard: {e}")
 
     def _handle_get_clipboard(self, websocket):
         try:
@@ -411,9 +411,9 @@ class InputControlMixin:
             if HAS_PYPERCLIP:
                 try:
                     content = pyperclip.paste()
-                    print(f"✅ Clipboard content retrieved via pyperclip: {len(content or '')} chars")
+                    print(f" Clipboard content retrieved via pyperclip: {len(content or '')} chars")
                 except Exception as e:
-                    print(f"⚠️ pyperclip failed: {e}")
+                    print(f" pyperclip failed: {e}")
                     content = None
             
             if content is None:
@@ -424,13 +424,13 @@ class InputControlMixin:
                                      capture_output=True, text=True, timeout=5)
                     if ps.returncode == 0 and ps.stdout:
                         content = ps.stdout
-                        print(f"✅ Clipboard content retrieved via PowerShell: {len(content)} chars")
+                        print(f" Clipboard content retrieved via PowerShell: {len(content)} chars")
                     else:
-                        print(f"⚠️ PowerShell clipboard failed: returncode={ps.returncode}, stderr={ps.stderr}")
+                        print(f" PowerShell clipboard failed: returncode={ps.returncode}, stderr={ps.stderr}")
                 except subprocess.TimeoutExpired:
-                    print("⚠️ PowerShell clipboard timeout")
+                    print(" PowerShell clipboard timeout")
                 except Exception as e:
-                    print(f"⚠️ PowerShell clipboard error: {e}")
+                    print(f" PowerShell clipboard error: {e}")
                     content = ''
             
             # Send clipboard content with metadata for remote connections
@@ -447,7 +447,7 @@ class InputControlMixin:
                 asyncio.get_running_loop()
             )
         except Exception as e:
-            print(f"❌ Error getting clipboard: {e}")
+            print(f" Error getting clipboard: {e}")
             # Send empty clipboard content on error
             try:
                 error_data = {
@@ -473,9 +473,9 @@ class InputControlMixin:
                 try:
                     pyperclip.copy(data)
                     ok = True
-                    print(f"✅ Clipboard set via pyperclip: {len(data)} chars")
+                    print(f" Clipboard set via pyperclip: {len(data)} chars")
                 except Exception as e:
-                    print(f"⚠️ pyperclip copy failed: {e}")
+                    print(f" pyperclip copy failed: {e}")
                     ok = False
             
             if not ok:
@@ -486,11 +486,11 @@ class InputControlMixin:
                     _ = p.communicate(input=data.encode('utf-8'))
                     if p.returncode == 0:
                         ok = True
-                        print(f"✅ Clipboard set via clip.exe: {len(data)} chars")
+                        print(f" Clipboard set via clip.exe: {len(data)} chars")
                     else:
-                        print(f"⚠️ clip.exe failed with returncode: {p.returncode}")
+                        print(f" clip.exe failed with returncode: {p.returncode}")
                 except Exception as e:
-                    print(f"⚠️ clip.exe error: {e}")
+                    print(f" clip.exe error: {e}")
             
             # Additional fallback via PowerShell
             if not ok:
@@ -500,16 +500,16 @@ class InputControlMixin:
                                      capture_output=True, text=True, timeout=5)
                     if ps.returncode == 0:
                         ok = True
-                        print(f"✅ Clipboard set via PowerShell: {len(data)} chars")
+                        print(f" Clipboard set via PowerShell: {len(data)} chars")
                     else:
-                        print(f"⚠️ PowerShell clipboard set failed: returncode={ps.returncode}, stderr={ps.stderr}")
+                        print(f" PowerShell clipboard set failed: returncode={ps.returncode}, stderr={ps.stderr}")
                 except subprocess.TimeoutExpired:
-                    print("⚠️ PowerShell clipboard set timeout")
+                    print(" PowerShell clipboard set timeout")
                 except Exception as e:
-                    print(f"⚠️ PowerShell clipboard set error: {e}")
+                    print(f" PowerShell clipboard set error: {e}")
                     
         except Exception as e:
-            print(f"❌ Error setting clipboard: {e}")
+            print(f" Error setting clipboard: {e}")
 
     def _handle_mouse_event(self, event):
         """Handle mouse move/drag/click events with robust fallbacks."""
@@ -662,14 +662,14 @@ class InputControlMixin:
         """Send an alert to all connected controller browsers (System B)."""
         try:
             cnt = len(getattr(self, 'input_clients', []) or [])
-            print(f"🔔 Broadcasting alert to {cnt} input client(s): '{title}' — '{message}'")
+            print(f" Broadcasting alert to {cnt} input client(s): '{title}'  '{message}'")
             payload = json.dumps({'type': 'controller_alert', 'title': title, 'message': message})
             loop = getattr(self, 'loop', None)
             if not loop:
                 try:
                     loop = asyncio.get_running_loop()
                     self.loop = loop
-                    print("ℹ️  Captured running event loop for alert broadcast")
+                    print("  Captured running event loop for alert broadcast")
                     _log_try_ok("_broadcast_controller_alert.get_loop")
                 except Exception:
                     loop = None
@@ -680,7 +680,7 @@ class InputControlMixin:
                         asyncio.run_coroutine_threadsafe(ws.send(payload), loop)
                         _log_try_ok("_broadcast_controller_alert.queue", str(getattr(ws, 'remote_address', '?')))
                 except Exception as e:
-                    print(f"⚠️  Failed to queue alert to a client: {e}")
+                    print(f"  Failed to queue alert to a client: {e}")
                     _log_except("_broadcast_controller_alert.queue", e)
         except Exception as e:
             print(f"Error broadcasting controller alert: {e}")
@@ -719,7 +719,7 @@ class InputControlMixin:
                         asyncio.run_coroutine_threadsafe(ws.send(payload), loop)
                         _log_try_ok("_broadcast_keystroke_capture.queue", str(getattr(ws, 'remote_address', '?')))
                 except Exception as e:
-                    print(f"⚠️  Failed to queue keystroke to a client: {e}")
+                    print(f"  Failed to queue keystroke to a client: {e}")
                     _log_except("_broadcast_keystroke_capture.queue", e)
         except Exception as e:
             print(f"Error broadcasting keystroke: {e}")
@@ -765,7 +765,7 @@ class InputControlMixin:
         # Only register when NumLock is OFF (as requested)
         if not numlock_off:
             try:
-                print("NumLock ON → hotkeys disabled (not registered)")
+                print("NumLock ON  hotkeys disabled (not registered)")
             except Exception:
                 pass
             return
@@ -864,14 +864,14 @@ class InputControlMixin:
             _log_try_ok("_begin_custom_alert_capture.idempotent", "already_active")
             return
         if not self._is_numlock_off():
-            print("⛔ Ignored: NumLock is ON (turn NumLock off to start capture)")
+            print(" Ignored: NumLock is ON (turn NumLock off to start capture)")
             _log_try_ok("_begin_custom_alert_capture.blocked", "numlock_on")
             return
         self.custom_alert_active = True
         self.custom_alert_buf = []
         self._install_custom_capture_hotkeys()
         # Do not globally suppress here; per-key handlers already suppress
-        print("✍️  CAPTURE: ON (NumLock OFF, source=%s)" % source)
+        print("  CAPTURE: ON (NumLock OFF, source=%s)" % source)
         _log_try_ok("_begin_custom_alert_capture", source)
 
     def _end_custom_alert_capture(self, source: str = "poller"):
@@ -880,7 +880,7 @@ class InputControlMixin:
             _log_try_ok("_end_custom_alert_capture.idempotent", "not_active")
             return
         if not self._is_numlock_off():
-            print("⛔ Ignored: NumLock is ON (turn NumLock off to stop capture)")
+            print(" Ignored: NumLock is ON (turn NumLock off to stop capture)")
             _log_try_ok("_end_custom_alert_capture.blocked", "numlock_on")
             return
         self._remove_custom_capture_hotkeys()
@@ -888,7 +888,7 @@ class InputControlMixin:
         self.custom_alert_active = False
         self.custom_alert_buf = []
         # Do not flip global suppress here either
-        print("✍️  CAPTURE: OFF (source=%s) — sending %d chars" % (source, len(text)))
+        print("  CAPTURE: OFF (source=%s)  sending %d chars" % (source, len(text)))
         if text:
             try:
                 print(f"[custom] broadcasting custom text ({len(text)} chars)")
@@ -1092,7 +1092,7 @@ class InputControlMixin:
             self.keyboard_hook = keyboard.hook(on_key_event, suppress=False)
             self.keyboard_hook_active = True
             try:
-                print(f"🎹 Global keyboard hook started (suppress=False, conditional in-callback)")
+                print(f" Global keyboard hook started (suppress=False, conditional in-callback)")
             except Exception:
                 pass
             
@@ -1113,7 +1113,7 @@ class InputControlMixin:
             finally:
                 self.keyboard_hook = None
             self.keyboard_hook_active = False
-            print("🎹 Global keyboard hook stopped")
+            print(" Global keyboard hook stopped")
         except Exception as e:
             print(f"Error stopping keyboard hook: {e}")
 

@@ -8,7 +8,6 @@ import logging
 import os
 import platform
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -56,7 +55,6 @@ def configure_logging():
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
-        logging.getLogger("ocr").setLevel(log_level)
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("websockets.server").setLevel(logging.WARNING)
         logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -150,52 +148,26 @@ class ProcessProtector:
         self.protected = False
 
 
-def is_port_in_use(port):
+def _parse_port(value, default=None):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
-            return s.connect_ex(("127.0.0.1", port)) == 0
-    except Exception:
-        return False
-
-
-def try_kill_process_on_port_windows(port):
-    try:
-        cmd = ["cmd", "/c", f"for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :{port}') do taskkill /F /PID %a"]
-        subprocess.run(cmd, capture_output=True, text=True)
+        port = int(str(value).strip())
+        if 1 <= port <= 65535:
+            return port
     except Exception:
         pass
+    return default
 
 
 def choose_web_port(desired_web_port=6173):
-    try:
-        max_attempts = 10
-        attempts = 0
-        while attempts < max_attempts and is_port_in_use(desired_web_port):
-            print(f"Port {desired_web_port} busy for web server. Attempting to free it...")
-            try_kill_process_on_port_windows(desired_web_port)
-            time.sleep(0.5)
-            if is_port_in_use(desired_web_port):
-                desired_web_port += 1
-                attempts += 1
-            else:
-                break
-        if attempts >= max_attempts and is_port_in_use(desired_web_port):
-            print(f"Could not free ports near 6173; continuing with {desired_web_port} anyway")
-    except Exception:
-        pass
-    return desired_web_port
+    return _parse_port(os.environ.get("ZADOO_PORT"), desired_web_port)
 
 
-def random_free_port(fallback):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        return port
-    except Exception:
-        return fallback
+def choose_secondary_port(primary_port):
+    port = _parse_port(os.environ.get("ZADOO_SECONDARY_PORT"), None)
+    if port == primary_port:
+        print("Ignoring ZADOO_SECONDARY_PORT because it matches ZADOO_PORT")
+        return None
+    return port
 
 
 def main():
@@ -233,8 +205,11 @@ def main():
     print(f"\nSystem: {platform.system()} {platform.release()}")
     local_ip = get_local_ip()
     desired_web_port = choose_web_port(6173)
+    secondary_port = choose_secondary_port(desired_web_port)
     print(f"Local network: http://{local_ip}:{desired_web_port}")
     print(f"Selected web server port: {desired_web_port}")
+    if secondary_port:
+        print(f"Selected secondary web server port: {secondary_port}")
 
     use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
     tunnel_manager = None
@@ -254,13 +229,12 @@ def main():
     print("To stop: Press Ctrl+C")
     print("=" * 60)
 
-    random_secondary = random_free_port(desired_web_port + 100)
-    vnc_server = VNCServer(desired_web_port, random_secondary)
+    vnc_server = VNCServer(desired_web_port, secondary_port)
     vnc_server.enable_tunnel = use_tunnel
     try:
         if tunnel_manager:
-            tunnel_manager.email_port = random_secondary
-            print(f"Email will include random port: {random_secondary}")
+            tunnel_manager.email_port = secondary_port or desired_web_port
+            print(f"Email will include port: {tunnel_manager.email_port}")
     except Exception:
         pass
     if tunnel_manager:
@@ -276,31 +250,20 @@ def main():
     vnc_server.screen_capturer.quality = vnc_server.current_quality
     capturer.start()
 
-    max_retries = 10
-    for attempt in range(max_retries):
-        try:
-            asyncio.run(vnc_server.start_server())
-            break
-        except OSError as e:
-            err_no = getattr(e, "errno", None)
-            if err_no == 10048:
-                print(f"Bind failed on port {vnc_server.port} (in use). Retrying on {vnc_server.port + 1}...")
-                vnc_server.port += 1
-                try:
-                    if vnc_server.tunnel_manager:
-                        vnc_server.tunnel_manager.refresh_tunnel()
-                except Exception:
-                    pass
-                time.sleep(0.5)
-                continue
+    try:
+        asyncio.run(vnc_server.start_server())
+    except OSError as e:
+        err_no = getattr(e, "errno", None)
+        if err_no == 10048:
+            print(f"Bind failed: port {vnc_server.port} is already in use. Set ZADOO_PORT to another port.")
+        else:
             raise
-        except (KeyboardInterrupt, SystemExit):
-            print("\nShutting down...")
-            break
-
-    capturer.stop()
-    if vnc_server.tunnel_manager:
-        vnc_server.tunnel_manager.cleanup()
+    except (KeyboardInterrupt, SystemExit):
+        print("\nShutting down...")
+    finally:
+        capturer.stop()
+        if vnc_server.tunnel_manager:
+            vnc_server.tunnel_manager.cleanup()
     print("Goodbye!")
 
 

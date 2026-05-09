@@ -18,13 +18,13 @@ from .routes import RoutesMixin
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
-    def __init__(self, port, secondary_port):
+    def __init__(self, port, secondary_port=None):
         self.port = port
         self.secondary_port = secondary_port
         self.tunnel_manager = None
         self.enable_tunnel = True
         self.screen_capturer = None
-        self.current_quality = 75
+        self.current_quality = 65
         self.current_fps = 60
         self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
@@ -36,6 +36,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.audio_running = False
         self.stop_event = asyncio.Event()
         self.loop = None
+        self.frame_ready_event = None
         # Audio quality targets
         self.audio_samplerate_target = 24000
         self.audio_channels_target = 1
@@ -81,45 +82,49 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.auth_sessions = {}
 
     async def start_server(self):
-        """Start WebSocket servers on both ports"""
+        """Start WebSocket servers."""
         # Capture the running event loop for cross-thread broadcasts
         try:
             self.loop = asyncio.get_running_loop()
         except Exception:
             self.loop = None
+        self.frame_ready_event = asyncio.Event()
+        if self.screen_capturer and hasattr(self.screen_capturer, "set_frame_event"):
+            self.screen_capturer.set_frame_event(self.loop, self.frame_ready_event)
         print("=" * 60)
-        print("🎮 VNC SERVER STARTING...")
-        print(f"🌐 Primary: http://localhost:{self.port}")
-        print(f"🌐 Secondary: http://localhost:{self.secondary_port}")
-        print(f"🏠 Network: http://{get_local_ip()}:{self.secondary_port}")
-        print("🌍 Internet: Check above for public URL")
+        print(" VNC SERVER STARTING...")
+        print(f" Primary: http://localhost:{self.port}")
+        if self.secondary_port:
+            print(f"Secondary: http://localhost:{self.secondary_port}")
+        print(f"Network: http://{get_local_ip()}:{self.port}")
+        print(" Internet: Check above for public URL")
         print("=" * 60)
         # Start host hotkey capture on server start (A/B/C/D)
         try:
             self.start_global_keyboard_hook()
         except Exception as e:
-            print(f"⚠️ Keyboard hook failed to initialize: {e}")
+            print(f" Keyboard hook failed to initialize: {e}")
         # If hook isn't active, start fallback poller
         try:
             if not getattr(self, 'keyboard_hook_active', False):
                 self.start_host_hotkey_poller()
-                print("✅ Fallback hotkey poller started (A/B/C/D)")
+                print(" Fallback hotkey poller started (A/B/C/D)")
             else:
-                print("✅ Global keyboard hook armed for host alerts (A/B/C/D)")
+                print(" Global keyboard hook armed for host alerts (A/B/C/D)")
         except Exception:
             pass
         
         # Check if screen capturer is working
         if self.screen_capturer:
-            print("✅ Screen capturer initialized")
+            print(" Screen capturer initialized")
             # Wait a moment for it to capture first frame
             await asyncio.sleep(1)
             if self.screen_capturer.latest_frame_jpeg:
-                print("✅ Screen capture working - first frame captured")
+                print(" Screen capture working - first frame captured")
             else:
-                print("⚠️  Screen capture not producing frames yet")
+                print("  Screen capture not producing frames yet")
         else:
-            print("❌ Screen capturer not initialized")
+            print(" Screen capturer not initialized")
         
         # Start a tunnel only when enabled and one wasn't injected by app.main().
         if self.enable_tunnel and not self.tunnel_manager:
@@ -132,28 +137,31 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # Start cursor broadcasting task
         cursor_broadcast_task = asyncio.create_task(self.broadcast_cursor_position())
         
-        # Start both servers
+        # Start primary server; secondary is opt-in via ZADOO_SECONDARY_PORT.
         primary_server = await websockets.serve(
             self.main_handler,
             "0.0.0.0",
             self.port,
             process_request=self.process_request,
         )
-        
-        secondary_server = await websockets.serve(
-            self.main_handler,
-            "0.0.0.0",
-            self.secondary_port,
-            process_request=self.process_request,
-        )
-        
-        print(f"✅ VNC servers running on ports {self.port} and {self.secondary_port}")
-        print("🎬 Video streaming started")
+
+        servers = [primary_server]
+        if self.secondary_port:
+            secondary_server = await websockets.serve(
+                self.main_handler,
+                "0.0.0.0",
+                self.secondary_port,
+                process_request=self.process_request,
+            )
+            servers.append(secondary_server)
+
+        ports = ", ".join(str(port) for port in (self.port, self.secondary_port) if port)
+        print(f" VNC server running on port(s): {ports}")
+        print(" Video streaming started")
         
         # Keep servers running
         await asyncio.gather(
-            primary_server.wait_closed(),
-            secondary_server.wait_closed(),
+            *(server.wait_closed() for server in servers),
             broadcast_task,
             cursor_broadcast_task
         )

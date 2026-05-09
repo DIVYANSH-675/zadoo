@@ -10,14 +10,14 @@ from .dependencies import *
 
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
-    def __init__(self, fps=30, quality=85):
+    def __init__(self, fps=30, quality=65):
         super().__init__(daemon=True)
         self.latest_frame_jpeg = None
         self.frame_lock = threading.Lock()
         self.capture_control_lock = threading.RLock()
         self.is_running = False
-        self.quality = quality # Added quality attribute
-        self.fps = fps # Added fps attribute
+        self.quality = quality
+        self.fps = fps
         self.capture_method = "auto"  # auto, dxcam, fast_ctypes, mss, win32, pil
         self.dxcam_camera = None
         self.fast_ctypes_capture = None
@@ -33,7 +33,13 @@ class ScreenCapturer(threading.Thread):
             'last_fps_time': time.time(),
             'current_fps': 0,
             'method_switches': 0,
-            'last_method_switch': time.time()
+            'last_method_switch': time.time(),
+            'sequence': 0,
+            'last_frame_ts': 0.0,
+            'last_frame_bytes': 0,
+            'last_capture_ms': 0.0,
+            'last_encode_ms': 0.0,
+            'last_loop_ms': 0.0,
         }
         # Performance mode settings
         self.perf_enabled = False
@@ -41,6 +47,26 @@ class ScreenCapturer(threading.Thread):
         self.perf_scale_div = 1
         self.encoder_busy = False
         self.perf_grayscale = False
+        self._frame_event_loop = None
+        self._frame_ready_event = None
+
+    def set_frame_event(self, loop, event):
+        self._frame_event_loop = loop
+        self._frame_ready_event = event
+
+    def _notify_frame_ready(self):
+        loop = self._frame_event_loop
+        event = self._frame_ready_event
+        if loop is None or event is None:
+            return
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except Exception:
+            pass
+
+    def get_latest_frame_packet(self):
+        with self.frame_lock:
+            return self.capture_stats.get('sequence', 0), self.latest_frame_jpeg
 
     def run(self):
         self.is_running = True
@@ -76,10 +102,14 @@ class ScreenCapturer(threading.Thread):
         else:
             logging.debug("Optional fast_ctypes_screenshots backend is not installed; using fallback capture backends")
         
+        next_deadline = time.perf_counter()
         while self.is_running:
+            loop_start = time.perf_counter()
             try:
+                capture_start = time.perf_counter()
                 with self.capture_control_lock:
                     frame = self._grab_screen(sct)
+                capture_ms = (time.perf_counter() - capture_start) * 1000.0
                 # Apply perf-region cropping before encoding (ndarray only)
                 if isinstance(frame, np.ndarray):
                     frame = self._apply_perf_region(frame)
@@ -89,11 +119,20 @@ class ScreenCapturer(threading.Thread):
                         time.sleep(0)  # yield
                         continue
                     self.encoder_busy = True
+                    encode_start = time.perf_counter()
                     jpeg_bytes = self._encode_frame(frame)
+                    encode_ms = (time.perf_counter() - encode_start) * 1000.0
                     self.encoder_busy = False
                     if jpeg_bytes is not None:
                         with self.frame_lock:
                             self.latest_frame_jpeg = jpeg_bytes
+                            self.capture_stats['sequence'] += 1
+                            self.capture_stats['last_frame_ts'] = time.time()
+                            self.capture_stats['last_frame_bytes'] = len(jpeg_bytes)
+                            self.capture_stats['last_capture_ms'] = capture_ms
+                            self.capture_stats['last_encode_ms'] = encode_ms
+                            self.capture_stats['last_loop_ms'] = (time.perf_counter() - loop_start) * 1000.0
+                        self._notify_frame_ready()
                         
                         # Update capture statistics
                         self.capture_stats['frame_count'] += 1
@@ -121,7 +160,16 @@ class ScreenCapturer(threading.Thread):
                 target_fps = max(1, int(self.fps))
             except Exception:
                 target_fps = 30
-            time.sleep(1 / target_fps)
+            frame_period = 1.0 / target_fps
+            next_deadline += frame_period
+            now = time.perf_counter()
+            if next_deadline < now - frame_period:
+                next_deadline = now
+            sleep_for = max(0.0, next_deadline - now)
+            if sleep_for:
+                time.sleep(sleep_for)
+            else:
+                time.sleep(0)
         
         if sct:
             sct.close()
@@ -302,7 +350,7 @@ class ScreenCapturer(threading.Thread):
         """DXCam capture method - returns RGB ndarray (region-aware)."""
         try:
             roi = None
-            # Probe output size once to map normalized perf region → pixels
+            # Probe output size once to map normalized perf region  pixels
             if not hasattr(self, '_dx_out_size') or self._dx_out_size is None:
                 probe = self.dxcam_camera.grab()
                 if isinstance(probe, np.ndarray) and probe.ndim == 3:
@@ -476,7 +524,7 @@ class ScreenCapturer(threading.Thread):
                             arr = np.ascontiguousarray(arr)
                         return imagecodecs.jpeg_encode(arr, level=self.quality)
                     except Exception:
-                        logging.warning("imagecodecs jpeg_encode failed – falling back", exc_info=True)
+                        logging.warning("imagecodecs jpeg_encode failed  falling back", exc_info=True)
                         HAS_IMAGECODECS = False
                 if HAS_PIL:
                     buffer = io.BytesIO()
@@ -519,10 +567,10 @@ class ScreenCapturer(threading.Thread):
                 # Reset active method to force re-detection
                 self.active_capture_method = "unknown"
             
-            logging.info(f"📹 Screen capture method changed from '{old_method}' to '{method}'")
+            logging.info(f" Screen capture method changed from '{old_method}' to '{method}'")
             return True
         else:
-            logging.warning(f"❌ Capture method '{method}' not available. Available: {available_methods}")
+            logging.warning(f" Capture method '{method}' not available. Available: {available_methods}")
             return False
 
     def get_available_methods(self):
@@ -575,6 +623,12 @@ class ScreenCapturer(threading.Thread):
             'active_method': self.active_capture_method,
             'set_method': self.capture_method,
             'method_switches': self.capture_stats['method_switches'],
+            'sequence': self.capture_stats.get('sequence', 0),
+            'last_frame_ts': self.capture_stats.get('last_frame_ts', 0.0),
+            'last_frame_bytes': self.capture_stats.get('last_frame_bytes', 0),
+            'last_capture_ms': self.capture_stats.get('last_capture_ms', 0.0),
+            'last_encode_ms': self.capture_stats.get('last_encode_ms', 0.0),
+            'last_loop_ms': self.capture_stats.get('last_loop_ms', 0.0),
             'is_working': is_working
         }
 

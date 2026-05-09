@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Host Controls — Alerts</title>
+  <title>Host Controls  Alerts</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0f1115; color:#eaeef2; margin:0; }
@@ -33,8 +33,8 @@
           const code = btn.getAttribute('data-code');
           try{
             const res = await fetch('/api/alert?code='+encodeURIComponent(code));
-            ok.textContent = res.ok ? '✅ Sent '+code : '❌ Failed ('+res.status+')';
-          }catch(e){ ok.textContent = '❌ Network error'; }
+            ok.textContent = res.ok ? ' Sent '+code : ' Failed ('+res.status+')';
+          }catch(e){ ok.textContent = ' Network error'; }
           setTimeout(()=> ok.textContent='', 2000);
         });
       });

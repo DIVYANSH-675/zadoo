@@ -27,7 +27,6 @@ media = ["sounddevice==0.5.2", "soundcard==0.4.6", "av==16.1.0", "aiortc==1.14.0
 email = ["resend==2.30.0"]
 perf = ["dxcam==0.3.0", "opencv-python==4.13.0.92", "fast-ctypes-screenshots==0.10", "bettercam==1.0.0", "imagecodecs==2026.3.6"]
 ssh = ["paramiko==4.0.0", "pywinpty==3.0.3; platform_system == 'Windows'"]
-ocr = ["paddleocr==3.5.0", "paddlepaddle==3.3.1; platform_system == 'Windows'", "rapidocr-onnxruntime==1.4.4"]
 
 [project.scripts]
 zadoo-vnc = "zadoo_vnc.app:main"

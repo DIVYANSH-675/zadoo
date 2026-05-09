@@ -41,21 +41,21 @@ class CloudflareTunnelManager:
         self.cloudflared_path = os.path.join(os.getcwd(), "cloudflared.exe")
 
         if os.path.exists(self.cloudflared_path):
-            print("✅ Using existing cloudflared.exe")
+            print(" Using existing cloudflared.exe")
             return True
 
         try:
-            print("📥 Downloading cloudflared...")
+            print(" Downloading cloudflared...")
             url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 
             with urllib.request.urlopen(url) as response, open(self.cloudflared_path, "wb") as out_file:
                 out_file.write(response.read())
 
-            print("✅ Downloaded cloudflared.exe")
+            print(" Downloaded cloudflared.exe")
             return True
 
         except Exception as e:
-            print(f"❌ Failed to download cloudflared: {e}")
+            print(f" Failed to download cloudflared: {e}")
             return False
 
     def start_tunnel(self, port):
@@ -97,7 +97,7 @@ class CloudflareTunnelManager:
 
             threading.Thread(target=log_output, args=(process.stdout, output_queue), daemon=True).start()
 
-            print(f"🔍 Looking for public URL for port {port}...")
+            print(f" Looking for public URL for port {port}...")
             start_time = time.time()
             while time.time() - start_time < 20:
                 try:
@@ -109,7 +109,7 @@ class CloudflareTunnelManager:
                         if url_match:
                             url = url_match.group(0)
                             logging.info("Found public URL for port %s: %s", port, url)
-                            print(f"✅ Found public URL for port {port}: {url}")
+                            print(f" Found public URL for port {port}: {url}")
                             return process, url
                 except Exception:
                     pass
@@ -120,8 +120,8 @@ class CloudflareTunnelManager:
             return process, None
 
         except Exception as e:
-            logging.error("❌ Failed to start tunnel for port %s: %s", port, e, exc_info=True)
-            print(f"❌ Failed to start tunnel for port {port}: {e}")
+            logging.error(" Failed to start tunnel for port %s: %s", port, e, exc_info=True)
+            print(f" Failed to start tunnel for port {port}: {e}")
             return None, None
 
     def start_primary_tunnel(self):
@@ -131,15 +131,15 @@ class CloudflareTunnelManager:
                 logging.info("Cloudflare tunnel already running for port %s", self.primary_port)
                 return self.primary_public_url
 
-            print(f"🚀 Starting Cloudflare tunnel for port {self.primary_port}...")
+            print(f" Starting Cloudflare tunnel for port {self.primary_port}...")
             self.current_port = self.primary_port
             self.primary_tunnel_process, self.primary_public_url = self.start_tunnel(self.primary_port)
 
             if self.primary_public_url:
-                print("🌍" * 80)
-                print("🌍 PRIMARY PORT PUBLIC URL READY!")
-                print(f"🔗 Port {self.primary_port}: {self.primary_public_url}")
-                print("🌍" * 80)
+                print("" * 80)
+                print(" PRIMARY PORT PUBLIC URL READY!")
+                print(f" Port {self.primary_port}: {self.primary_public_url}")
+                print("" * 80)
                 try:
                     self.notify_public_url(self.primary_public_url, self.email_port)
                 except Exception:
@@ -157,38 +157,38 @@ class CloudflareTunnelManager:
         try:
             with self._tunnel_lock:
                 if new_port is not None:
-                    print(f"🔁 Refreshing tunnel to new port {new_port}...")
+                    print(f" Refreshing tunnel to new port {new_port}...")
                     self.primary_port = new_port
                     self.current_port = new_port
                 else:
-                    print(f"🔁 Refreshing tunnel on current port {self.primary_port}...")
+                    print(f" Refreshing tunnel on current port {self.primary_port}...")
 
                 if self.primary_tunnel_process:
-                    print(f"🛑 Stopping old tunnel process (PID: {self.primary_tunnel_process.pid})")
+                    print(f" Stopping old tunnel process (PID: {self.primary_tunnel_process.pid})")
                     try:
                         self.primary_tunnel_process.terminate()
                         self.primary_tunnel_process.wait(timeout=5)
-                        print("✅ Old tunnel process stopped")
+                        print(" Old tunnel process stopped")
                     except Exception as e:
-                        print(f"⚠️ Error stopping tunnel: {e}")
+                        print(f" Error stopping tunnel: {e}")
                         try:
                             self.primary_tunnel_process.kill()
-                            print("✅ Old tunnel process force killed")
+                            print(" Old tunnel process force killed")
                         except Exception:
-                            print("❌ Could not kill old tunnel process")
+                            print(" Could not kill old tunnel process")
                 else:
-                    print("ℹ️ No old tunnel process to stop")
+                    print(" No old tunnel process to stop")
 
                 self.primary_tunnel_process = None
                 self.primary_public_url = None
                 self._notified_states.clear()
 
-                print("🚀 Starting new tunnel...")
+                print(" Starting new tunnel...")
                 result = self.start_primary_tunnel()
-                print(f"🚀 start_primary_tunnel() returned: {result}")
+                print(f" start_primary_tunnel() returned: {result}")
                 return result
         except Exception as e:
-            print(f"❌ Error in refresh_tunnel: {e}")
+            print(f" Error in refresh_tunnel: {e}")
             logging.error("Failed to refresh primary tunnel", exc_info=True)
             return None
 
@@ -238,7 +238,7 @@ class CloudflareTunnelManager:
             self.last_notified_url = url
             self.last_email_status = True
             self.last_email_message = f"Email sent to {self.email_to}"
-            print(f"✅ Email sent to: {self.email_to}")
+            print(f" Email sent to: {self.email_to}")
             return True
 
         except Exception as e:
@@ -249,22 +249,22 @@ class CloudflareTunnelManager:
 
     def cleanup(self):
         """Clean up tunnel processes."""
-        print("🧹 Cleaning up all tunnel processes...")
+        print(" Cleaning up all tunnel processes...")
 
         for process_name, process in [("Primary", self.primary_tunnel_process)]:
             if process:
                 try:
-                    print(f"🛑 Stopping {process_name} tunnel...")
+                    print(f" Stopping {process_name} tunnel...")
                     process.terminate()
                     process.wait(timeout=5)
-                    print(f"✅ {process_name} tunnel stopped")
+                    print(f" {process_name} tunnel stopped")
                 except Exception:
                     try:
                         process.kill()
-                        print(f"✅ {process_name} tunnel force killed")
+                        print(f" {process_name} tunnel force killed")
                     except Exception:
-                        print(f"⚠️ Could not stop {process_name} tunnel")
+                        print(f" Could not stop {process_name} tunnel")
 
         self.primary_tunnel_process = None
         self.primary_public_url = None
-        print("🧹 All tunnels cleaned up")
+        print(" All tunnels cleaned up")

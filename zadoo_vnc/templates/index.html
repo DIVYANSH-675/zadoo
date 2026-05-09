@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zadoo - Remote Desktop</title>
     <link rel="icon" href="data:,">
-    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@2/dist/tesseract.min.js'></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.css">
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/edit/closebrackets.min.js"></script>
@@ -56,6 +55,18 @@
             #screen { height: 100dvh; }
         }
         
+        #screen.snapshot-selecting {
+            cursor: crosshair !important;
+        }
+        #snapshot-selection-box {
+            position: fixed;
+            display: none;
+            pointer-events: none;
+            border: 2px solid #00d4ff;
+            background: rgba(0, 212, 255, 0.16);
+            box-shadow: 0 0 18px rgba(0, 212, 255, 0.35);
+            z-index: 3600;
+        }
         /* Dynamic cursor styles */
         .cursor-default { cursor: default !important; }
         .cursor-pointer { cursor: pointer !important; }
@@ -553,53 +564,6 @@
             font-style: italic;
         }
         
-        /* Screen Recording Toggle */
-        .recording-toggle-btn {
-            width: 100%;
-            padding: 8px 10px;
-            margin-bottom: 6px;
-            background: #1e293b;
-            color: #ef4444;
-            border: 1px solid #334155;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 11px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            transition: all 0.2s ease;
-        }
-        
-        .recording-toggle-btn:hover {
-            border-color: #ef4444;
-            box-shadow: 0 8px 24px rgba(239, 68, 68, 0.12);
-            transform: translateY(-1px);
-        }
-        
-        .recording-toggle-btn.active {
-            background: #0f172a;
-            border-color: #ef4444;
-            color: #ef4444;
-        }
-        
-        .recording-indicator {
-            width: 8px;
-            height: 8px;
-            background: #6b7280;
-            border-radius: 50%;
-            transition: all 0.3s ease;
-        }
-        
-        .recording-indicator.recording {
-            background: #ef4444;
-            animation: pulse 1.5s infinite;
-        }
-        
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
         
         /* Input Controls */
         .input-group {
@@ -978,7 +942,7 @@
         }
         
         /* Responsive */
-        /* 13"–14" laptops (e.g., 1366x768, 1440x900) */
+        /* 13"14" laptops (e.g., 1366x768, 1440x900) */
         @media (min-width: 1024px) and (max-width: 1440px) {
             .sidebar.open { width: 300px; }
             .terminal-panel { width: 55vw; right: -55vw; }
@@ -992,7 +956,7 @@
             .CodeMirror pre { font-size: 16px; }
             .sidebar.open .sidebar-trigger { right: calc(300px + 20px); }
         }
-        /* 14"–15" laptops inc. MacBook 14 (1280–1535 logical widths) */
+        /* 14"15" laptops inc. MacBook 14 (12801535 logical widths) */
         @media (min-width: 1280px) and (max-width: 1535px) {
             /* Sidebar width and trigger offset */
             .sidebar.open { width: 320px; }
@@ -1060,7 +1024,7 @@
             .terminal-panel { width: 50vw; right: -50vw; }
             .notepad-panel { width: 40vw; right: -40vw; }
         }
-        /* 1280–1535px (common 15" and many 14") */
+        /* 12801535px (common 15" and many 14") */
         @media (min-width: 1280px) and (max-width: 1535px) {
             .sidebar.open { width: 320px; }
             .sidebar.open .sidebar-trigger { right: calc(320px + 20px); }
@@ -1339,7 +1303,7 @@
             <div class="key key-period two-line"><span>&gt;</span><span>.</span></div>
             <div class="key key-slash two-line"><span>?</span><span>/</span></div>
             <div class="key key-shift-right">shift</div>
-            <div class="key key-up">▲</div>
+            <div class="key key-up">^</div>
             <div class="key key-num1">1</div>
             <div class="key key-num2">2</div>
             <div class="key key-num3">3</div>
@@ -1350,9 +1314,9 @@
             <div class="key key-space"></div>
             <div class="key key-alt-right">alt</div>
             <div class="key key-ctrl-right">ctrl</div>
-            <div class="key key-left">◄</div>
-            <div class="key key-down">▼</div>
-            <div class="key key-right">►</div>
+            <div class="key key-left">&lt;</div>
+            <div class="key key-down">v</div>
+            <div class="key key-right">&gt;</div>
             <div class="key key-num0">0</div>
             <div class="key key-dot">.</div>
         </div>
@@ -1363,9 +1327,10 @@
         <div class="video-area">
             <div id="mouse-overlay"></div>
             <canvas id="screen"></canvas>
+            <div id="snapshot-selection-box"></div>
             <!-- Hidden status element for JavaScript -->
             <div id="status" style="display: none;">Connecting...</div>
-            <div id="current-quality" style="display: none;">75</div>
+            <div id="current-quality" style="display: none;">65</div>
             <div id="current-fps" style="display: none;">30</div>
             <div id="uptime-display" style="display: none;">00:00:00</div>
         </div>
@@ -1393,19 +1358,19 @@
                             <div class="url-port" id="port-info">Port: --</div>
                     </div>
                         <div class="url-actions">
-                            <button class="url-action-btn" title="Copy" onclick="copyPublicLink(event)">⧉</button>
-                            <button class="url-action-btn" id="btn-refresh-url" title="Switch & Get New Link" onclick="refreshPublicLink()">⟳</button>
+                            <button class="url-action-btn" title="Copy" onclick="copyPublicLink(event)">Copy</button>
+                            <button class="url-action-btn" id="btn-refresh-url" title="Switch & Get New Link" onclick="refreshPublicLink()">Refresh</button>
                         </div>
                     </div>
                 </div>
                 
                 <!-- Graphics Quality Section -->
                 <div class="sidebar-section">
-                    <div class="section-title">🎨 Graphics</div>
+                    <div class="section-title">Graphics</div>
                     <div class="input-group">
-                        <label class="input-label">Visual Quality <span id="quality-value" style="color:#00d4ff; font-weight:700;">75</span>%</label>
+                        <label class="input-label">Visual Quality <span id="quality-value" style="color:#00d4ff; font-weight:700;">65</span>%</label>
                         <input type="range" class="futuristic-range" id="quality-slider" 
-                               min="10" max="100" value="75" oninput="updateQuality(this.value)">
+                               min="10" max="95" value="65" oninput="updateQuality(this.value)">
                     </div>
                     <div class="input-group">
                         <label class="input-label">Frame Rate <span id="fps-value" style="color:#00d4ff; font-weight:700;">30</span></label>
@@ -1423,16 +1388,16 @@
                     </div>
                     <div class="input-group">
                         <div class="capture-status" id="capture-status">
-                            <div class="status-indicator" id="status-indicator">●</div>
+                            <div class="status-indicator" id="status-indicator">*</div>
                             <span class="status-text" id="status-text">Checking...</span>
-                            <button class="verify-btn" onclick="verifyCaptureMethod()" title="Verify Capture Method">✓</button>
+                            <button class="verify-btn" onclick="verifyCaptureMethod()" title="Verify Capture Method">Check</button>
                         </div>
                     </div>
                 </div>
                 
                 <!-- Server Info Section -->
                 <div class="sidebar-section">
-                    <div class="section-title">📊 Live Status</div>
+                    <div class="section-title">Live Status</div>
                     <div class="info-item">
                         <span class="info-label">Connection</span>
                         <span class="info-value" id="server-status">Connecting</span>
@@ -1458,7 +1423,7 @@
                 
                 <!-- Clipboard Section -->
                 <div class="sidebar-section">
-                    <div class="section-title">📋 Clipboard</div>
+                    <div class="section-title">Clipboard</div>
                     <div class="btn-group">
                         <button class="sidebar-btn" onclick="getRemoteClipboard()" title="Pull from remote">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -1473,15 +1438,11 @@
                 
                 <!-- Quick Actions Section -->
                 <div class="sidebar-section">
-                    <div class="section-title">⚡ Quick Actions</div>
+                    <div class="section-title">Quick Actions</div>
                     <div class="btn-group">
                         <button class="sidebar-btn" onclick="takeSnapshot(event)" title="Snapshot">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l2-3h8l2 3h3a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                             <span>Snap</span>
-                        </button>
-                        <button class="sidebar-btn" id="btn-ocr" onclick="performOCR(event)" title="OCR">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h5v5H4zM15 4h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5z"/></svg>
-                            <span>OCR</span>
                         </button>
                     </div>
                     <button class="sidebar-btn" id="mouse-toggle-btn" onclick="window.toggleMouseOverlay()" title="Show Mouse">
@@ -1500,7 +1461,7 @@
                 
                 <div id="sidebar-advanced" class="sidebar-advanced" style="display: none;">
                     <div class="sidebar-section">
-                        <div class="section-title">🛠️ Advanced Tab</div>
+                        <div class="section-title">Advanced Tab</div>
                         
                         <!-- Toggle Input Container -->
                         <div class="toggle-input-container">
@@ -1512,23 +1473,6 @@
                                 <div class="keystroke-display" id="keystroke-display">
                                     <span class="keystroke-placeholder">Press keys on host to capture keystrokes...</span>
                                 </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Screen Recording Toggle -->
-                        <div class="toggle-input-container">
-                            <button class="recording-toggle-btn" id="recording-toggle-btn" onclick="toggleScreenRecording()">
-                                <span>Record</span>
-                                <div class="recording-indicator" id="recording-indicator"></div>
-                            </button>
-                            <div style="display:flex; gap:6px; align-items:center;">
-                                <label for="record-res" style="color:#9ca3af; font-size:11px;">Resolution</label>
-                                <select id="record-res" class="input-control" style="flex:none; width:auto; min-width: 120px;">
-                                    <option value="native">Native</option>
-                                    <option value="1920x1080" selected>1080p (HD)</option>
-                                    <option value="1280x720">720p (HD)</option>
-                                </select>
-                                <button class="sidebar-btn" style="flex:none; padding:6px 10px;" onclick="applyRecordingResolution()">Apply</button>
                             </div>
                         </div>
                         
@@ -1571,6 +1515,12 @@
                             <button class="sidebar-btn" id="audio-toggle" onclick="toggleAudio(event)" title="Audio">
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19 12a4 4 0 0 0-4-4"/><path d="M19 12a4 4 0 0 1-4 4"/></svg>
                                 <span class="btn-label">Audio</span>
+                            </button>
+                        </div>
+                        <div class="btn-group">
+                            <button class="sidebar-btn" id="mic-toggle" onclick="toggleMic(event)" title="Mic">
+                                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                                <span class="btn-label">Mic</span>
                             </button>
                         </div>
                         <div class="input-group">
@@ -1620,7 +1570,7 @@
             <div class="terminal-header">
                 <div>SSH Terminal</div>
                 <div>
-                    <button onclick="openTerminalNewTab()" title="Open in new tab" style="background:#334155;color:#fff;border:1px solid #475569;border-radius:4px;padding:4px 8px;cursor:pointer;margin-right:6px;">⛶</button>
+                    <button onclick="openTerminalNewTab()" title="Open in new tab" style="background:#334155;color:#fff;border:1px solid #475569;border-radius:4px;padding:4px 8px;cursor:pointer;margin-right:6px;">Open</button>
                     <button onclick="toggleTerminal()" style="background:#334155;color:#fff;border:1px solid #475569;border-radius:4px;padding:4px 8px;cursor:pointer;">Close</button>
                 </div>
             </div>
@@ -1663,7 +1613,7 @@
                 </div>
                 <div class="notepad-ctrl-tab" onclick="toggleControlPanel()">
                     <div>Control Panel</div>
-                    <div class="ctrl-arrow" id="ctrl-arrow">▲</div>
+                    <div class="ctrl-arrow" id="ctrl-arrow">^</div>
                 </div>
                 <div class="notepad-control" id="notepad-control">
                     <div class="control-buttons">
@@ -1680,11 +1630,11 @@
                         </button>
                         <div class="wpm-col">
                           <button class="wpm-pill" id="np-speed-up" title="Speed Up" aria-label="Increase WPM">
-                            <span class="arrow">↑</span>
+                            <span class="arrow">Up</span>
                             <span class="wpm-text">120 WPM</span>
                           </button>
                           <button class="wpm-pill" id="np-speed-down" title="Speed Down" aria-label="Decrease WPM">
-                            <span class="arrow">↓</span>
+                            <span class="arrow">Down</span>
                             <span class="wpm-text">120 WPM</span>
                           </button>
                         </div>
@@ -1941,66 +1891,6 @@
             console.error('Error sending keystroke capture toggle:', e);
         }
     }
-    
-    function toggleScreenRecording() {
-        const recordingBtn = document.getElementById('recording-toggle-btn');
-        const recordingIndicator = document.getElementById('recording-indicator');
-        
-        if (!recordingBtn || !recordingIndicator) return;
-        
-        const isActive = recordingBtn.classList.contains('active');
-        
-        if (isActive) {
-            // Stop recording
-            recordingBtn.classList.remove('active');
-            recordingIndicator.classList.remove('recording');
-            sendScreenRecordingToggle(false);
-        } else {
-            // Start recording
-            recordingBtn.classList.add('active');
-            recordingIndicator.classList.add('recording');
-            sendScreenRecordingToggle(true);
-        }
-    }
-    
-    function sendScreenRecordingToggle(enabled) {
-        try {
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({
-                    action: 'toggle_screen_recording',
-                    enabled: enabled
-                }));
-            }
-        } catch (e) {
-            console.error('Error sending screen recording toggle:', e);
-        }
-    }
-
-    function applyRecordingResolution() {
-        const sel = document.getElementById('record-res');
-        if (!sel) return;
-        const val = sel.value;
-        let width = null, height = null;
-        if (val && val !== 'native') {
-            const parts = val.split('x');
-            if (parts.length === 2) {
-                width = parseInt(parts[0], 10);
-                height = parseInt(parts[1], 10);
-            }
-        }
-        try {
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({
-                    action: 'set_recording_resolution',
-                    width: width,
-                    height: height
-                }));
-            }
-        } catch (e) {
-            console.error('Error sending recording resolution:', e);
-        }
-    }
-    
     let keystrokeCaptureActive = false;
     let keystrokeBuffer = [];
     
@@ -2582,7 +2472,7 @@
             function updateSpeedLabel(){
                 const clampedWpm = Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, roboWpm));
                 const minBand = Math.max(ROBO_WPM_MIN, clampedWpm - ROBO_WPM_BAND);
-                const bandText = Math.floor(minBand) + '–' + Math.floor(clampedWpm) + ' wpm';
+                const bandText = Math.floor(minBand) + '' + Math.floor(clampedWpm) + ' wpm';
                 try { document.querySelectorAll('.wpm-text').forEach(function(el){ el.textContent = bandText.toUpperCase(); }); } catch(_) { }
                 if (speedLabel) { speedLabel.textContent = 'Speed: ' + bandText; }
             }
@@ -2832,6 +2722,55 @@
         if(!__snapshotTimer){ __snapshotTimer = setInterval(__snapshotOnce, 1000); }
     }
 
+    let videoDecodeBusy = false;
+    let pendingVideoBlob = null;
+
+    function drawDecodedFrame(source) {
+        const width = source.width || source.naturalWidth;
+        const height = source.height || source.naturalHeight;
+        if (width && height && (canvas.width !== width || canvas.height !== height)) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+        frameCount++;
+    }
+
+    async function renderVideoBlob(blob) {
+        pendingVideoBlob = blob;
+        if (videoDecodeBusy) return;
+        videoDecodeBusy = true;
+        try {
+            while (pendingVideoBlob) {
+                const nextBlob = pendingVideoBlob;
+                pendingVideoBlob = null;
+                if (window.createImageBitmap) {
+                    const bitmap = await createImageBitmap(nextBlob);
+                    drawDecodedFrame(bitmap);
+                    if (bitmap.close) bitmap.close();
+                } else {
+                    await new Promise((resolve, reject) => {
+                        const image = new Image();
+                        const url = URL.createObjectURL(nextBlob);
+                        image.onload = () => {
+                            drawDecodedFrame(image);
+                            URL.revokeObjectURL(url);
+                            resolve();
+                        };
+                        image.onerror = () => {
+                            URL.revokeObjectURL(url);
+                            reject(new Error('Frame decode failed'));
+                        };
+                        image.src = url;
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('Video frame render failed:', error);
+        } finally {
+            videoDecodeBusy = false;
+        }
+    }
     function connectVideo() {
         const videoSocket = new WebSocket(`${WSS_URL}/video`);
         videoSocket.binaryType = 'blob';
@@ -2843,21 +2782,12 @@
         videoSocket.onmessage = (event) => {
             // Handle both binary (image) and text (JSON) messages
             if (event.data instanceof Blob) {
-                // Binary data - video frame
-                frameCount++;
-                const image = new Image();
-                image.onload = () => {
-                    canvas.width = image.naturalWidth;
-                    canvas.height = image.naturalHeight;
-                    ctx.drawImage(image, 0, 0);
-                    URL.revokeObjectURL(image.src);
-                };
-                image.src = URL.createObjectURL(event.data);
+                renderVideoBlob(event.data);
             } else {
                 // Text data - JSON messages
                 try {
                     const data = JSON.parse(event.data);
-                    console.log("📨 Video message received:", data);
+                    console.log(" Video message received:", data);
                     
                     if (data.type === 'available_capture_methods') {
                         updateCaptureMethodOptions(data.methods, data.current);
@@ -2889,7 +2819,7 @@
         try { window.inputSocket = inputSocket; } catch(_) {}
         
         inputSocket.onopen = function() {
-            console.log("🔌 Input socket connected");
+            console.log(" Input socket connected");
             updateStatus("Connected");
             window.inputSocket = inputSocket; // Make it globally accessible
             fetchPublicUrl(inputSocket);
@@ -2955,7 +2885,7 @@
                     const btn = document.getElementById('btn-refresh-url');
                     const linkText = document.getElementById('link-text');
                     // Restore button
-                    try { if (btn) { btn.disabled = false; btn.innerHTML = '⟳'; } } catch(_) {}
+                    try { if (btn) { btn.disabled = false; btn.innerHTML = 'Refresh'; } } catch(_) {}
                     // Reset cursor from loading to pointer
                     document.body.style.cursor = 'pointer';
                     
@@ -2974,9 +2904,9 @@
                 } else if (data.type === 'clipboard_content') {
                     // Handle clipboard content from server
                     navigator.clipboard.writeText(data.data).then(() => {
-                        console.log("📋 Clipboard set successfully on client.");
+                        console.log(" Clipboard set successfully on client.");
                     }).catch(err => {
-                        console.error("📋 Failed to set clipboard on client:", err);
+                        console.error(" Failed to set clipboard on client:", err);
                     });
                 }
             } catch (e) {
@@ -2985,13 +2915,13 @@
         };
         
         inputSocket.onclose = function() {
-            console.log("🔌 Input socket disconnected");
+            console.log(" Input socket disconnected");
             updateStatus("Disconnected");
             setTimeout(() => { if (typeof window.connectInput === 'function') window.connectInput(); }, 1000);
         };
         
         inputSocket.onerror = function(error) {
-            console.error("🔌 Input socket error:", error);
+            console.error(" Input socket error:", error);
             updateStatus("Connection Error");
         };
 
@@ -3114,16 +3044,16 @@
             window.inputSocket = new WebSocket(WS_INPUT_URL);
 
             window.inputSocket.onopen = function () {
-              console.log('🔌 Input socket connected');
-              attachCursorHandler(window.inputSocket);     // <— ensure handler is attached
-              if (window.showMouseOverlay) sendSubscribe(true); // <— resubscribe after reconnect
+              console.log(' Input socket connected');
+              attachCursorHandler(window.inputSocket);     // < ensure handler is attached
+              if (window.showMouseOverlay) sendSubscribe(true); // < resubscribe after reconnect
             };
             window.inputSocket.onclose = function () {
-              console.log('🔌 Input socket disconnected; reconnecting...');
+              console.log(' Input socket disconnected; reconnecting...');
               setTimeout(connectInput, 1000);
             };
             window.inputSocket.onerror = function (e) {
-              console.error('🔌 Input socket error:', e);
+              console.error(' Input socket error:', e);
             };
           };
 
@@ -3199,6 +3129,7 @@
         document.addEventListener('contextmenu', e => e.preventDefault());
         document.addEventListener('mousedown', event => {
             if (isOverLocalUI(event)) return;
+            if (window.__snapSelecting) return;
             isDragging = true;
             const coords = getCanvasCoordinates(event);
             if (coords) {
@@ -3209,6 +3140,7 @@
         });
         document.addEventListener('mouseup', event => {
             if (isOverLocalUI(event)) return;
+            if (window.__snapSelecting) return;
             isDragging = false;
             const coords = getCanvasCoordinates(event);
             if (coords) {
@@ -3219,6 +3151,7 @@
         });
         document.addEventListener('mousemove', event => {
             if (isOverLocalUI(event)) return;
+            if (window.__snapSelecting) return;
             const coords = getCanvasCoordinates(event);
             if (coords) {
                 sendEvent({ action: isDragging ? 'drag' : 'move', x: coords.x, y: coords.y });
@@ -3329,7 +3262,7 @@
             setTimeout(() => {
                 linkText.textContent = 'Error: No connection to server';
                 document.body.style.cursor = 'pointer';
-                try { const b = document.getElementById('btn-refresh-url'); if (b) { b.disabled = false; b.innerHTML = '⟳'; } } catch(_) {}
+                try { const b = document.getElementById('btn-refresh-url'); if (b) { b.disabled = false; b.innerHTML = 'Refresh'; } } catch(_) {}
             }, 2000);
         }
     }
@@ -3339,14 +3272,14 @@
         const btn = e.currentTarget || e.target;
 
         if (!linkText || linkText.startsWith('Getting') || linkText.startsWith('Local')) {
-            flashBtn(btn, '❌ No URL');
+            flashBtn(btn, 'No URL');
             return;
         }
 
         // Try modern clipboard API first
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(linkText)
-                .then(() => flashBtn(btn, '✅ Copied!'))
+                .then(() => flashBtn(btn, 'Copied!'))
                 .catch(() => legacyCopy());
         } else {
             legacyCopy();
@@ -3361,7 +3294,7 @@
             ta.select();
             try { document.execCommand('copy'); } catch (_) {}
             document.body.removeChild(ta);
-            flashBtn(btn, '✅ Copied!');
+            flashBtn(btn, 'Copied!');
         }
 
         function flashBtn(button, text) {
@@ -3380,7 +3313,7 @@
         ta.select();
         try { document.execCommand('copy'); } catch (_) {}
         document.body.removeChild(ta);
-        showTempStatus(btn, '✅ Copied!');
+        showTempStatus(btn, 'Copied!');
     }
 
     function showTempStatus(btn, msg) {
@@ -3424,7 +3357,7 @@
         trigger.addEventListener('contextmenu', function(e){
             e.preventDefault();
             const fakeBtn = { currentTarget: { innerHTML: '', disabled: false } };
-            try { takeSnapshot(fakeBtn); } catch(_) {}
+            try { takeFullSnapshot(fakeBtn); } catch(_) {}
         });
 
         trigger.addEventListener('mousedown', function(e) {
@@ -3647,64 +3580,170 @@
         connectVideo();
         window.connectInput();
         if (audioPlaying) startAudio();
+        if (micPlaying) startMic();
+    }
+    function getRenderedCanvasMetrics() {
+        const rect = canvas.getBoundingClientRect();
+        const canvasRatio = canvas.width && canvas.height ? canvas.width / canvas.height : rect.width / Math.max(1, rect.height);
+        const rectRatio = rect.width / Math.max(1, rect.height);
+        let renderWidth = rect.width;
+        let renderHeight = rect.height;
+        if (rectRatio > canvasRatio) {
+            renderHeight = rect.height;
+            renderWidth = renderHeight * canvasRatio;
+        } else {
+            renderWidth = rect.width;
+            renderHeight = renderWidth / canvasRatio;
+        }
+        const left = rect.left + (rect.width - renderWidth) / 2;
+        const top = rect.top + (rect.height - renderHeight) / 2;
+        return { left, top, width: renderWidth, height: renderHeight };
     }
 
-    function takeSnapshot(event) {
+    function pointToSnapshotNorm(event) {
+        const box = getRenderedCanvasMetrics();
+        const x = (event.clientX - box.left) / box.width;
+        const y = (event.clientY - box.top) / box.height;
+        return {
+            x: Math.max(0, Math.min(1, x)),
+            y: Math.max(0, Math.min(1, y))
+        };
+    }
+
+    function setSnapshotBox(start, end) {
+        const box = document.getElementById('snapshot-selection-box');
+        if (!box) return;
+        const left = Math.min(start.clientX, end.clientX);
+        const top = Math.min(start.clientY, end.clientY);
+        const width = Math.abs(end.clientX - start.clientX);
+        const height = Math.abs(end.clientY - start.clientY);
+        box.style.left = `${left}px`;
+        box.style.top = `${top}px`;
+        box.style.width = `${width}px`;
+        box.style.height = `${height}px`;
+        box.style.display = 'block';
+    }
+
+    function clearSnapshotSelection() {
+        window.__snapSelecting = false;
+        canvas.classList.remove('snapshot-selecting');
+        const box = document.getElementById('snapshot-selection-box');
+        if (box) box.style.display = 'none';
+    }
+
+    async function downloadSnapshotFromUrl(url, btn, originalText) {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const btn = event.currentTarget;
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<span class="loading"></span> Snap';
-        btn.disabled = true;
-
-        // Fetch a fresh, lossless PNG from the server regardless of stream quality
-        fetch('/snapshot', { cache: 'no-store' })
-            .then(async res => {
-                if (!res.ok) throw new Error('Snapshot failed');
-                const blob = await res.blob();
-
-                // Download
-                const link = document.createElement('a');
-                link.download = `snapshot-${timestamp}.png`;
-                link.href = URL.createObjectURL(blob);
-                document.body.appendChild(link);
-                link.click();
-                URL.revokeObjectURL(link.href);
-                document.body.removeChild(link);
-
-                // Try to copy to clipboard (best effort)
-                if (navigator.clipboard && window.ClipboardItem) {
-                    try {
-                        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-                        btn.innerHTML = '✅ Copied!';
-                    } catch (e) {
-                        btn.innerHTML = '✅ Saved';
-                    }
-                } else {
-                    btn.innerHTML = '✅ Saved';
-                }
-            })
-            .catch(err => {
-                console.error('Snapshot error:', err);
-                // Fallback: capture canvas if server snapshot fails
-                try {
-                    const canvas = document.getElementById('screen');
-                    const link = document.createElement('a');
-                    link.download = `snapshot-${timestamp}.png`;
-                    link.href = canvas.toDataURL('image/png');
-                    link.click();
-                    btn.innerHTML = '✅ Saved';
-                } catch (_) {
-                    btn.innerHTML = '❌ Failed';
-                }
-            })
-            .finally(() => {
+        try {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) throw new Error('Snapshot failed');
+            const blob = await res.blob();
+            const link = document.createElement('a');
+            link.download = `snapshot-${timestamp}.png`;
+            link.href = URL.createObjectURL(blob);
+            document.body.appendChild(link);
+            link.click();
+            URL.revokeObjectURL(link.href);
+            document.body.removeChild(link);
+            if (navigator.clipboard && window.ClipboardItem) {
+                try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); } catch (_) {}
+            }
+            if (btn) btn.innerHTML = 'Saved';
+        } catch (err) {
+            console.error('Snapshot error:', err);
+            if (btn) btn.innerHTML = 'Failed';
+        } finally {
+            if (btn) {
                 setTimeout(() => {
                     btn.innerHTML = originalText;
                     btn.disabled = false;
-                }, 2000);
-            });
+                }, 1200);
+            }
+        }
     }
 
+    function takeFullSnapshot(event) {
+        const btn = event && event.currentTarget ? event.currentTarget : null;
+        const originalText = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<span class="loading"></span> Snap';
+            btn.disabled = true;
+        }
+        downloadSnapshotFromUrl('/snapshot', btn, originalText);
+    }
+
+    function takeSnapshot(event) {
+        const btn = event && event.currentTarget ? event.currentTarget : null;
+        if (!canvas.width || !canvas.height) {
+            takeFullSnapshot(event);
+            return;
+        }
+        const originalText = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = 'Select area';
+            btn.disabled = true;
+        }
+        window.__snapSelecting = true;
+        canvas.classList.add('snapshot-selecting');
+        let startClient = null;
+        let startNorm = null;
+
+        const cleanup = () => {
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('mousemove', onMove, true);
+            document.removeEventListener('mouseup', onUp, true);
+            document.removeEventListener('keydown', onKey, true);
+            clearSnapshotSelection();
+        };
+        const resetButton = () => {
+            if (btn) {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        };
+        const onKey = (ev) => {
+            if (ev.key === 'Escape') {
+                cleanup();
+                resetButton();
+            }
+        };
+        const onDown = (ev) => {
+            if (ev.button !== 0 || ev.target !== canvas) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            startClient = { clientX: ev.clientX, clientY: ev.clientY };
+            startNorm = pointToSnapshotNorm(ev);
+            setSnapshotBox(startClient, startClient);
+        };
+        const onMove = (ev) => {
+            if (!startClient) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            setSnapshotBox(startClient, { clientX: ev.clientX, clientY: ev.clientY });
+        };
+        const onUp = (ev) => {
+            if (!startClient) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const endNorm = pointToSnapshotNorm(ev);
+            const dx = Math.abs(ev.clientX - startClient.clientX);
+            const dy = Math.abs(ev.clientY - startClient.clientY);
+            cleanup();
+            if (dx < 4 || dy < 4) {
+                downloadSnapshotFromUrl('/snapshot', btn, originalText);
+                return;
+            }
+            const x0 = Math.min(startNorm.x, endNorm.x).toFixed(6);
+            const y0 = Math.min(startNorm.y, endNorm.y).toFixed(6);
+            const x1 = Math.max(startNorm.x, endNorm.x).toFixed(6);
+            const y1 = Math.max(startNorm.y, endNorm.y).toFixed(6);
+            downloadSnapshotFromUrl(`/snapshot?x0=${x0}&y0=${y0}&x1=${x1}&y1=${y1}`, btn, originalText);
+        };
+
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+        document.addEventListener('keydown', onKey, true);
+    }
     function toggleAudio(event) {
         const btn = event.currentTarget;
         const label = (text) => {
@@ -3840,38 +3879,124 @@
         audioBufferQueue = [];
     }
 
-    function performOCR(event) {
-        if (window.__modeChallenger || document.cookie.indexOf('zadoo_mode_challenger=1') !== -1) {
-            try { const b = document.getElementById('btn-ocr'); if (b) { b.disabled = true; b.title='Disabled'; } } catch(_) {}
+    function setMicButtonLabel(text) {
+        const btn = document.getElementById('mic-toggle');
+        const label = btn ? btn.querySelector('.btn-label') : null;
+        if (label) label.textContent = text;
+    }
+
+    function toggleMic(event) {
+        const btn = event.currentTarget;
+        if (micPlaying) {
+            stopMic();
+            setMicButtonLabel('Mic');
             return;
         }
-        const canvas = document.getElementById('screen');
-        const btn = event.currentTarget;
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<span class="loading"></span> OCR';
+        setMicButtonLabel('Enabling...');
         btn.disabled = true;
+        startMic().then(ok => {
+            btn.disabled = false;
+            if (ok) {
+                setMicButtonLabel('Disable Mic');
+            } else {
+                setMicButtonLabel('Mic Failed');
+                setTimeout(() => setMicButtonLabel('Mic'), 2000);
+            }
+        });
+    }
 
-        const dataUrl = canvas.toDataURL('image/png');
-        Tesseract.recognize(dataUrl, 'eng')
-            .then(({ data: { text } }) => {
-                navigator.clipboard.writeText(text).then(() => {
-                    console.log('OCR text copied to clipboard.');
-                    btn.innerHTML = '✅ Text Copied';
-                }).catch(err => {
-                    console.error('Failed to copy OCR text: ', err);
-                    btn.innerHTML = '❌ Copy Failed';
-                });
-            })
-            .catch(err => {
-                console.error('OCR failed: ', err);
-                btn.innerHTML = '❌ OCR Failed';
-            })
-            .finally(() => {
-                setTimeout(() => {
-                    btn.innerHTML = originalText;
-                    btn.disabled = false;
-                }, 2000);
+    async function startMic() {
+        try {
+            if (!micAudioContext) {
+                micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+            }
+            micSocket = new WebSocket(`${WSS_URL}/mic`);
+            micSocket.binaryType = 'arraybuffer';
+            pendingMicHeader = true;
+            micFormat = null;
+            micBufferQueue = [];
+
+            let playPtr = 0;
+            const bufferSize = 512;
+            micScriptNode = micAudioContext.createScriptProcessor(bufferSize, 0, 1);
+            micScriptNode.onaudioprocess = function(e) {
+                const out = e.outputBuffer.getChannelData(0);
+                let i = 0;
+                while (i < out.length) {
+                    if (micBufferQueue.length === 0) break;
+                    const buf = micBufferQueue[0];
+                    const remaining = buf.length - playPtr;
+                    const toCopy = Math.min(remaining, out.length - i);
+                    out.set(buf.subarray(playPtr, playPtr + toCopy), i);
+                    i += toCopy;
+                    playPtr += toCopy;
+                    if (playPtr >= buf.length) {
+                        micBufferQueue.shift();
+                        playPtr = 0;
+                    }
+                }
+                for (; i < out.length; i++) out[i] = 0;
+            };
+            micScriptNode.connect(micAudioContext.destination);
+
+            const readyPromise = new Promise(resolve => {
+                const timeout = setTimeout(() => resolve(false), 6000);
+                const finish = (ok) => { clearTimeout(timeout); resolve(ok); };
+                micSocket.onmessage = (ev) => {
+                    if (pendingMicHeader) {
+                        try {
+                            const txt = new TextDecoder('utf-8').decode(new Uint8Array(ev.data));
+                            const meta = JSON.parse(txt);
+                            if (meta && meta.type === 'audio_format') {
+                                micFormat = meta;
+                                pendingMicHeader = false;
+                                finish(true);
+                            }
+                        } catch (_) {}
+                        return;
+                    }
+                    const int16 = new Int16Array(ev.data);
+                    const float32 = new Float32Array(int16.length);
+                    for (let i = 0; i < int16.length; i++) float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+                    micBufferQueue.push(float32);
+                    const sampPerMs = (micFormat && micFormat.samplerate) ? (micFormat.samplerate / 1000) : 48;
+                    const maxQueued = Math.floor(sampPerMs * 120);
+                    let total = 0;
+                    for (let k = 0; k < micBufferQueue.length; k++) total += micBufferQueue[k].length;
+                    while (total > maxQueued && micBufferQueue.length > 0) {
+                        const dropped = micBufferQueue.shift();
+                        total -= (dropped ? dropped.length : 0);
+                        playPtr = 0;
+                    }
+                };
+                micSocket.onerror = () => finish(false);
+                micSocket.onclose = () => finish(false);
             });
+
+            const ok = await readyPromise;
+            if (ok) {
+                micPlaying = true;
+                micSocket.onclose = () => { stopMic(); };
+                micSocket.onerror = () => { stopMic(); };
+                return true;
+            }
+            stopMic(false);
+            return false;
+        } catch (e) {
+            console.error('startMic failed', e);
+            stopMic(false);
+            return false;
+        }
+    }
+
+    function stopMic(updateLabel = true) {
+        micPlaying = false;
+        try { if (micSocket) micSocket.close(); } catch (_) {}
+        try { if (micScriptNode) micScriptNode.disconnect(); } catch (_) {}
+        micScriptNode = null;
+        micSocket = null;
+        micBufferQueue = [];
+        if (updateLabel) setMicButtonLabel('Mic');
     }
 
         // FPS counter and status updates
