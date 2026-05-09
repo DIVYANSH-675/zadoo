@@ -701,14 +701,14 @@ class RoutesMixin:
     async def handle_ocr(self, path):
         """
         HTTP GET /api/ocr?left=&top=&right=&bottom=[&full=1][&save=1][&trace=1]
-          - Only PaddleOCR is used.
+          - Uses RapidOCR by default; PaddleOCR can be forced with ZADOO_OCR_ENGINE=paddleocr.
           - Writes extremely detailed logs under logger 'ocr'.
           - Optional: &save=1 saves a debug image with OCR boxes to ./logs/.
           - Optional: &trace=1 adds fine-grained line tracing for THIS function.
         Response JSON:
         {
           "ok": true/false,
-          "engine": "paddleocr",
+          "engine": "paddleocr" | "rapidocr",
           "rect": {"left":..., "top":..., "right":..., "bottom":...},
           "image_size": {"w":..., "h":...},
           "lines": [
@@ -735,20 +735,21 @@ class RoutesMixin:
         except Exception:
             cv2 = None
 
-        # PaddleOCR only (no tesseract, no paddlex)
-        try:
-            from paddleocr import PaddleOCR
-        except Exception as e:
-            # If paddleocr isn't available we return a clear error
-            msg = f"PaddleOCR import failed: {e}"
-            logging.getLogger("ocr").error(msg, exc_info=True)
-            body = json.dumps({"ok": False, "error": msg}).encode("utf-8")
-            return (HTTPStatus.INTERNAL_SERVER_ERROR,
-                    [("Content-Type", "application/json; charset=utf-8"),
-                     ("Cache-Control", "no-store")],
-                    body)
-
         olog = logging.getLogger("ocr")
+        ocr_preference = os.getenv("ZADOO_OCR_ENGINE", "rapidocr").strip().lower()
+        prefer_paddle = (
+            ocr_preference in {"paddle", "paddleocr"}
+            and not getattr(self, "_paddle_ocr_disabled", False)
+        )
+        PaddleOCR = None
+        paddle_import_error = None
+        if prefer_paddle:
+            try:
+                from paddleocr import PaddleOCR
+            except Exception as e:
+                paddle_import_error = e
+                self._paddle_ocr_disabled = True
+                olog.warning("PaddleOCR import failed; using RapidOCR: %s", e, exc_info=True)
 
         # --- optional per-call line trace (for "every line" visibility) -----------
         def _make_line_tracer(files_whitelist=None):
@@ -860,7 +861,7 @@ class RoutesMixin:
                 }
             olog.debug(f"Effective OCR rect: {rect}")
 
-            # ensure np array is in the format PaddleOCR expects (OpenCV BGR is fine)
+            # ensure np array is in the format OCR engines expect (OpenCV BGR is fine)
             np_img = np.array(pil_img)
             if cv2 is not None:
                 if np_img.ndim == 2:
@@ -868,35 +869,72 @@ class RoutesMixin:
                 else:
                     img_bgr = cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR)
             else:
-                # PaddleOCR also works with RGB arrays; use as-is if cv2 missing
+                # The fallback OCR path can also handle RGB arrays if cv2 is missing.
                 img_bgr = np_img
-
-            # lazy-create (and cache) a single PaddleOCR instance
-            if not hasattr(self, "_paddle_ocr") or self._paddle_ocr is None:
-                t0_init = time.perf_counter()
-                self._paddle_ocr = PaddleOCR(
-                    use_angle_cls=True,  # better for rotated UI fragments
-                    lang="en",
-                    show_log=False       # we control logs ourselves
-                )
-                init_ms = (time.perf_counter() - t0_init) * 1000.0
-                olog.info(f"PaddleOCR initialized (first use). init_ms={init_ms:.2f}")
 
             # run OCR
             t0_ocr = time.perf_counter()
-            raw = self._paddle_ocr.ocr(img_bgr, cls=True)
+            raw = None
+            engine = "rapidocr"
+            if prefer_paddle and PaddleOCR is not None:
+                try:
+                    # lazy-create (and cache) a single PaddleOCR instance only when explicitly requested
+                    if not hasattr(self, "_paddle_ocr") or self._paddle_ocr is None:
+                        t0_init = time.perf_counter()
+                        try:
+                            import inspect as _inspect
+                            params = _inspect.signature(PaddleOCR).parameters
+                        except Exception:
+                            params = {}
+                        ocr_kwargs = {"lang": "en"}
+                        if "use_angle_cls" in params:
+                            ocr_kwargs["use_angle_cls"] = True
+                        elif "use_textline_orientation" in params:
+                            ocr_kwargs["use_textline_orientation"] = True
+                        if "show_log" in params:
+                            ocr_kwargs["show_log"] = False
+                        self._paddle_ocr = PaddleOCR(**ocr_kwargs)
+                        init_ms = (time.perf_counter() - t0_init) * 1000.0
+                        olog.info(f"PaddleOCR initialized (first use). init_ms={init_ms:.2f}")
+                    raw = self._paddle_ocr.ocr(img_bgr)
+                    engine = "paddleocr"
+                except Exception as paddle_error:
+                    self._paddle_ocr_disabled = True
+                    olog.warning("PaddleOCR runtime failed; falling back to RapidOCR: %s", paddle_error, exc_info=True)
+
+            if raw is None:
+                if paddle_import_error is not None:
+                    olog.warning("PaddleOCR unavailable; using RapidOCR: %s", paddle_import_error)
+                if not hasattr(self, "_rapid_ocr") or self._rapid_ocr is None:
+                    from rapidocr_onnxruntime import RapidOCR
+                    self._rapid_ocr = RapidOCR()
+                raw, _rapid_elapsed = self._rapid_ocr(img_bgr)
             ocr_ms = (time.perf_counter() - t0_ocr) * 1000.0
 
-            # parse result (PaddleOCR returns [ [ (box, (text, conf)), ... ] ])
+            # parse result (PaddleOCR legacy: [ [ (box, (text, conf)), ... ] ]; RapidOCR: [box, text, conf])
             lines = []
             plain = []
             n_boxes = 0
             if raw and isinstance(raw, list):
                 # single image case: raw[0] is list of lines
-                items = raw[0] if (len(raw) > 0 and isinstance(raw[0], list)) else raw
+                if (
+                    len(raw) > 0
+                    and isinstance(raw[0], list)
+                    and not (len(raw[0]) >= 3 and isinstance(raw[0][1], str))
+                ):
+                    items = raw[0]
+                else:
+                    items = raw
                 for item in items or []:
                     try:
-                        box, (txt, conf) = item
+                        if isinstance(item, dict):
+                            box = item.get("box") or item.get("dt_polys") or item.get("poly")
+                            txt = item.get("text") or item.get("rec_text") or ""
+                            conf = item.get("confidence") or item.get("score") or item.get("rec_score")
+                        elif isinstance(item, (list, tuple)) and len(item) >= 3 and isinstance(item[1], str):
+                            box, txt, conf = item[:3]
+                        else:
+                            box, (txt, conf) = item
                         # flatten the 4-point polygon
                         flat = []
                         for (x, y) in box:
@@ -935,7 +973,7 @@ class RoutesMixin:
 
             payload = {
                 "ok": True,
-                "engine": "paddleocr",
+                "engine": engine,
                 "rect": rect,
                 "image_size": {"w": w, "h": h},
                 "lines": lines,

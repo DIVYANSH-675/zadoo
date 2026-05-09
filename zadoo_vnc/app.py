@@ -208,7 +208,13 @@ def main():
     if getattr(sys, "frozen", False):
         install_startup_task()
 
-    protector = ProcessProtector()
+    use_process_protector = os.environ.get("ZADOO_DISABLE_PROCESS_PROTECTOR", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    protector = ProcessProtector() if use_process_protector else None
     _ = protector
 
     from .dependencies import HAS_MSS, HAS_PIL, HAS_PYAUTOGUI, WIN32_AVAILABLE
