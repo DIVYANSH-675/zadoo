@@ -10,7 +10,7 @@ from .dependencies import *
 
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
-    def __init__(self, fps=30, quality=65):
+    def __init__(self, fps=60, quality=65):
         super().__init__(daemon=True)
         self.latest_frame_jpeg = None
         self.frame_lock = threading.Lock()

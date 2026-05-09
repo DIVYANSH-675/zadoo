@@ -240,11 +240,8 @@ class RoutesMixin:
             self.screen_capturer.quality = value
         return value
 
-    def _apply_fps(self, raw_value, default=30):
-        try:
-            value = max(1, min(120, int(raw_value)))
-        except Exception:
-            value = max(1, min(120, int(default)))
+    def _apply_fps(self, raw_value=None, default=60):
+        value = 60
         self.current_fps = value
         if self.screen_capturer:
             self.screen_capturer.fps = value

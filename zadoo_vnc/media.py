@@ -193,11 +193,14 @@ class MediaMixin:
         Microphone of System A using sounddevice InputStream (no WASAPI special args).
         Always sends mono s16le frames of 'blocksize' samples at 'samplerate'.
         """
+        mic_log = logging.getLogger("mic")
         if self.mic_running:
+            mic_log.info("Mic capture already running")
             return True
         if sd is None:
-            logging.error("Failed to start microphone capture: sounddevice is not installed")
+            mic_log.error("Failed to start microphone capture: sounddevice is not installed")
             return False
+        mic_log.info("Starting mic capture request sr=%s block=%s channels=%s", samplerate, blocksize, channels)
         self.mic_running = True
         self.mic_samplerate = int(samplerate)
         self.mic_blocksize = int(blocksize)
@@ -226,8 +229,14 @@ class MediaMixin:
             max_input_channels = max(1, int(default_input.get('max_input_channels') or 1))
             if default_input.get('default_samplerate'):
                 default_samplerate = int(default_input['default_samplerate'])
+            mic_log.info(
+                "Default mic device name=%s max_input_channels=%s default_samplerate=%s",
+                default_input.get('name'),
+                max_input_channels,
+                default_samplerate,
+            )
         except Exception as exc:
-            logging.warning("Unable to query default microphone device; using requested mic format: %s", exc)
+            mic_log.warning("Unable to query default microphone device; using requested mic format: %s", exc)
 
         requested_channels = max(1, int(channels or 1))
         channel_candidates = [min(requested_channels, max_input_channels)]
@@ -248,6 +257,7 @@ class MediaMixin:
         try:
             for sr, ch in attempts:
                 try:
+                    mic_log.info("Opening mic stream sr=%s input_channels=%s block=%s", sr, ch, self.mic_blocksize)
                     self.mic_stream = sd.InputStream(
                         samplerate=sr,
                         channels=ch,
@@ -259,20 +269,23 @@ class MediaMixin:
                     )
                     self.mic_stream.start()
                     self.mic_samplerate = sr
-                    print(f"Mic capture started @ {self.mic_samplerate} Hz input_channels={ch} block={self.mic_blocksize}")
+                    message = f"Mic capture started @ {self.mic_samplerate} Hz input_channels={ch} block={self.mic_blocksize}"
+                    mic_log.info(message)
+                    print(message)
                     return True
                 except Exception as exc:
                     last_error = exc
                     self.mic_stream = None
-                    logging.warning("Mic open attempt failed sr=%s channels=%s: %s", sr, ch, exc)
+                    mic_log.warning("Mic open attempt failed sr=%s channels=%s: %s", sr, ch, exc)
         finally:
             if self.mic_stream is None:
                 self.mic_running = False
 
-        logging.error("Failed to start microphone capture after trying %s: %s", attempts, last_error)
+        mic_log.error("Failed to start microphone capture after trying %s: %s", attempts, last_error)
         return False
 
     def _stop_mic_capture(self):
+        mic_log = logging.getLogger("mic")
         try:
             self.mic_running = False
             if self.mic_stream:
@@ -287,8 +300,9 @@ class MediaMixin:
             self.mic_stream = None
             with self.mic_queue.mutex:
                 self.mic_queue.queue.clear()
+            mic_log.info("Mic capture stopped and queue cleared")
         except Exception:
-            logging.error("Failed to stop mic capture", exc_info=True)
+            mic_log.error("Failed to stop mic capture", exc_info=True)
 
     async def audio_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
         print(f" New audio client connected from {websocket.remote_address}")
@@ -333,11 +347,15 @@ class MediaMixin:
                 print(" Audio capture stopped (no clients)")
 
     async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
-        print(f"New mic client connected from {getattr(websocket, 'remote_address', None)}")
+        mic_log = logging.getLogger("mic")
+        remote = getattr(websocket, 'remote_address', None)
+        mic_log.info("New mic client connected from %s", remote)
+        print(f"New mic client connected from {remote}")
         try:
             if not self.mic_running:
                 ok = self._start_mic_capture(samplerate=48000, blocksize=960, channels=1)
                 if not ok:
+                    mic_log.error("Mic open failed for %s", remote)
                     print("Mic open failed")
                     try:
                         await websocket.close(code=1011, reason="Mic open failed")
@@ -354,8 +372,10 @@ class MediaMixin:
                 "blocksize": int(self.mic_blocksize)
             }
             await websocket.send(json.dumps(hdr).encode('utf-8'))
+            mic_log.info("Mic header sent to %s: sr=%s ch=%s fmt=%s block=%s", remote, hdr['samplerate'], hdr['channels'], hdr['samplefmt'], hdr['blocksize'])
             print(f"Mic header sent: sr={hdr['samplerate']} ch={hdr['channels']} fmt={hdr['samplefmt']} block={hdr['blocksize']}")
 
+            sent_chunks = 0
             while True:
                 try:
                     chunk = await asyncio.get_event_loop().run_in_executor(None, self.mic_queue.get)
@@ -366,13 +386,18 @@ class MediaMixin:
                     continue
                 try:
                     await websocket.send(chunk)
+                    sent_chunks += 1
+                    if sent_chunks == 1 or sent_chunks % 250 == 0:
+                        mic_log.info("Mic sent %s chunk(s) to %s; last_chunk_bytes=%s", sent_chunks, remote, len(chunk))
                 except websockets.exceptions.ConnectionClosed:
                     break
         except Exception as e:
+            mic_log.error("Error in mic_stream_handler for %s: %s", remote, e, exc_info=True)
             print(f"Error in mic_stream_handler: {e}")
         finally:
             # Stop mic when client disconnects
             self._stop_mic_capture()
+            mic_log.info("Mic client disconnected from %s; mic capture stopped", remote)
             print("Mic client disconnected; mic capture stopped")
 
     async def video_stream_handler(self, websocket):
