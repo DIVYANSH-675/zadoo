@@ -3,33 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import http
 import io
 import json
 import logging
 import os
-import queue
 import subprocess
 import sys
 import threading
 import time
-import urllib.parse
 from collections import deque
-from contextlib import contextmanager
-from typing import Set
 
 import websockets
-from websockets.datastructures import Headers
-from websockets.http11 import Response as WSResponse
 
-from .assets import load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
-from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
-from .logging_utils import _log_except, _log_try_ok, log_calls
-from .network import get_local_ip
-from .process_utils import _run_hidden
-from .tunnel import CloudflareTunnelManager
 from .win32_input import *
 
 class MediaMixin:
@@ -44,6 +31,7 @@ class MediaMixin:
         if getattr(self, "_audio_running", False):
             return
         self._audio_running = True
+        self.audio_running = True
         self._audio_backend = "soundcard_loopback"
         self._audio_thread = None
         self._audio_stream = None
@@ -168,6 +156,7 @@ class MediaMixin:
                     pass
                 self._audio_stream = None
                 self._audio_running = False
+                self.audio_running = False
                 log.info("🎵 System-audio worker stopped")
 
         t = threading.Thread(target=_audio_worker, daemon=True)
@@ -176,6 +165,7 @@ class MediaMixin:
 
     def _stop_audio_capture(self):
         self._audio_running = False
+        self.audio_running = False
         try:
             if getattr(self, '_audio_thread', None) and self._audio_thread.is_alive():
                 self._audio_thread.join(timeout=0.5)
@@ -265,7 +255,7 @@ class MediaMixin:
         self.audio_clients.add(websocket)
 
         # Start capture on first client
-        if not self.audio_running:
+        if not getattr(self, "_audio_running", False):
             self._start_audio_capture()
 
         try:
@@ -296,16 +286,8 @@ class MediaMixin:
         finally:
             self.audio_clients.discard(websocket)
             print(f"🔊 Removed audio client, {len(self.audio_clients)} clients remaining")
-            if not self.audio_clients and self.audio_running:
-                try:
-                    if hasattr(self, '_audio_stream') and self._audio_stream:
-                        try:
-                            self._audio_stream.stop(); self._audio_stream.close()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                self.audio_running = False
+            if not self.audio_clients and getattr(self, "_audio_running", False):
+                self._stop_audio_capture()
                 with self.audio_queue.mutex:
                     self.audio_queue.queue.clear()
                 print("🎵 Audio capture stopped (no clients)")
@@ -370,22 +352,10 @@ class MediaMixin:
                     elif action == 'get_public_url':
                         await self.handle_get_url_via_websocket(websocket)
                     elif action == 'set_quality':
-                        try:
-                            value = max(1, min(95, int(event.get('value', 75))))
-                        except Exception:
-                            value = 75
-                        self.current_quality = value
-                        if self.screen_capturer:
-                            self.screen_capturer.quality = value
+                        value = self._apply_quality(event.get('value', 75))
                         print(f"🎨 Quality set to: {value}%")
                     elif action == 'set_fps':
-                        try:
-                            value = max(1, min(120, int(event.get('value', 30))))
-                        except Exception:
-                            value = 30
-                        self.current_fps = value
-                        if self.screen_capturer:
-                            self.screen_capturer.fps = value
+                        value = self._apply_fps(event.get('value', 30))
                         print(f"🎬 FPS set to: {value}")
                     elif action == 'set_capture_method':
                         method = event.get('method', 'auto')

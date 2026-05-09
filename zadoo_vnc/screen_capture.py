@@ -1,7 +1,6 @@
 """Screen capture thread and encoding controls."""
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import threading
@@ -27,7 +26,6 @@ class ScreenCapturer(threading.Thread):
         # Lock BetterCam to the known working pair from diagnostics
         self.bettercam_output_idx = 0
         self.bettercam_device_idx = 0
-        self.d3dshot_camera = None
         self.winrt_session = None
         self.active_capture_method = "unknown"  # Track which method is actually being used
         self.capture_stats = {
@@ -60,7 +58,6 @@ class ScreenCapturer(threading.Thread):
             except Exception:
                 self.dxcam_camera = None
         # BetterCam lazy init; created on first use
-        # D3DShot disabled for Python 3.12 environment
         # Initialize WinRT GraphicsCapture if available (lazy start later)
         if HAS_WINRT:
             try:
@@ -144,12 +141,6 @@ class ScreenCapturer(threading.Thread):
                 self.bettercam_camera = None
             except:
                 pass
-        if self.d3dshot_camera:
-            try:
-                # d3dshot can be cleaned by deleting instance
-                self.d3dshot_camera = None
-            except:
-                pass
         if self.fast_ctypes_capture:
             try:
                 # fast_ctypes_screenshots uses context manager, no explicit close needed
@@ -224,8 +215,6 @@ class ScreenCapturer(threading.Thread):
                 if self.capture_method != "auto":
                     return None
 
-        # D3DShot path disabled
-
         if self.capture_method == "winrt" and (HAS_WINRT or HAS_PIL):
             try:
                 frame = self._grab_screen_winrt()
@@ -295,8 +284,6 @@ class ScreenCapturer(threading.Thread):
                 except Exception:
                     logging.exception("BetterCam auto capture threw exception")
                     pass
-
-            # D3DShot path disabled
 
             # Try WinRT last
             if HAS_WINRT or HAS_PIL:
@@ -420,8 +407,6 @@ class ScreenCapturer(threading.Thread):
             logging.warning("BetterCam capture failed", exc_info=True)
             return None
 
-    # D3DShot support removed for Python 3.12
-
     def _grab_screen_winrt(self):
         """Capture using WinRT GraphicsCapture (basic window capture)."""
         try:
@@ -517,10 +502,6 @@ class ScreenCapturer(threading.Thread):
             logging.error("Failed to encode frame", exc_info=True)
             return None
 
-    def get_frame(self):
-        with self.frame_lock:
-            return self.latest_frame_jpeg
-
     def set_capture_method(self, method):
         """Set the screen capture method"""
         available_methods = self.get_available_methods()
@@ -553,7 +534,6 @@ class ScreenCapturer(threading.Thread):
         logging.debug("HAS_FAST_CTYPES=%s fast_ctypes_capture=%s", HAS_FAST_CTYPES, self.fast_ctypes_capture is not None)
         logging.debug("HAS_MSS=%s", HAS_MSS)
         logging.debug("HAS_BETTERCAM=%s bettercam_camera=%s", HAS_BETTERCAM, self.bettercam_camera is not None)
-        logging.debug("HAS_D3DSHOT=%s d3dshot_camera=%s", HAS_D3DSHOT, self.d3dshot_camera is not None)
         
         if HAS_DXCAM:
             methods.append("dxcam")
@@ -567,20 +547,14 @@ class ScreenCapturer(threading.Thread):
         if HAS_BETTERCAM:
             methods.append("bettercam")
             logging.debug("Added bettercam capture method")
-        if HAS_D3DSHOT:
-            methods.append("d3dshot")
-            logging.debug("Added d3dshot capture method")
         # Expose WinRT option if either winrt is available or PIL ImageGrab fallback can be used
         if HAS_WINRT or HAS_PIL:
             if "winrt" not in methods:
                 methods.append("winrt")
                 logging.debug("Added winrt capture method")
-        if HAS_D3DSHOT and self.d3dshot_camera:
-            methods.append("d3dshot")
-            logging.debug("Added d3dshot capture method")
             
         # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "fast_ctypes", "mss", "bettercam", "d3dshot", "winrt"]
+        pref = ["auto", "dxcam", "fast_ctypes", "mss", "bettercam", "winrt"]
         methods = [m for m in pref if m in dict.fromkeys(methods)]
         logging.debug("Available capture methods: %s", methods)
         return methods
@@ -588,10 +562,6 @@ class ScreenCapturer(threading.Thread):
     def get_current_method(self):
         """Get current capture method"""
         return self.capture_method
-
-    def get_active_method(self):
-        """Get the method that's actually being used (may differ from set method)"""
-        return self.active_capture_method
 
     def get_capture_stats(self):
         """Get capture performance statistics"""

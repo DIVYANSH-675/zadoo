@@ -2,94 +2,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
-
-
-CORE_PACKAGES = {
-    "websockets": "websockets",
-    "mss": "mss",
-    "pyautogui": "PyAutoGUI",
-    "PIL": "Pillow",
-    "numpy": "numpy",
-    "pyperclip": "pyperclip",
-    "keyboard": "keyboard",
-    "win32api": "pywin32",
-    "dotenv": "python-dotenv",
-}
-
-OPTIONAL_PACKAGES = {
-    "dxcam": "dxcam",
-    "fast_ctypes_screenshots": "fast-ctypes-screenshots",
-    "bettercam": "bettercam",
-    "winrt": "winrt",
-    "imagecodecs": "imagecodecs",
-    "aiortc": "aiortc",
-    "sounddevice": "sounddevice",
-    "av": "av",
-    "resend": "resend",
-    "soundcard": "soundcard",
-    "paramiko": "paramiko",
-    "winpty": "pywinpty",
-    "paddleocr": "paddleocr",
-}
-
-
-def install_package(package_name):
-    """Install a Python package using pip."""
-    try:
-        print(f"Installing {package_name}...")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", package_name, "--quiet"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        print(f"OK: {package_name} installed")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to install {package_name}: {e.stderr}")
-        return False
-
-
-def check_and_install_dependencies(include_optional=False):
-    """Check and install core dependencies. Optional extras are documented only."""
-    packages = dict(CORE_PACKAGES)
-    if include_optional:
-        packages.update(OPTIONAL_PACKAGES)
-
-    missing_packages = []
-    for module_name, package_name in packages.items():
-        try:
-            __import__(module_name)
-            print(f"OK: {package_name}")
-        except ImportError:
-            print(f"Missing: {package_name}")
-            missing_packages.append(package_name)
-
-    if missing_packages:
-        print("\n[!] Required packages are missing.")
-        print("Required:", ", ".join(missing_packages))
-        try:
-            print("\n[*] Attempting to install missing packages...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_packages])
-            print("\n[+] Packages installed successfully. Please restart the application.")
-        except subprocess.CalledProcessError:
-            print("\n[-] Failed to install packages automatically.")
-            print("Please install them manually using: pip install " + " ".join(missing_packages))
-        sys.exit(1)
-
-    if not include_optional:
-        missing_optional = []
-        for module_name, package_name in OPTIONAL_PACKAGES.items():
-            try:
-                __import__(module_name)
-            except ImportError:
-                missing_optional.append(package_name)
-        if missing_optional:
-            logging.info("Optional packages not installed: %s", ", ".join(missing_optional))
-
-    print("[+] Core dependencies are satisfied.")
 
 
 try:
@@ -208,8 +120,6 @@ if HAS_BETTERCAM:
                 pass
     except Exception:
         logging.debug("BetterCam patching failed", exc_info=True)
-
-HAS_D3DSHOT = False
 
 try:
     import winrt  # type: ignore

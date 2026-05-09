@@ -1,34 +1,21 @@
-"""Remote input, clipboard, alerts, and hotkey controls."""
+﻿"""Remote input, clipboard, alerts, and hotkey controls."""
 from __future__ import annotations
 
 import asyncio
 import ctypes
-import http
-import io
 import json
 import logging
 import os
-import queue
 import subprocess
 import sys
 import threading
 import time
-import urllib.parse
-from collections import deque
 from contextlib import contextmanager
-from typing import Set
 
 import websockets
-from websockets.datastructures import Headers
-from websockets.http11 import Response as WSResponse
 
-from .assets import load_host_controls_html, load_index_html, load_terminal_html
-from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
-from .logging_utils import _log_except, _log_try_ok, log_calls
-from .network import get_local_ip
-from .process_utils import _run_hidden
-from .tunnel import CloudflareTunnelManager
+from .logging_utils import _log_except, _log_try_ok
 from .win32_input import *
 
 class InputControlMixin:
@@ -916,35 +903,6 @@ class InputControlMixin:
             except Exception:
                 _log_except("_end_custom_alert_capture.empty", sys.exc_info()[1])
 
-    def _bind_start_stop_hotkeys(self):
-        if not HAS_KEYBOARD:
-            return
-        try:
-            import keyboard
-        except Exception:
-            return
-
-        def start_if_ok():
-            if not self._numlock_on():
-                self._begin_custom_alert_capture()
-            else:
-                try: print("[custom] NumLock ON — begin blocked")
-                except Exception: pass
-
-        def stop_if_ok():
-            if not self._numlock_on():
-                self._end_custom_alert_capture()
-            else:
-                try: print("[custom] NumLock ON — end blocked")
-                except Exception: pass
-
-        for alias in ("shift+num1", "shift+num 1", "shift+numpad 1", "shift+end"):
-            try: keyboard.add_hotkey(alias, start_if_ok, suppress=False)
-            except Exception: pass
-        for alias in ("shift+num3", "shift+num 3", "shift+numpad 3", "shift+pgdn", "shift+pagedown"):
-            try: keyboard.add_hotkey(alias, stop_if_ok, suppress=False)
-            except Exception: pass
-
     def start_host_hotkey_poller(self):
         """Fallback A/B/C/D alert poller when the keyboard hook cannot start."""
         if getattr(self, "_host_hotkey_poller_active", False):
@@ -1158,13 +1116,6 @@ class InputControlMixin:
             print("🎹 Global keyboard hook stopped")
         except Exception as e:
             print(f"Error stopping keyboard hook: {e}")
-
-    def _rehook_keyboard(self):
-        """Recreate the global keyboard hook with current suppression setting."""
-        try:
-            self.stop_global_keyboard_hook()
-        except Exception:
-            pass
 
     def enable_keystroke_capture(self):
         """Enable keystroke capture"""

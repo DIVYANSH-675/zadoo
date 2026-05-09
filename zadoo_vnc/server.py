@@ -2,34 +2,15 @@
 from __future__ import annotations
 
 import asyncio
-import ctypes
-import http
-import io
-import json
-import logging
-import os
 import queue
-import subprocess
-import sys
 import threading
-import time
 import urllib.parse
-from collections import deque
-from contextlib import contextmanager
 from typing import Set
 
 import websockets
-from websockets.datastructures import Headers
-from websockets.http11 import Response as WSResponse
 
-from .assets import load_host_controls_html, load_index_html, load_terminal_html
-from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
-from .dependencies import *
-from .logging_utils import _log_except, _log_try_ok, log_calls
 from .network import get_local_ip
-from .process_utils import _run_hidden
 from .tunnel import CloudflareTunnelManager
-from .win32_input import *
 
 from .input_control import InputControlMixin
 from .media import MediaMixin
@@ -79,8 +60,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.mic_channels = 1
         # Typematic repeat state for non-modifier keys
         self._repeat_keys = {}
-        # Feature flags
-        self.enable_legacy_alert_hotkeys = True  # (legacy Q/F8 disabled in code below; flag kept for compatibility)
         # Alert presets for host controls
         self.alert_presets = {
             'A': ("Heads up", "Please check this now."),
@@ -122,7 +101,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # If hook isn't active, start fallback poller
         try:
             if not getattr(self, 'keyboard_hook_active', False):
-                # TODO: start_host_hotkey_poller was referenced but not defined in the single-file app.
                 self.start_host_hotkey_poller()
                 print("✅ Fallback hotkey poller started (A/B/C/D)")
             else:
@@ -222,52 +200,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         else:
             # Default to video stream handler for compatibility
             await self.video_stream_handler(websocket)
-
-    async def serve(self):
-        self.loop = asyncio.get_running_loop()
-        asyncio.create_task(self.broadcast_frames())
-        # Ensure global keyboard hook is active so System A can trigger alerts
-        try:
-            self.start_global_keyboard_hook()
-        except Exception:
-            pass
-        # Start fallback hotkey poller in case keyboard hook is unavailable (A/B/C/D only)
-        try:
-            # TODO: start_host_hotkey_poller was referenced but not defined in the single-file app.
-            self.start_host_hotkey_poller()
-        except Exception:
-            pass
-
-        async def process_request(path, request_headers):
-            if request_headers.get("Upgrade") != "websocket":
-                # Handle API endpoints
-                if path == '/api/public-url':
-                    return await self.handle_get_public_url()
-                elif path == '/api/refresh-tunnel':
-                    return await self.handle_refresh_tunnel()
-                elif path.startswith('/api/client-log'):
-                    try:
-                        from urllib.parse import urlparse, parse_qs, unquote
-                        parsed = urlparse(path)
-                        qs = parse_qs(parsed.query or "")
-                        msg = (qs.get("msg") or [""])[0]
-                        msg = unquote(msg)
-                        _log_try_ok("client.log", msg[:500])
-                        return http.HTTPStatus.OK, {"Content-Type": "application/json; charset=utf-8"}, b'{"ok":true}'
-                    except Exception as e:
-                        _log_except("client.log", e)
-                        return http.HTTPStatus.INTERNAL_SERVER_ERROR, {"Content-Type": "application/json; charset=utf-8"}, b'{"ok":false}'
-                elif path == '/api/set-quality':
-                    return await self.handle_set_quality(request_headers)
-                elif path == '/api/set-fps':
-                    return await self.handle_set_fps(request_headers)
-                elif path == '/api/set-clipboard-image':
-                    return await self.handle_set_clipboard_image(request_headers)
-                elif path == '/':
-                    return http.HTTPStatus.OK, {"Content-Type": "text/html"}, load_index_html().encode("utf-8")
-                else:
-                    return http.HTTPStatus.NOT_FOUND, {}, b"Not Found"
-            return None
 
     def stop(self):
         if self.loop:

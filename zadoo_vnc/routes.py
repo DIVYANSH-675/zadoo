@@ -2,25 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import ctypes
 import http
-import io
 import json
 import logging
 import os
-import queue
 import secrets
-import subprocess
 import sys
-import threading
 import time
 import urllib.parse
-from collections import deque
-from contextlib import contextmanager
 from http.cookies import SimpleCookie
-from typing import Set
 
-import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Response as WSResponse
 
@@ -28,10 +19,7 @@ from .assets import load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
-from .logging_utils import _log_except, _log_try_ok, log_calls
-from .network import get_local_ip
-from .tunnel import CloudflareTunnelManager
-from .win32_input import *
+from .logging_utils import _log_except, _log_try_ok
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
@@ -241,6 +229,26 @@ class RoutesMixin:
 
     def enumerate_cameras(self):
         return enumerate_camera_devices()
+
+    def _apply_quality(self, raw_value, default=75):
+        try:
+            value = max(1, min(95, int(raw_value)))
+        except Exception:
+            value = max(1, min(95, int(default)))
+        self.current_quality = value
+        if self.screen_capturer:
+            self.screen_capturer.quality = value
+        return value
+
+    def _apply_fps(self, raw_value, default=30):
+        try:
+            value = max(1, min(120, int(raw_value)))
+        except Exception:
+            value = max(1, min(120, int(default)))
+        self.current_fps = value
+        if self.screen_capturer:
+            self.screen_capturer.fps = value
+        return value
 
     async def process_request(self, *args, **kwargs):
         """Process HTTP requests - compatible with websockets v10-v15.
@@ -986,10 +994,7 @@ class RoutesMixin:
             parsed = urllib.parse.urlparse(str(path or ""))
             qs = urllib.parse.parse_qs(parsed.query or "")
             raw = (qs.get("value") or qs.get("quality") or [self.current_quality])[0]
-            value = max(1, min(95, int(raw)))
-            self.current_quality = value
-            if self.screen_capturer:
-                self.screen_capturer.quality = value
+            value = self._apply_quality(raw, self.current_quality)
             return {"success": True, "quality": value}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1000,10 +1005,7 @@ class RoutesMixin:
             parsed = urllib.parse.urlparse(str(path or ""))
             qs = urllib.parse.parse_qs(parsed.query or "")
             raw = (qs.get("value") or qs.get("fps") or [self.current_fps])[0]
-            value = max(1, min(120, int(raw)))
-            self.current_fps = value
-            if self.screen_capturer:
-                self.screen_capturer.fps = value
+            value = self._apply_fps(raw, self.current_fps)
             return {"success": True, "fps": value}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1154,28 +1156,6 @@ class RoutesMixin:
                     return img
             except Exception:
                 logging.warning('Snapshot fast_ctypes failed; falling back', exc_info=True)
-
-        # 3) MSS region (reuse instance)
-        if HAS_MSS:
-            try:
-                if not hasattr(self, '_snapshot_sct') or self._snapshot_sct is None:
-                    self._snapshot_sct = mss.mss()
-                sct = self._snapshot_sct
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                rect = None
-                if abs_rect:
-                    l, t, r, b = abs_rect
-                    rect = {'left': l, 'top': t, 'width': max(1, r - l), 'height': max(1, b - t)}
-                sct_img = sct.grab(rect or mon)
-                h, w = sct_img.height, sct_img.width
-                arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
-                rgb = np.ascontiguousarray(arr[..., :3][:, :, ::-1])
-                try:
-                    return Image.fromarray(rgb)
-                except Exception:
-                    return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
-            except Exception:
-                logging.warning('Snapshot MSS failed', exc_info=True)
 
         return None
 
