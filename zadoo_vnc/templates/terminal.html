@@ -1,0 +1,72 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>Terminal</title>
+<meta name='viewport' content='width=device-width,initial-scale=1'/>
+<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css'/>
+<link rel='preconnect' href='https://fonts.googleapis.com'/>
+<link href='https://fonts.googleapis.com/css2?family=Fira+Code:wght@500&display=swap' rel='stylesheet'/>
+<style>
+  @font-face{font-family:'FiraCodeMedium';src:url('https://cdn.jsdelivr.net/gh/tonsky/FiraCode@6.2/distr/woff2/FiraCode-Medium.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap;}
+  html,body{margin:0;height:100%;background:#0b0e12;color:#cfd8dc;font-family:monospace;}
+  #term{display:none;height:100%;width:100%;}
+  .xterm{padding:8px;}
+  .xterm .xterm-viewport{background:#0b0e12;}
+  .xterm-rows{color:#cfd8dc;}
+  #fallback{display:block;height:100vh;box-sizing:border-box;padding:8px;}
+  #out{height:calc(100% - 36px);overflow:auto;white-space:pre-wrap;background:#0b0e12;color:#cfd8dc;border:1px solid #222;padding:8px;}
+  #inp{width:100%;margin-top:6px;background:#0b0e12;color:#cfd8dc;border:1px solid #222;padding:8px;}
+</style></head><body>
+<div id='term'></div>
+<div id='fallback'><div id='out'>Loading terminal...</div><input id='inp' placeholder='Type your commands and press Enter'/></div>
+<script src='https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js'></script>
+<script src='https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'></script>
+<script>
+const proto=location.protocol==='https:'?'wss':'ws'; const ws=new WebSocket(`${proto}://${location.host}/ssh`); ws.binaryType='arraybuffer';
+function startFallback(){ document.getElementById('term').style.display='none'; const fb=document.getElementById('fallback'); fb.style.display='block'; const out=document.getElementById('out'); const inp=document.getElementById('inp');
+  out.textContent = 'Connecting to local shell...\n';
+  ws.onopen=()=>{ out.textContent += 'Connected. Type your commands and press Enter.\n'; };
+  ws.onerror=()=>{ out.textContent += '\n[Error] Terminal connection error.\n'; };
+  ws.onclose=()=>{ out.textContent += '\n[Closed] Terminal disconnected.\n'; };
+  ws.onmessage=e=>{ let d=e.data; if(d instanceof ArrayBuffer){ d=new TextDecoder().decode(new Uint8Array(d)); } out.textContent+=d; if(out.scrollHeight - out.clientHeight - out.scrollTop < 8){ out.scrollTop=out.scrollHeight; } };
+  inp.addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ws.send(new TextEncoder().encode(inp.value+"\r\n")); inp.value=''; } });
+}
+function startXterm(){ if(!window.Terminal||!window.FitAddon){ return startFallback(); } const term=new window.Terminal({cols:120,rows:34,convertEol:false,disableStdin:false,windowsMode:true,fontFamily:"'Fira Code', monospace",fontWeight:500,fontSize:16,theme:{
+  background:'#0b0e12',
+  foreground:'#f8f8f2',
+  cursor:'#f8f8f2',
+  selection:'#44475a',
+  black:'#21222c',
+  red:'#ff5555',
+  green:'#50fa7b',
+  yellow:'#f1fa8c',
+  blue:'#bd93f9',
+  magenta:'#ff79c6',
+  cyan:'#8be9fd',
+  white:'#f8f8f2',
+  brightBlack:'#6272a4',
+  brightRed:'#ff6e6e',
+  brightGreen:'#69ff94',
+  brightYellow:'#ffffa5',
+  brightBlue:'#d6acff',
+  brightMagenta:'#ff92df',
+  brightCyan:'#a4ffff',
+  brightWhite:'#ffffff'}});
+  const fit=new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open(document.getElementById('term')); try{ term.setOption('fontFamily', "'FiraCodeMedium','Fira Code', monospace"); term.setOption('fontWeight','500'); }catch(e){}; fit.fit();
+  // Apply Fira Code to xterm only (no layout/color changes)
+  try { term.setOption('fontFamily', "'Fira Code', monospace"); term.setOption('fontWeight', '500'); } catch(e){}
+  if (document.fonts && document.fonts.ready) { document.fonts.ready.then(()=>{ try{ fit.fit(); sendSize(); }catch(e){} }); }
+  function sendSize(){ try{ if(ws.readyState===1){ ws.send(JSON.stringify({type:'resize', cols:term.cols, rows:term.rows})); } }catch(e){} }
+  window.addEventListener('resize',()=>{ fit.fit(); sendSize(); }); term.focus();
+  // Respond to parent messages to refit when panel opens
+  window.addEventListener('message', (ev)=>{ try{ if(ev.data && ev.data.type==='fit'){ fit.fit(); sendSize(); } }catch(e){} });
+  // Toggle views
+  document.getElementById('fallback').style.display='none';
+  document.getElementById('term').style.display='block';
+  term.write('[36mConnecting to local shell...[0m\r\n');
+  ws.onopen=()=>{ term.write('[32mConnected. Type your commands...[0m\r\n'); sendSize(); };
+  ws.onerror=()=>{ term.write('\r\n[31m[Error] Terminal connection error.[0m\r\n'); };
+  ws.onmessage=e=>{ let d=e.data; if(d instanceof ArrayBuffer){ d=new TextDecoder('utf-8').decode(new Uint8Array(d)); } term.write(d); };
+  ws.onclose=()=>term.write('\r\n[31mDisconnected[0m\r\n');
+  term.onData(data=>{ if(ws.readyState===1){ if(data===''){ data=''; } ws.send(new TextEncoder().encode(data)); } });
+}
+setTimeout(startXterm,50);
+</script>
+</body></html>

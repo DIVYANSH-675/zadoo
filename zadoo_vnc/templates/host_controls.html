@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Host Controls — Alerts</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0f1115; color:#eaeef2; margin:0; }
+    .wrap { max-width: 720px; margin: 32px auto; padding: 16px; }
+    h1 { font-size: 20px; font-weight:600; margin: 0 0 16px; }
+    .grid { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:12px; }
+    button { appearance: none; border:0; border-radius:12px; padding:16px 0; font-size:18px; font-weight:700; background:#1b1f2a; color:#eaeef2; cursor:pointer; transition:transform .05s ease, background .2s ease; box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 6px 24px rgba(0,0,0,.4); }
+    button:hover{ background:#222835; }
+    button:active{ transform:scale(.98); }
+    .ok { margin-top:14px; color:#9fb3c8; font-size:13px; min-height: 18px; }
+  </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Send Sidebar Alert to Viewers</h1>
+      <div class="grid">
+        <button data-code="A">A</button>
+        <button data-code="B">B</button>
+        <button data-code="C">C</button>
+        <button data-code="D">D</button>
+      </div>
+      <div class="ok" id="ok"></div>
+    </div>
+    <script>
+      const ok = document.getElementById('ok');
+      document.querySelectorAll('button[data-code]').forEach(btn=>{
+        btn.addEventListener('click', async ()=>{
+          const code = btn.getAttribute('data-code');
+          try{
+            const res = await fetch('/api/alert?code='+encodeURIComponent(code));
+            ok.textContent = res.ok ? '✅ Sent '+code : '❌ Failed ('+res.status+')';
+          }catch(e){ ok.textContent = '❌ Network error'; }
+          setTimeout(()=> ok.textContent='', 2000);
+        });
+      });
+    </script>
+  </body>
+  </html>
