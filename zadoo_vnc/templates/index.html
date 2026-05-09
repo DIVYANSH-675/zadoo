@@ -416,6 +416,12 @@
             box-shadow: 0 8px 24px rgba(0, 212, 255, 0.12);
             transform: translateY(-1px);
         }
+
+        .sidebar-btn.streaming {
+            border-color: #00d4ff;
+            color: #ffffff;
+            box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.18), 0 8px 24px rgba(0, 212, 255, 0.12);
+        }
         
         .sidebar-btn:active {
             transform: translateY(0) scale(.995);
@@ -1467,6 +1473,10 @@
                         <span class="info-value" id="audio-status">Idle</span>
                     </div>
                     <div class="info-item">
+                        <span class="info-label">Mic</span>
+                        <span class="info-value" id="mic-status">Idle</span>
+                    </div>
+                    <div class="info-item">
                         <span class="info-label">Email</span>
                         <span class="info-value" id="email-status">Pending</span>
                     </div>
@@ -1777,6 +1787,15 @@
     let audioFormat = null;
     let pendingAudioHeader = true;
     let audioBufferQueue = [];
+    let micSocket;
+    let micAudioContext;
+    let micScriptNode;
+    let micPlaying = false;
+    let micFormat = null;
+    let pendingMicHeader = true;
+    let micBufferQueue = [];
+    let micFirstChunkLogged = false;
+    let pendingMicClientEvents = [];
     let emailStatus = 'Pending';
     // Robo typing state
     let roboEnabled = false;
@@ -2880,6 +2899,7 @@
             console.log(" Input socket connected");
             updateStatus("Connected");
             window.inputSocket = inputSocket; // Make it globally accessible
+            flushMicClientEvents();
             fetchPublicUrl(inputSocket);
             
             // If overlay was enabled before connect, subscribe now without toggling UI
@@ -3100,6 +3120,7 @@
             window.inputSocket.onopen = function () {
               console.log(' Input socket connected');
               attachCursorHandler(window.inputSocket);     // < ensure handler is attached
+              flushMicClientEvents();
               if (window.showMouseOverlay) sendSubscribe(true); // < resubscribe after reconnect
             };
             window.inputSocket.onclose = function () {
@@ -4016,42 +4037,110 @@
         audioBufferQueue = [];
     }
 
-    function setMicButtonLabel(text) {
+    function updateMicStatus(text) {
+        const el = document.getElementById('mic-status');
+        if (el) el.textContent = text;
+    }
+
+    function micSocketStateName(state) {
+        if (state === WebSocket.CONNECTING) return 'CONNECTING';
+        if (state === WebSocket.OPEN) return 'OPEN';
+        if (state === WebSocket.CLOSING) return 'CLOSING';
+        if (state === WebSocket.CLOSED) return 'CLOSED';
+        return state === null || typeof state === 'undefined' ? 'none' : String(state);
+    }
+
+    function flushMicClientEvents() {
+        const sock = window.inputSocket;
+        if (!sock || sock.readyState !== WebSocket.OPEN) return;
+        while (pendingMicClientEvents.length) {
+            const payload = pendingMicClientEvents.shift();
+            try {
+                sock.send(JSON.stringify(payload));
+            } catch (e) {
+                pendingMicClientEvents.unshift(payload);
+                break;
+            }
+        }
+    }
+
+    function sendMicClientEvent(phase, detail = '') {
+        const payload = {
+            action: 'mic_event',
+            phase: String(phase || 'unknown').slice(0, 64),
+            detail: String(detail || '').slice(0, 240),
+            playing: !!micPlaying,
+            hasAudioContext: !!micAudioContext,
+            audioContextState: micAudioContext ? micAudioContext.state : null,
+            socketState: micSocket ? micSocketStateName(micSocket.readyState) : 'none',
+            pageMs: Math.round(performance.now())
+        };
+        console.log('[mic.client]', payload.phase, payload.detail);
+
+        const sock = window.inputSocket;
+        if (sock && sock.readyState === WebSocket.OPEN) {
+            flushMicClientEvents();
+            try {
+                sock.send(JSON.stringify(payload));
+                return;
+            } catch (e) {
+                console.warn('[mic.client] failed to send event', e);
+            }
+        }
+        pendingMicClientEvents.push(payload);
+        if (pendingMicClientEvents.length > 20) pendingMicClientEvents.shift();
+    }
+
+    function setMicButtonLabel(text, streaming) {
         const btn = document.getElementById('mic-toggle');
         const label = btn ? btn.querySelector('.btn-label') : null;
         if (label) label.textContent = text;
+        if (btn && typeof streaming === 'boolean') {
+            btn.classList.toggle('streaming', streaming);
+            btn.setAttribute('aria-pressed', streaming ? 'true' : 'false');
+        }
     }
 
     function toggleMic(event) {
         const btn = event.currentTarget;
         if (micPlaying) {
-            stopMic();
-            setMicButtonLabel('Mic');
+            sendMicClientEvent('button_click_stop', 'user requested mic stop');
+            stopMic(true, 'Stopped');
             return;
         }
-        setMicButtonLabel('Enabling...');
+        sendMicClientEvent('button_click_start', 'user requested mic start');
+        updateMicStatus('Enabling');
+        setMicButtonLabel('Starting...', false);
         btn.disabled = true;
         startMic().then(ok => {
             btn.disabled = false;
             if (ok) {
-                setMicButtonLabel('Disable Mic');
+                setMicButtonLabel('Stop Mic', true);
+                updateMicStatus('Playing');
             } else {
-                setMicButtonLabel('Mic Failed');
-                setTimeout(() => setMicButtonLabel('Mic'), 2000);
+                setMicButtonLabel('Mic Failed', false);
+                setTimeout(() => setMicButtonLabel('Mic', false), 2200);
             }
         });
     }
 
     async function startMic() {
         try {
+            sendMicClientEvent('start_requested', 'opening remote microphone stream');
+            updateMicStatus('Preparing');
             if (!micAudioContext) {
                 micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+            }
+            if (micAudioContext.state === 'suspended') {
+                await micAudioContext.resume();
             }
             micSocket = new WebSocket(`${WSS_URL}/mic`);
             micSocket.binaryType = 'arraybuffer';
             pendingMicHeader = true;
             micFormat = null;
             micBufferQueue = [];
+            micFirstChunkLogged = false;
+            updateMicStatus('Connecting');
 
             let playPtr = 0;
             const bufferSize = 512;
@@ -4077,8 +4166,22 @@
             micScriptNode.connect(micAudioContext.destination);
 
             const readyPromise = new Promise(resolve => {
-                const timeout = setTimeout(() => resolve(false), 6000);
-                const finish = (ok) => { clearTimeout(timeout); resolve(ok); };
+                let settled = false;
+                const timeout = setTimeout(() => {
+                    const detail = pendingMicHeader ? 'timeout waiting for mic header' : 'timeout waiting for mic audio';
+                    sendMicClientEvent('timeout', detail);
+                    finish(false);
+                }, 6000);
+                const finish = (ok) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timeout);
+                    resolve(ok);
+                };
+                micSocket.onopen = () => {
+                    updateMicStatus('Waiting');
+                    sendMicClientEvent('socket_open', 'mic websocket connected');
+                };
                 micSocket.onmessage = (ev) => {
                     if (pendingMicHeader) {
                         try {
@@ -4087,9 +4190,12 @@
                             if (meta && meta.type === 'audio_format') {
                                 micFormat = meta;
                                 pendingMicHeader = false;
-                                finish(true);
+                                updateMicStatus('Header OK');
+                                sendMicClientEvent('header_received', `sr=${meta.samplerate} ch=${meta.channels || 1} fmt=${meta.format || ''}`);
                             }
-                        } catch (_) {}
+                        } catch (e) {
+                            sendMicClientEvent('bad_header', e && e.message ? e.message : 'failed to parse mic header');
+                        }
                         return;
                     }
                     const int16 = new Int16Array(ev.data);
@@ -4105,35 +4211,64 @@
                         total -= (dropped ? dropped.length : 0);
                         playPtr = 0;
                     }
+                    if (!micFirstChunkLogged) {
+                        micFirstChunkLogged = true;
+                        micPlaying = true;
+                        updateMicStatus('Playing');
+                        sendMicClientEvent('first_chunk', `${ev.data.byteLength || int16.byteLength} bytes`);
+                        finish(true);
+                    }
                 };
-                micSocket.onerror = () => finish(false);
-                micSocket.onclose = () => finish(false);
+                micSocket.onerror = () => {
+                    updateMicStatus('Failed');
+                    sendMicClientEvent('socket_error', 'mic websocket error before audio started');
+                    finish(false);
+                };
+                micSocket.onclose = (ev) => {
+                    updateMicStatus(micFirstChunkLogged ? 'Disconnected' : 'Failed');
+                    sendMicClientEvent('socket_close', `code=${ev.code} reason=${ev.reason || ''}`);
+                    finish(false);
+                };
             });
 
             const ok = await readyPromise;
             if (ok) {
                 micPlaying = true;
-                micSocket.onclose = () => { stopMic(); };
-                micSocket.onerror = () => { stopMic(); };
+                sendMicClientEvent('ready', 'mic audio playback active');
+                micSocket.onclose = (ev) => {
+                    sendMicClientEvent('socket_close', `code=${ev.code} reason=${ev.reason || ''}`);
+                    stopMic(true, 'Disconnected');
+                };
+                micSocket.onerror = () => {
+                    sendMicClientEvent('socket_error', 'mic websocket error during playback');
+                    stopMic(true, 'Failed');
+                };
                 return true;
             }
-            stopMic(false);
+            stopMic(false, 'Failed');
+            updateMicStatus('Failed');
             return false;
         } catch (e) {
             console.error('startMic failed', e);
-            stopMic(false);
+            sendMicClientEvent('exception', e && e.message ? e.message : String(e));
+            stopMic(false, 'Failed');
+            updateMicStatus('Failed');
             return false;
         }
     }
 
-    function stopMic(updateLabel = true) {
+    function stopMic(updateLabel = true, status = 'Stopped') {
+        const wasPlaying = micPlaying || (micSocket && micSocket.readyState === WebSocket.OPEN);
         micPlaying = false;
         try { if (micSocket) micSocket.close(); } catch (_) {}
         try { if (micScriptNode) micScriptNode.disconnect(); } catch (_) {}
         micScriptNode = null;
         micSocket = null;
         micBufferQueue = [];
-        if (updateLabel) setMicButtonLabel('Mic');
+        micFirstChunkLogged = false;
+        updateMicStatus(status);
+        if (wasPlaying) sendMicClientEvent('stopped', status);
+        if (updateLabel) setMicButtonLabel('Mic', false);
     }
 
         // FPS counter and status updates

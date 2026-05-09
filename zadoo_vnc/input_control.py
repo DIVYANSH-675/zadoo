@@ -152,6 +152,26 @@ class InputControlMixin:
                                     logging.info("[snap.client] click=%s", phase)
                         except Exception:
                             _log_except('input_event_handler.snap_event', sys.exc_info()[1])
+                    elif action == 'mic_event':
+                        try:
+                            phase = str(event.get('phase', 'unknown'))[:64]
+                            detail = str(event.get('detail', ''))[:240]
+                            socket_state = str(event.get('socketState', 'unknown'))[:32]
+                            audio_state = str(event.get('audioContextState', 'unknown'))[:32]
+                            page_ms = event.get('pageMs')
+                            logging.getLogger("mic").info(
+                                "Mic client button event: phase=%s detail=%s playing=%s socket_state=%s audio_context=%s audio_state=%s page_ms=%s remote=%s",
+                                phase,
+                                detail,
+                                bool(event.get('playing', False)),
+                                socket_state,
+                                bool(event.get('hasAudioContext', False)),
+                                audio_state,
+                                page_ms,
+                                getattr(websocket, 'remote_address', None),
+                            )
+                        except Exception:
+                            _log_except('input_event_handler.mic_event', sys.exc_info()[1])
                     elif action == 'refresh_tunnel':
                         await self.handle_refresh_via_websocket(websocket)
                     elif action == 'get_public_url':
