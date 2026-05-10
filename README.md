@@ -22,17 +22,20 @@ python -m pip install -e .[media,email,perf,ssh]
 python zadoo_vnc_single.py
 ```
 
-The app starts a local web UI, screen capture, input WebSockets, and one Cloudflare tunnel when `cloudflared.exe` is available or can be downloaded.
+The app starts a local web UI, screen capture, input WebSockets, and one Cloudflare tunnel when `cloudflared.exe` is available or auto-download is explicitly enabled.
 
 ## Configuration
 
 Copy `.env.example` to `.env` and fill only the values you need.
 
 - `RESEND_API_KEY`, `RESEND_FROM`, and `EMAIL_TO` or `GMAIL_TO` enable tunnel email notifications.
-- `CODE_FULL`, `CODE_LIMITED`, `CODE_PARTIAL`, `CODE_LOCKDOWN`, and `CUSTOM_PASSWORD` control server-side access sessions.
+- `CODE_FULL`, `CODE_LIMITED`, `CODE_PARTIAL`, `CODE_LOCKDOWN`, and `CUSTOM_PASSWORD` control server-side access sessions. If none are set, the app prints one temporary full-access code at startup.
+- `ZADOO_DISABLE_TUNNEL=1` keeps the UI local-only.
+- `ZADOO_CLOUDFLARED_PATH` points at a managed `cloudflared.exe`; `ZADOO_AUTO_DOWNLOAD_CLOUDFLARED=1` permits downloading it when no local binary exists.
+- `ZADOO_INSTALL_STARTUP_TASK=1` and `ZADOO_ENABLE_PROCESS_PROTECTOR=1` opt into persistence/restart behavior for packaged deployments.
 - `ALERT_A`, `ALERT_B`, `ALERT_C`, and `ALERT_D` customize host alert presets.
 
-No Resend API key is intentionally bundled. If a previous key was exposed in source or logs, rotate it before using email notifications.
+No API keys or access codes are intentionally bundled. If a previous key or code was exposed in source or logs, rotate it before using public links.
 
 ## Smoke Tests
 

@@ -95,20 +95,71 @@ class RoutesMixin:
         except Exception:
             return None
 
+    def _is_secure_request(self, request_headers) -> bool:
+        proto = str(self._header_get(request_headers, "X-Forwarded-Proto", "") or "").lower()
+        if proto.split(",", 1)[0].strip() == "https":
+            return True
+        forwarded = str(self._header_get(request_headers, "Forwarded", "") or "").lower()
+        if "proto=https" in forwarded:
+            return True
+        cf_visitor = str(self._header_get(request_headers, "Cf-Visitor", "") or "")
+        if cf_visitor:
+            try:
+                return str(json.loads(cf_visitor).get("scheme", "")).lower() == "https"
+            except Exception:
+                return '"scheme":"https"' in cf_visitor.replace(" ", "").lower()
+        return False
+
+    def _redact_request_path(self, path: str) -> str:
+        try:
+            parsed = urllib.parse.urlparse(path)
+            if parsed.path != "/api/auth" or not parsed.query:
+                return path
+            redacted_query = urllib.parse.urlencode(
+                [
+                    (key, "<redacted>" if key.lower() in {"code", "token", "password"} else value)
+                    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                ]
+            )
+            return urllib.parse.urlunparse(parsed._replace(query=redacted_query))
+        except Exception:
+            return "/api/auth?<redacted>" if str(path).startswith("/api/auth") else str(path)
+
     def _auth_codes(self):
-        def clean(value, default=""):
-            return str(value if value is not None else default).strip()
+        def clean(value):
+            return str(value if value is not None else "").strip()
 
         codes = {
-            "full": clean(os.getenv("CODE_FULL"), "TERMINATOR"),
-            "limited": clean(os.getenv("CODE_LIMITED"), "ADVENTURES"),
-            "partial": clean(os.getenv("CODE_PARTIAL"), "INNOVATION"),
-            "lockdown": clean(os.getenv("CODE_LOCKDOWN"), "CHALLENGER"),
+            "full": clean(os.getenv("CODE_FULL")),
+            "limited": clean(os.getenv("CODE_LIMITED")),
+            "partial": clean(os.getenv("CODE_PARTIAL")),
+            "lockdown": clean(os.getenv("CODE_LOCKDOWN")),
         }
         custom = clean(os.getenv("CUSTOM_PASSWORD"))
         if custom:
             codes["custom"] = custom
-        return {role: value.upper() for role, value in codes.items() if value}
+        configured = {role: value.upper() for role, value in codes.items() if value}
+        if configured:
+            return configured
+        runtime_codes = getattr(self, "_runtime_auth_codes", None)
+        if not isinstance(runtime_codes, dict) or not runtime_codes:
+            code = secrets.token_urlsafe(12).replace("-", "").replace("_", "").upper()
+            runtime_codes = {"full": code}
+            self._runtime_auth_codes = runtime_codes
+            self._runtime_auth_generated = True
+        return runtime_codes
+
+    def _announce_auth_codes(self):
+        codes = self._auth_codes()
+        if getattr(self, "_runtime_auth_generated", False):
+            code = codes.get("full")
+            if code:
+                print("=" * 60)
+                print(f" Temporary full access code: {code}")
+                print(" Set CODE_FULL in .env to use your own persistent code.")
+                print("=" * 60)
+        else:
+            print(" Access code source: environment")
 
     def _match_auth_code(self, code):
         submitted = str(code or "").strip().upper()
@@ -204,7 +255,7 @@ class RoutesMixin:
             return False
         return self._is_authorized(request_headers, feature)
 
-    async def handle_auth(self, path):
+    async def handle_auth(self, path, request_headers=None):
         parsed = urllib.parse.urlparse(str(path or ""))
         query = urllib.parse.parse_qs(parsed.query or "")
         role = self._match_auth_code((query.get("code") or [""])[0])
@@ -218,10 +269,16 @@ class RoutesMixin:
             self.auth_sessions = {}
             sessions = self.auth_sessions
         sessions[token] = {"role": role, "expires_at": expires_at}
-        cookie = (
-            f"{self.AUTH_COOKIE_NAME}={token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
-            "HttpOnly; SameSite=Lax"
-        )
+        cookie_parts = [
+            f"{self.AUTH_COOKIE_NAME}={token}",
+            "Path=/",
+            f"Max-Age={self.AUTH_TTL_SECONDS}",
+            "HttpOnly",
+            "SameSite=Lax",
+        ]
+        if self._is_secure_request(request_headers):
+            cookie_parts.append("Secure")
+        cookie = "; ".join(cookie_parts)
         return self._json_response(
             {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS},
             extra_headers={"Set-Cookie": cookie},
@@ -307,7 +364,7 @@ class RoutesMixin:
             path = "/"
         route_path = urllib.parse.urlparse(path).path
 
-        logging.debug("process_request: path=%s", path)
+        logging.debug("process_request: path=%s", self._redact_request_path(path))
 
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:
@@ -373,7 +430,7 @@ class RoutesMixin:
                 body=html.encode("utf-8"),
             )
         elif route_path == "/api/auth":
-            return await self.handle_auth(path)
+            return await self.handle_auth(path, request_headers)
         elif isinstance(path, str) and route_path == "/api/public-url":
             try:
                 return self._json_response(json.loads(await self.handle_get_public_url()))

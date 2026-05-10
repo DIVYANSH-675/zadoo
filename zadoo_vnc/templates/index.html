@@ -1235,7 +1235,7 @@
         <div class="splash-container">
             <img src="/splash.png" alt="Authentication">
             <form id="auth-form">
-                <input type="text" id="auth-code" placeholder="Enter Code" autocomplete="off" autofocus maxlength="10">
+                <input type="text" id="auth-code" placeholder="Enter Code" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus maxlength="64">
             </form>
         </div>
     </div>
@@ -4626,7 +4626,6 @@
     <script>
         (function(){
             window.__splashVisible = true;
-            const CORRECT_CODE = 'TERMINATOR';
             document.addEventListener('DOMContentLoaded', function(){
                 try { document.body.classList.add('splash-active'); } catch(_) {}
                 const splash = document.getElementById('splash-screen');

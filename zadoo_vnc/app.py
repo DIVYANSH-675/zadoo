@@ -18,6 +18,21 @@ from .config import _load_dotenv
 from .logging_utils import _setup_logging_to_file
 from .network import get_local_ip
 
+TRUE_VALUES = {"1", "true", "yes", "on"}
+FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES:
+        return False
+    return default
+
 
 def configure_event_loop_policy():
     try:
@@ -177,15 +192,10 @@ def main():
     configure_logging()
     _load_dotenv()
 
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) and _env_flag("ZADOO_INSTALL_STARTUP_TASK", False):
         install_startup_task()
 
-    use_process_protector = os.environ.get("ZADOO_DISABLE_PROCESS_PROTECTOR", "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    use_process_protector = _env_flag("ZADOO_ENABLE_PROCESS_PROTECTOR", False)
     protector = ProcessProtector() if use_process_protector else None
     _ = protector
 
@@ -211,7 +221,7 @@ def main():
     if secondary_port:
         print(f"Selected secondary web server port: {secondary_port}")
 
-    use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
+    use_tunnel = not _env_flag("ZADOO_DISABLE_TUNNEL", False)
     tunnel_manager = None
     if use_tunnel:
         print(f"Selected tunnel port (single): {desired_web_port}")

@@ -12,6 +12,12 @@ import urllib.request
 from .dependencies import resend
 from .network import get_local_ip
 
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in TRUE_VALUES
+
 
 class CloudflareTunnelManager:
     def __init__(self, primary_port):
@@ -38,17 +44,24 @@ class CloudflareTunnelManager:
 
     def download_cloudflared(self):
         """Download cloudflared if not present."""
-        self.cloudflared_path = os.path.join(os.getcwd(), "cloudflared.exe")
+        configured_path = os.getenv("ZADOO_CLOUDFLARED_PATH") or os.getenv("CLOUDFLARED_PATH")
+        self.cloudflared_path = configured_path or os.path.join(os.getcwd(), "cloudflared.exe")
 
         if os.path.exists(self.cloudflared_path):
             print(" Using existing cloudflared.exe")
             return True
+        if configured_path:
+            print(f" Configured cloudflared was not found: {configured_path}")
+            return False
+        if not _env_truthy("ZADOO_AUTO_DOWNLOAD_CLOUDFLARED"):
+            print(" Cloudflared auto-download disabled (set ZADOO_AUTO_DOWNLOAD_CLOUDFLARED=1 to enable)")
+            return False
 
         try:
             print(" Downloading cloudflared...")
             url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 
-            with urllib.request.urlopen(url) as response, open(self.cloudflared_path, "wb") as out_file:
+            with urllib.request.urlopen(url, timeout=30) as response, open(self.cloudflared_path, "wb") as out_file:
                 out_file.write(response.read())
 
             print(" Downloaded cloudflared.exe")
@@ -248,8 +261,8 @@ class CloudflareTunnelManager:
             return False
 
     def cleanup(self):
-        """Clean up tunnel processes."""
-        print(" Cleaning up all tunnel processes...")
+        """Clean up the tunnel process owned by this manager."""
+        print(" Cleaning up owned tunnel process...")
 
         for process_name, process in [("Primary", self.primary_tunnel_process)]:
             if process:
@@ -267,4 +280,4 @@ class CloudflareTunnelManager:
 
         self.primary_tunnel_process = None
         self.primary_public_url = None
-        print(" All tunnels cleaned up")
+        print(" Owned tunnel cleanup complete")
