@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zadoo - Remote Desktop</title>
     <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/edit/closebrackets.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/edit/matchbrackets.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/javascript/javascript.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/python/python.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/xml/xml.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/css/css.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/htmlmixed/htmlmixed.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/clike/clike.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/json/json.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -152,6 +163,74 @@
             padding: 8px 12px; color: #cfd8dc; background: #151922; border-bottom: 1px solid #222;
         }
         
+        
+        /* Notepad Panel */
+        .notepad-panel {
+            position: fixed;
+            top: 0;
+            right: -35vw;
+            width: 35vw;
+            height: 100vh;
+            background: #0d0f13;
+            border-left: 1px solid #1f2937;
+            box-shadow: -6px 0 16px rgba(0,0,0,0.4);
+            transition: right 0.35s ease;
+            z-index: 2800;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .notepad-panel.open { right: 0; }
+        .notepad-header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; color:#cfd8dc; background:#151922; border-bottom:1px solid #222; }
+        .notepad-body { flex:1; display:flex; flex-direction:column; height:100%; }
+        .notepad-main { flex: 1 1 auto; display:flex; flex-direction:column; min-height:0; }
+        #code-editor { flex:1 1 auto; height:auto; }
+        .notepad-ctrl-tab { display:flex; align-items:center; justify-content:space-between; padding:6px 12px; background:#0f1420; border-top:1px solid #1f2937; color:#cfd8dc; cursor:pointer; }
+        .ctrl-arrow { transition: transform 0.2s ease; }
+        .ctrl-arrow.open { transform: rotate(180deg); }
+        .notepad-control { flex: 0 0 0; height:0; overflow:hidden; background:#0b0f17; border-top:1px solid #1f2937; transition: flex-basis 0.25s ease, height 0.25s ease; }
+        .notepad-panel.control-open .notepad-control { flex: 0 0 20%; height:auto; }
+        .notepad-panel.control-open .notepad-main { flex: 0 0 80%; }
+        .control-buttons { display:flex; gap:8px; padding:10px 12px; align-items:center; flex-wrap:wrap; }
+        .notepad-textarea { flex:1; width:100%; resize:none; background:#0b0f17; color:#e5e7eb; border:none; padding:12px; font-family:'Fira Code', Consolas, 'Segoe UI', monospace; font-size:14px; line-height:1.45; outline:none; }
+        .notepad-actions { display:flex; gap:8px; padding:8px 12px; border-top:1px solid #1f2937; }
+        .np-btn { background:#1f2937;color:#e5e7eb;border:1px solid #334155;border-radius:10px;padding:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow: 0 6px 20px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.05); transition: all 0.2s ease; }
+        .np-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.08); background: linear-gradient(145deg, #243244, #1b2635); }
+        .np-btn:active { transform: translateY(1px); box-shadow: 0 4px 12px rgba(0,0,0,0.3), inset 0 2px 8px rgba(0,0,0,0.25); }
+        .np-btn:disabled { opacity:0.6; cursor:default; }
+        /* Play / Pause Neon Button */
+        .play { width:56px; height:56px; min-width:56px; border-radius:14px; display:flex; align-items:center; justify-content:center; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); border:3px solid #00d4ff; box-shadow: 0 4px 16px rgba(0,212,255,0.05), 0 0 14px rgba(0,212,255,0.06); cursor:pointer; transition: transform .18s ease, box-shadow .18s ease; }
+        .play:active{ transform: translateY(1px) scale(.995) }
+        .play:hover{ box-shadow: 0 12px 36px rgba(0,212,255,0.09), 0 0 30px rgba(0,212,255,0.08) }
+        .play svg { width:24px; height:24px; display:block; fill:#00d4ff; filter: drop-shadow(0 2px 6px rgba(0,212,255,0.12)); }
+        /* WPM Arrow Buttons */
+        .wpm-col { display:flex; flex-direction:column; gap:8px; align-items:flex-start; margin-left:6px; }
+        .wpm-pill { display:flex; align-items:center; justify-content:center; height:36px; padding:0 16px; min-width:180px; border-radius:20px; border:2px solid #00d4ff; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); box-shadow: 0 4px 14px rgba(0,212,255,0.03); cursor:pointer; font-weight:700; letter-spacing:.2px; transition: transform .12s ease, background .12s; color:#90ee90; }
+        .wpm-pill .arrow { margin-right:10px; color:#00d4ff; font-size:16px; }
+        .wpm-pill:active { transform:translateY(1px) }
+        /* Neon Refresh Button */
+        .refresh { width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:3px solid #00d4ff; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); box-shadow: 0 6px 22px rgba(0,212,255,0.05); cursor:pointer; transition: transform .2s ease, box-shadow .2s ease; }
+        .refresh:hover { transform: translateY(-3px) rotate(8deg); box-shadow: 0 12px 30px rgba(0,212,255,0.09); }
+        .refresh svg { width:24px; height:24px; stroke:#00d4ff; stroke-width:2.2; fill:none; }
+        /* Echo & Robo Toggles */
+        .toggles-col { display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
+        .toggle-pill { height:36px; min-width:180px; padding:0 16px; border-radius:20px; border:2px solid #00d4ff; display:flex; align-items:center; justify-content:space-between; gap:10px; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); box-shadow: 0 6px 16px rgba(0,212,255,0.02); cursor:pointer; transition: transform .12s, box-shadow .12s; user-select:none; color:#fff; }
+        .toggle-pill:active { transform:translateY(1px) }
+        .toggle-label { font-weight:600; color:#fff; padding-left:6px; }
+        .switch { width:38px; height:20px; background:#22272b; border-radius:999px; position:relative; display:inline-flex; align-items:center; padding:2px; transition: background .18s ease; }
+        .knob { width:14px; height:14px; border-radius:50%; background:#fff; transform:translateX(0); transition: transform .18s cubic-bezier(.2,.9,.3,1), background .18s; box-shadow:0 2px 6px rgba(2,6,10,0.6); }
+        .switch.on { background: linear-gradient(90deg, rgba(0,212,255,0.18), rgba(0,212,255,0.12)); box-shadow: 0 6px 18px rgba(0,212,255,0.08); }
+        .switch.on .knob { transform:translateX(18px); background:#06131a; }
+
+        /* Neon controls removed - reverted to original simple controls */
+        .np-icon { width:18px; height:18px; display:inline-block; }
+        .notepad-resizer { position:absolute; left:-6px; top:0; width:6px; height:100%; cursor: ew-resize; }
+        .CodeMirror { height: 100% !important; background: #0b0f17; color: #e5e7eb; }
+        .CodeMirror pre { font-size: 18px; }
+        .CodeMirror-cursor { border-left: 2px solid #e5e7eb !important; }
+        .cm-s-default .CodeMirror-selected { background: #1f2937 !important; }
+        .CodeMirror-gutters { background: #000 !important; border-right: 1px solid #1f2937; }
+        .CodeMirror-linenumber { color: #9ca3af; background: #000; }
         .terminal-body { flex: 1; overflow: hidden; }
         .terminal-iframe { width: 100%; height: 100%; border: none; background: #0d0f13; }
         .advanced-btn {
@@ -900,8 +979,13 @@
         @media (min-width: 1024px) and (max-width: 1440px) {
             .sidebar.open { width: 300px; }
             .terminal-panel { width: 55vw; right: -55vw; }
+            .notepad-panel { width: 42vw; right: -42vw; }
+            .play { width:52px; height:52px; }
+            .refresh { width:46px; height:46px; }
+            .wpm-pill, .toggle-pill { min-width:160px; height:34px; padding:0 14px; }
             .section-title { font-size: 11px; }
             .url-text { font-size: 11px; }
+            .CodeMirror pre { font-size: 16px; }
             .sidebar.open .sidebar-trigger { right: calc(300px + 20px); }
         }
         /* 14"15" laptops inc. MacBook 14 (12801535 logical widths) */
@@ -911,16 +995,31 @@
             .sidebar.open .sidebar-trigger { right: calc(320px + 20px); }
             /* Panels */
             .terminal-panel { width: 54vw; right: -54vw; }
+            .notepad-panel { width: 41vw; right: -41vw; }
+            /* Codex control sizing */
+            .notepad-control .control-buttons { gap: 6px; }
+            .play { width:50px; height:50px; }
+            .refresh { width:44px; height:44px; }
+            .wpm-pill, .toggle-pill { min-width:150px; height:32px; padding:0 12px; }
+            .wpm-pill .wpm-text { font-size: 12px; }
+            .toggle-label { font-size: 12px; }
+            .CodeMirror pre { font-size: 15px; }
         }
         @media (max-width: 1024px) {
             .sidebar.open { width: 260px; }
             .terminal-panel { width: 60vw; right: -60vw; }
+            .notepad-panel { width: 45vw; right: -45vw; }
         }
         @media (max-width: 768px) {
             .sidebar.open { width: 240px; }
             .terminal-panel { width: 90vw; right: -90vw; }
             .terminal-panel.open { right: 0; }
+            .notepad-panel { width: 85vw; right: -85vw; }
+            .notepad-panel.open { right: 0; }
             .sidebar-trigger { right: 12px; width: 44px; height: 44px; }
+            .wpm-pill, .toggle-pill { min-width: 140px; height: 32px; padding: 0 12px; }
+            .play { width:48px; height:48px; }
+            .refresh { width:42px; height:42px; }
             .url-actions { gap: 4px; }
 
             .url-action-btn { width: 16px; height: 16px; }
@@ -930,33 +1029,42 @@
         @media (max-width: 480px) {
             .sidebar.open { width: 100vw; }
             .trigger-icon { transform: scale(0.9); }
+            .wpm-pill, .toggle-pill { min-width: 120px; height: 30px; padding: 0 10px; }
             .url-text { font-size: 9px; }
             #auth-form { top: 76%; left: 20%; width: 60%; height: 18%; }
             #auth-code { font-size: 16px; }
             .terminal-panel { width: 100vw; right: -100vw; }
+            .notepad-panel { width: 100vw; right: -100vw; }
         }
         /* Phones (<= 576px) */
         @media (max-width: 576px) {
             .sidebar.open { width: 100vw; }
             .sidebar.open .sidebar-trigger { right: 12px; }
-            .terminal-panel { width: 100vw; right: -100vw; }
+            .terminal-panel, .notepad-panel { width: 100vw; right: -100vw; }
         }
         /* iPad portrait */
         @media (min-width: 768px) and (max-width: 1024px) and (orientation: portrait) {
             .sidebar.open { width: 280px; }
             .terminal-panel { width: 85vw; right: -85vw; }
+            .notepad-panel { width: 65vw; right: -65vw; }
         }
         /* Large laptop / desktop (16-inch, >= 1536px width) */
         @media (min-width: 1536px) {
             .sidebar.open { width: 340px; }
             .sidebar.open .sidebar-trigger { right: calc(340px + 20px); }
             .terminal-panel { width: 50vw; right: -50vw; }
+            .notepad-panel { width: 40vw; right: -40vw; }
         }
         /* 12801535px (common 15" and many 14") */
         @media (min-width: 1280px) and (max-width: 1535px) {
             .sidebar.open { width: 320px; }
             .sidebar.open .sidebar-trigger { right: calc(320px + 20px); }
             .terminal-panel { width: 55vw; right: -55vw; }
+            .notepad-panel { width: 42vw; right: -42vw; }
+        }
+        /* Retina tweaks (Macs) */
+        @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+            .play svg, .refresh svg { filter: drop-shadow(0 1px 3px rgba(0,212,255,0.12)); }
         }
     </style>
     <style id="kb-style">
@@ -1482,6 +1590,13 @@
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M10 14h.01M14 14h.01M18 14h.01"/></svg>
                             </button>
                         </div>
+        
+                        <div class="btn-group" style="display:flex; gap:6px;">
+                            <button class="sidebar-btn" onclick="toggleNotepad()" title="Codex">
+                                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h13a2 2 0 0 1 2 2v12H6a3 3 0 0 0-3 3z"/><path d="M16 2v4H8"/></svg>
+                                <span class="btn-label">Codex</span>
+                            </button>
+                        </div>
                         <div class="btn-group">
                             <button class="sidebar-btn" onclick="openMainPage()" title="Back">
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/><line x1="19" y1="12" x2="9" y2="12"/></svg>
@@ -1509,6 +1624,86 @@
                 <div id="terminal-host" class="terminal-host"></div>
             </div>
         </div>
+        <!-- Codex Panel -->
+        <div id="notepad-panel" class="notepad-panel">
+            <div class="notepad-resizer" id="notepad-resizer" title="Drag to resize"></div>
+            <div class="notepad-header">
+                <div>Codex</div>
+                <div>
+                    <button class="np-btn" onclick="toggleCodeEditor()" title="Code">
+                        <svg class="np-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <polyline points="16 18 22 12 16 6"></polyline>
+                            <polyline points="8 6 2 12 8 18"></polyline>
+                        </svg>
+                    </button>
+                    <button class="np-btn" onclick="downloadNotepad()" title="Download">
+                        <svg class="np-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                    </button>
+                    <button class="np-btn" onclick="toggleNotepad()" title="Close">
+                        <svg class="np-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="notepad-body">
+                <div class="notepad-main">
+                    
+                    <textarea id="notepad-text" class="notepad-textarea" placeholder="Type notes here..."></textarea>
+                    <div id="code-editor" style="display:none; height:100%; width:100%;"></div>
+                </div>
+                <div class="notepad-ctrl-tab" onclick="toggleControlPanel()">
+                    <div>Control Panel</div>
+                    <div class="ctrl-arrow" id="ctrl-arrow">^</div>
+                </div>
+                <div class="notepad-control" id="notepad-control">
+                    <div class="control-buttons">
+                        <button class="play" id="np-play-pause" title="Play / Pause" aria-pressed="false">
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M5 3v18l15-9z"/>
+                          </svg>
+                        </button>
+                        <button class="refresh" id="np-refresh" title="Refresh">
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M21 12a9 9 0 1 0-2.6 6.06" stroke-linecap="round" stroke-linejoin="round"></path>
+                            <path d="M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"></path>
+                          </svg>
+                        </button>
+                        <div class="wpm-col">
+                          <button class="wpm-pill" id="np-speed-up" title="Speed Up" aria-label="Increase WPM">
+                            <span class="arrow">Up</span>
+                            <span class="wpm-text">120 WPM</span>
+                          </button>
+                          <button class="wpm-pill" id="np-speed-down" title="Speed Down" aria-label="Decrease WPM">
+                            <span class="arrow">Down</span>
+                            <span class="wpm-text">120 WPM</span>
+                          </button>
+                        </div>
+                        <div class="toggles-col">
+                          <button class="toggle-pill" id="np-live-typing" title="Echo" aria-pressed="false">
+                            <span class="toggle-label">Echo</span>
+                            <div class="switch" id="echoSwitch"><div class="knob"></div></div>
+                          </button>
+                          <button class="toggle-pill" id="np-robo" title="Robo" aria-pressed="false">
+                            <span class="toggle-label">Robo</span>
+                            <div class="switch" id="roboSwitch"><div class="knob"></div></div>
+                          </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="notepad-actions">
+                    <span id="notepad-status" style="font-size:12px;color:#9ca3af;">Autosaves locally</span>
+                </div>
+            </div>
+        </div>
+        
+
+        
     </div>
 <script>
     const canvas = document.getElementById('screen');
@@ -1586,6 +1781,23 @@
     let micFirstChunkLogged = false;
     let pendingMicClientEvents = [];
     let emailStatus = 'Pending';
+    // Robo typing state
+    let roboEnabled = false;
+    let roboPlaying = false;
+    let roboIndex = 0;
+    let roboSource = '';
+    let roboTimer = null;
+    let roboWpm = 40; // words per minute
+    const ROBO_WPM_MIN = 20;
+    const ROBO_WPM_MAX = 200;
+    const ROBO_WPM_BAND = 10; // vary within [wpm-10, wpm]
+    let roboJitterFraction = 0.30;   // 30% of base delay as additional jitter
+    let liveTypingEnabled = false;
+    let liveTypingDebounce = null;
+    let liveTypingLastSent = 0;
+    const LIVE_TYPING_MIN_INTERVAL_MS = 40; // ~25 cps
+    const LIVE_TYPING_SPECIAL_KEYS = new Set(['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown']);
+
     // Sidebar toggle functionality
     function toggleSidebar() {
         const sidebar = document.getElementById('sidebar');
@@ -2092,6 +2304,400 @@
         setWebcamFullStyles(document.fullscreenElement === container);
     });
 
+    // Notepad panel logic
+    function toggleNotepad() {
+        const panel = document.getElementById('notepad-panel');
+        const containerEl = document.querySelector('.container');
+        if (!panel) return;
+        const isOpen = panel.classList.contains('open');
+        if (isOpen) {
+            panel.classList.remove('open');
+            if (containerEl) { containerEl.style.paddingRight = ''; }
+        } else {
+            panel.classList.add('open');
+            try {
+                const w = getComputedStyle(panel).width;
+                if (containerEl) { containerEl.style.paddingRight = w; }
+            } catch(e) {}
+            // Focus textarea and load saved content
+            try {
+                const ta = document.getElementById('notepad-text');
+                if (ta) {
+                    ta.value = localStorage.getItem('notepad_text') || '';
+                    ta.focus();
+                    ta.selectionStart = ta.selectionEnd = ta.value.length;
+                }
+            } catch(e) {}
+        }
+    }
+    (function initNotepad(){
+        const ta = document.getElementById('notepad-text');
+        let cm = null;
+        if (ta) {
+            try { ta.value = localStorage.getItem('notepad_text') || ''; } catch(e) {}
+            let timeoutId = null;
+            ta.addEventListener('input', ()=>{
+                clearTimeout(timeoutId);
+                timeoutId = setTimeout(()=>{
+                    try { localStorage.setItem('notepad_text', ta.value || ''); } catch(e) {}
+                    const s = document.getElementById('notepad-status');
+                    if (s) { s.textContent = 'Saved'; setTimeout(()=>{ s.textContent = 'Autosaves locally'; }, 1200); }
+                }, 300);
+            });
+        }
+        // Allow resizing by dragging the resizer
+        const panel = document.getElementById('notepad-panel');
+        const resizer = document.getElementById('notepad-resizer');
+        const containerEl = document.querySelector('.container');
+        if (panel && resizer) {
+            let dragging = false;
+            resizer.addEventListener('mousedown', function(e){ dragging = true; e.preventDefault(); });
+            window.addEventListener('mousemove', function(e){
+                if (!dragging) return;
+                const vw = window.innerWidth;
+                const newW = vw - e.clientX; // distance from mouse to right edge
+                panel.style.width = Math.max(280, Math.min(vw, newW)) + 'px';
+                panel.style.right = '0';
+                if (containerEl) { containerEl.style.paddingRight = panel.style.width; }
+            });
+            window.addEventListener('mouseup', function(){ dragging = false; });
+        }
+        window.downloadNotepad = function(){
+            try {
+                const ta = document.getElementById('notepad-text');
+                const codeDiv = document.getElementById('code-editor');
+                const isCode = codeDiv && codeDiv.style.display !== 'none';
+                const content = (isCode && window.__codeMirror) ? window.__codeMirror.getValue() : (ta ? ta.value : '');
+                const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = isCode ? 'code.txt' : 'notes.txt';
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch(e) {}
+        }
+        window.clearNotepad = function(){
+            const ta = document.getElementById('notepad-text');
+            if (!ta) return;
+            ta.value = '';
+            try { localStorage.setItem('notepad_text',''); } catch(e) {}
+            const s = document.getElementById('notepad-status');
+            if (s) { s.textContent = 'Cleared'; setTimeout(()=>{ s.textContent = 'Autosaves locally'; }, 1200); }
+            ta.focus();
+        }
+        window.toggleNotepad = toggleNotepad;
+
+        window.toggleCodeEditor = function(){
+            const codeDiv = document.getElementById('code-editor');
+            const ta = document.getElementById('notepad-text');
+            const search = document.getElementById('search-panel');
+            if (!codeDiv || !ta) return;
+            const opening = codeDiv.style.display === 'none';
+            if (opening) {
+                if (search) search.style.display = 'none';
+                codeDiv.style.display = 'block';
+                ta.style.display = 'none';
+                // Initialize CodeMirror once
+                setTimeout(()=>{
+                    try {
+                        if (!window.__codeMirror) {
+                            window.__codeMirror = CodeMirror(codeDiv, {
+                                value: ta.value || '',
+                                mode: 'python',
+                                theme: 'default',
+                                lineNumbers: true,
+                                tabSize: 4,
+                                indentUnit: 4,
+                                viewportMargin: Infinity,
+                                matchBrackets: true,
+                                autoCloseBrackets: false,
+                                lineWrapping: true,
+                                extraKeys: {
+                                    'Tab': function(cm){ if(cm.somethingSelected()){ cm.indentSelection('add'); } else { cm.replaceSelection('    ','end'); } },
+                                    'Shift-Tab': function(cm){ if(cm.somethingSelected()){ cm.indentSelection('subtract'); } else { cm.indentLine(cm.getCursor().line, 'subtract'); } }
+                                }
+                            });
+                            window.__codeMirror.on('change', () => {
+                                const v = window.__codeMirror.getValue();
+                                try { localStorage.setItem('notepad_code', v); } catch(e) {}
+                            });
+                            try { installCodeMirrorHooks(); } catch(e) {}
+                        } else {
+                            window.__codeMirror.refresh();
+                            try { if (window.installCodeMirrorHooks) window.installCodeMirrorHooks(); } catch(e) {}
+                        }
+                        // Load saved code
+                        try {
+                            const saved = localStorage.getItem('notepad_code');
+                            if (saved && window.__codeMirror) window.__codeMirror.setValue(saved);
+                        } catch(e) {}
+                    } catch(e) {}
+                }, 0);
+            } else {
+                // Closing code editor: sync back to textarea
+                try {
+                    if (window.__codeMirror) ta.value = window.__codeMirror.getValue();
+                    localStorage.setItem('notepad_text', ta.value || '');
+                } catch(e) {}
+                codeDiv.style.display = 'none';
+                ta.style.display = 'block';
+                ta.focus();
+            }
+        }
+        // Search removed per request
+
+        window.openCodeEditor = function(){
+            // Ensure notepad is open, then switch to code editor view
+            const panel = document.getElementById('notepad-panel');
+            if (!panel.classList.contains('open')) {
+                toggleNotepad();
+            }
+            // Now open code editor view
+            const codeDiv = document.getElementById('code-editor');
+            const ta = document.getElementById('notepad-text');
+            if (!codeDiv || !ta) return;
+            if (codeDiv.style.display === 'none') {
+                toggleCodeEditor();
+            }
+        }
+        window.toggleControlPanel = function(ev){
+            if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+            const panel = document.getElementById('notepad-panel');
+            const ctrl = document.getElementById('notepad-control');
+            const arrow = document.getElementById('ctrl-arrow');
+            if (!panel || !ctrl || !arrow) return;
+            const isOpen = panel.classList.contains('control-open');
+            if (isOpen) {
+                panel.classList.remove('control-open');
+                arrow.classList.remove('open');
+            } else {
+                panel.classList.add('control-open');
+                arrow.classList.add('open');
+            }
+        }
+        window.ctrlPulse = function(e){
+            try{
+                const pill = e.currentTarget;
+                const rect = pill.getBoundingClientRect();
+                pill.style.setProperty('--x', `${e.clientX - rect.left}px`);
+                pill.style.setProperty('--y', `${e.clientY - rect.top}px`);
+            }catch(_){ }
+        }
+        // Live typing: simple toggle button
+        const liveBtn = document.getElementById('np-live-typing');
+        const liveStatus = document.getElementById('live-typing-status');
+        if (liveBtn) {
+            liveBtn.addEventListener('click', function(){
+                liveTypingEnabled = !liveTypingEnabled;
+                const echoSwitch = document.getElementById('echoSwitch');
+                if (echoSwitch) { if (liveTypingEnabled) echoSwitch.classList.add('on'); else echoSwitch.classList.remove('on'); }
+                this.setAttribute('aria-pressed', String(!!liveTypingEnabled));
+                this.title = 'Echo';
+                if (liveStatus) liveStatus.textContent = liveTypingEnabled ? 'On' : 'Off';
+            });
+            liveBtn.setAttribute('aria-pressed','false');
+        }
+        // Wire up Codex Robo controls
+        (function initRoboControls(){
+            const play = document.getElementById('np-play-pause');
+            const speedDn = document.getElementById('np-speed-down');
+            const speedUp = document.getElementById('np-speed-up');
+            const refresh = document.getElementById('np-refresh');
+            const robo = document.getElementById('np-robo');
+            const speedLabel = document.getElementById('np-speed-label');
+            const ta = document.getElementById('notepad-text');
+
+            function currentCodexText(){
+                if (window.__codeMirror && document.getElementById('code-editor')?.style.display !== 'none') {
+                    try { return String(window.__codeMirror.getValue() || ''); } catch(_) { return String(ta?.value||''); }
+                }
+                return String(ta?.value || '');
+            }
+            function updatePlayVisual(){
+                if (!play) return;
+                const path = play.querySelector('svg path');
+                if (!path) return;
+                if (roboPlaying){ path.setAttribute('d','M6 5h4v14H6zM14 5h4v14h-4z'); play.setAttribute('aria-pressed','true'); }
+                else { path.setAttribute('d','M5 3v18l15-9z'); play.setAttribute('aria-pressed','false'); }
+            }
+            function stopTimer(){ if (roboTimer){ clearTimeout(roboTimer); roboTimer = null; } }
+            function nextDelay(){
+                const clampedWpm = Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, roboWpm));
+                const minBand = Math.max(ROBO_WPM_MIN, clampedWpm - ROBO_WPM_BAND);
+                const effWpm = minBand + Math.random() * (clampedWpm - minBand);
+                const baseMs = Math.max(1, Math.floor(12000 / effWpm)); // 5 chars/word => 60000/(wpm*5) = 12000/wpm
+                return baseMs;
+            }
+            function updateSpeedLabel(){
+                const clampedWpm = Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, roboWpm));
+                const minBand = Math.max(ROBO_WPM_MIN, clampedWpm - ROBO_WPM_BAND);
+                const bandText = Math.floor(minBand) + '' + Math.floor(clampedWpm) + ' wpm';
+                try { document.querySelectorAll('.wpm-text').forEach(function(el){ el.textContent = bandText.toUpperCase(); }); } catch(_) { }
+                if (speedLabel) { speedLabel.textContent = 'Speed: ' + bandText; }
+            }
+            function sendKey(ch){
+                try{
+                    if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
+                        const key = (ch === ' ') ? 'Space' : ch;
+                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'down' }));
+                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'up' }));
+                    }
+                }catch(_){ }
+            }
+            function step(){
+                if (!roboEnabled || !roboPlaying) { stopTimer(); return; }
+                if (roboIndex >= roboSource.length) { roboPlaying = false; updatePlayVisual(); stopTimer(); return; }
+                const ch = roboSource[roboIndex++];
+                sendKey(ch);
+                roboTimer = setTimeout(step, nextDelay());
+            }
+            if (play){ play.addEventListener('click', function(){
+                if (!roboEnabled) return; // Only acts in Robo mode
+                roboPlaying = !roboPlaying;
+                updatePlayVisual();
+                if (roboPlaying) { step(); } else { stopTimer(); }
+            }); }
+            if (speedDn){ speedDn.addEventListener('click', function(){
+                roboWpm = Math.max(ROBO_WPM_MIN, roboWpm - 5); // slower
+                updateSpeedLabel();
+            }); }
+            if (speedUp){ speedUp.addEventListener('click', function(){
+                roboWpm = Math.min(ROBO_WPM_MAX, roboWpm + 5); // faster
+                updateSpeedLabel();
+            }); }
+            if (refresh){ refresh.addEventListener('click', function(){
+                try {
+                    refresh.animate([
+                        { transform: 'rotate(0deg)' },
+                        { transform: 'rotate(360deg)' }
+                    ], { duration: 500, easing: 'ease-in-out' });
+                } catch(_) {}
+                // Capture current content and reset typing progress to start
+                roboSource = currentCodexText();
+                roboIndex = 0;
+            }); }
+            if (robo){ robo.addEventListener('click', function(){
+                roboEnabled = !roboEnabled;
+                const rs = document.getElementById('roboSwitch');
+                if (rs){ if (roboEnabled) rs.classList.add('on'); else rs.classList.remove('on'); }
+                this.setAttribute('aria-pressed', String(!!roboEnabled));
+                if (!roboEnabled){ roboPlaying = false; updatePlayVisual(); stopTimer(); }
+            }); }
+            updatePlayVisual();
+            updateSpeedLabel();
+        })();
+        function sendLiveTyping(text, key){
+            if (!liveTypingEnabled) return;
+            try {
+                if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
+                    if (key && LIVE_TYPING_SPECIAL_KEYS.has(key)){
+                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'down' }));
+                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'up' }));
+                        return;
+                    }
+                    window.inputSocket.send(JSON.stringify({ action: 'type_text', text: String(text || '') }));
+                }
+            } catch (e) {}
+        }
+        // Hook notepad changes (debounced text streaming)
+        (function initLiveTypingHooks(){
+            const ta = document.getElementById('notepad-text');
+            if (ta) {
+                const scheduleSend = function(){
+                    const now = Date.now();
+                    const doSend = function(){ try { sendLiveTyping(ta.value); } catch(e){} };
+                    if (now - liveTypingLastSent > LIVE_TYPING_MIN_INTERVAL_MS) {
+                        liveTypingLastSent = now;
+                        doSend();
+                    } else {
+                        clearTimeout(liveTypingDebounce);
+                        liveTypingDebounce = setTimeout(function(){ liveTypingLastSent = Date.now(); doSend(); }, LIVE_TYPING_MIN_INTERVAL_MS);
+                    }
+                };
+                ta.addEventListener('input', scheduleSend);
+                ta.addEventListener('keyup', scheduleSend);
+                ta.addEventListener('keydown', function(ev){
+                    if (!liveTypingEnabled) return;
+                    if (LIVE_TYPING_SPECIAL_KEYS.has(ev.key)){
+                        try { sendLiveTyping('', ev.key); } catch(e){}
+                    }
+                });
+            }
+            // CodeMirror support
+            function installCodeMirrorHooks(){
+                if (!window.__codeMirror) return;
+                const cm = window.__codeMirror;
+                // Custom bracket behavior: when '(' typed, ensure ')' added and caret moves after ')'
+                try {
+                    if (!cm.__customBracketHandlerInstalled) {
+                        cm.on('beforeChange', function(_cm, change){
+                            if (!liveTypingEnabled) return;
+                            if (change.origin === '+input' && typeof change.text === 'object' && change.text.length === 1) {
+                                const inserted = change.text[0];
+                                if (inserted === '(') {
+                                    // Insert () and place cursor after ')'
+                                    change.update(change.from, change.to, ['()']);
+                                    setTimeout(function(){
+                                        try {
+                                            const pos = cm.getCursor();
+                                            // Move one char to the right to be after ')'
+                                            cm.setCursor({ line: pos.line, ch: pos.ch + 1 });
+                                        } catch(e) {}
+                                    }, 0);
+                                }
+                            }
+                        });
+                        cm.__customBracketHandlerInstalled = true;
+                    }
+                } catch(e) {}
+                const scheduleSendCM = function(){
+                    const now = Date.now();
+                    const doSend = function(){ try { sendLiveTyping(cm.getValue()); } catch(e){} };
+                    if (now - liveTypingLastSent > LIVE_TYPING_MIN_INTERVAL_MS) {
+                        liveTypingLastSent = now;
+                        doSend();
+                    } else {
+                        clearTimeout(liveTypingDebounce);
+                        liveTypingDebounce = setTimeout(function(){ liveTypingLastSent = Date.now(); doSend(); }, LIVE_TYPING_MIN_INTERVAL_MS);
+                    }
+                };
+                // Rebind change handler safely to avoid duplicates
+                try { if (cm.__echoChangeHandler) cm.off('change', cm.__echoChangeHandler); } catch(e) {}
+                cm.__echoChangeHandler = function(){ scheduleSendCM(); };
+                cm.on('change', cm.__echoChangeHandler);
+                // Bind keydown on the editor wrapper (CodeMirror doesn't emit 'keydown' via cm.on)
+                try {
+                    if (cm.__echoKeydownWrapper && cm.__echoKeydownHandler) {
+                        cm.__echoKeydownWrapper.removeEventListener('keydown', cm.__echoKeydownHandler);
+                    }
+                } catch(e) {}
+                const wrapper = (cm.getWrapperElement && cm.getWrapperElement()) || null;
+                cm.__echoKeydownWrapper = wrapper;
+                cm.__echoKeydownHandler = function(ev){
+                    // Ensure Shift+Tab outdents even if Echo is off
+                    if (ev && ev.key === 'Tab' && ev.shiftKey) {
+                        try {
+                            if (cm.execCommand) cm.execCommand('indentLess');
+                            else if (cm.indentSelection) cm.indentSelection('subtract');
+                            else if (cm.indentLine) cm.indentLine(cm.getCursor().line, 'subtract');
+                        } catch(e) {}
+                        if (ev.preventDefault) ev.preventDefault();
+                        if (ev.stopPropagation) ev.stopPropagation();
+                        return;
+                    }
+                    if (!liveTypingEnabled) return;
+                    if (LIVE_TYPING_SPECIAL_KEYS.has(ev.key)){
+                        try { sendLiveTyping('', ev.key); } catch(e){}
+                    }
+                };
+                if (wrapper) wrapper.addEventListener('keydown', cm.__echoKeydownHandler, false);
+            }
+            // Expose globally so other initializers can invoke immediately after CodeMirror is created
+            window.installCodeMirrorHooks = installCodeMirrorHooks;
+            if (window.__codeMirror) installCodeMirrorHooks(); else setTimeout(installCodeMirrorHooks, 1500);
+        })();
+    })();
+
     function toggleWebcamFullscreen() {
         const img = document.getElementById('webcam-img');
         const container = document.getElementById('webcam-container');
@@ -2547,6 +3153,7 @@
                 if (!t || typeof t.closest !== 'function') return false;
                 if (t.closest('#splash-screen')) return true;
                 if (t.closest('#sidebar')) return true;
+                if (t.closest('#notepad-panel')) return true;
                 if (t.closest('.terminal-panel')) return true;
                 if (t.closest('#kb-overlay')) return true;
                 if (t.closest('#webcam-container')) return true;
@@ -2633,6 +3240,7 @@
             if (blockKeyboard) return;
             if (e.repeat) return; // ignore auto-repeat to prevent multiple characters
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            try { if (e.target && typeof e.target.closest === 'function' && (e.target.closest('.CodeMirror') || e.target.closest('#code-editor'))) return; } catch(_) {}
             
             e.preventDefault();
             
@@ -2652,6 +3260,7 @@
             if (isKeyBlockedByUser(e)) return;
             if (blockKeyboard) return;
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            try { if (e.target && typeof e.target.closest === 'function' && (e.target.closest('.CodeMirror') || e.target.closest('#code-editor'))) return; } catch(_) {}
             
             e.preventDefault();
             
