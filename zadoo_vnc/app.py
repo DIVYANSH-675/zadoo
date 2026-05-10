@@ -239,15 +239,14 @@ def main():
         pass
     if tunnel_manager:
         vnc_server.set_tunnel_manager(tunnel_manager)
-        try:
-            print("Launching tunnel thread (single tunnel)...")
-            threading.Thread(target=tunnel_manager.start_primary_tunnel, daemon=True).start()
-        except Exception:
-            pass
+        print("Tunnel will launch after the local server binds successfully...")
 
     capturer = ScreenCapturer(fps=vnc_server.current_fps, quality=vnc_server.current_quality)
     vnc_server.screen_capturer = capturer
-    vnc_server.screen_capturer.quality = vnc_server.current_quality
+    try:
+        vnc_server._apply_stream_profile("startup")
+    except Exception:
+        vnc_server.screen_capturer.quality = vnc_server.current_quality
     capturer.start()
 
     try:

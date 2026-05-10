@@ -15,7 +15,7 @@ from http.cookies import SimpleCookie
 from websockets.datastructures import Headers
 from websockets.http11 import Response as WSResponse
 
-from .assets import load_host_controls_html, load_index_html, load_terminal_html
+from .assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
@@ -180,7 +180,7 @@ class RoutesMixin:
     def _http_feature_for_route(self, route_path):
         if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
             return "public"
-        if route_path in {"/api/public-url", "/snapshot"}:
+        if route_path in {"/api/public-url", "/api/stream-stats", "/benchmark.html", "/snapshot"}:
             return "view"
         if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
             return "control"
@@ -232,16 +232,39 @@ class RoutesMixin:
 
     def _apply_quality(self, raw_value, default=75):
         try:
-            value = max(1, min(95, int(raw_value)))
+            value = max(1, min(100, int(raw_value)))
         except Exception:
-            value = max(1, min(95, int(default)))
+            value = max(1, min(100, int(default)))
         self.current_quality = value
+        self._quality_locked_by_user = True
         if self.screen_capturer:
             self.screen_capturer.quality = value
+        try:
+            # Quality controls compression and visual resolution. Re-apply the
+            # active adaptive profile so high quality immediately restores
+            # full-resolution capture instead of waiting for the next profile change.
+            previous_fps = getattr(self, "current_fps", None)
+            self._apply_stream_profile("quality_changed")
+            if previous_fps is not None:
+                self.current_fps = previous_fps
+                if self.screen_capturer:
+                    self.screen_capturer.fps = previous_fps
+        except Exception:
+            pass
         return value
 
-    def _apply_fps(self, raw_value=None, default=60):
-        value = 60
+    def _apply_fps(self, raw_value=None, default=0):
+        try:
+            raw_text = str(raw_value if raw_value is not None else "").strip().lower()
+            if raw_text in {"", "0", "max", "auto", "unlimited", "none"}:
+                value = 0
+            else:
+                value = max(1, int(raw_value))
+        except Exception:
+            try:
+                value = max(0, int(default))
+            except Exception:
+                value = 0
         self.current_fps = value
         if self.screen_capturer:
             self.screen_capturer.fps = value
@@ -365,6 +388,13 @@ class RoutesMixin:
             return self._json_response(await self.handle_set_quality(path))
         elif isinstance(path, str) and route_path == "/api/set-fps":
             return self._json_response(await self.handle_set_fps(path))
+        elif isinstance(path, str) and route_path == "/api/stream-stats":
+            try:
+                stats = self._capture_stats_payload()
+                stream = self._stream_status_payload()
+                return self._json_response({"success": True, "stats": stats, "stream": stream})
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif isinstance(path, str) and route_path == "/api/set-clipboard-image":
             status, headers_dict, body = await self.handle_set_clipboard_image(request_headers)
             headers = Headers()
@@ -421,6 +451,17 @@ class RoutesMixin:
                 reason_phrase=http.HTTPStatus.OK.phrase,
                 headers=headers,
                 body=term_html,
+            )
+        elif route_path == "/benchmark.html":
+            bench_html = load_benchmark_html().encode("utf-8")
+            headers = Headers()
+            headers["Content-Type"] = "text/html; charset=utf-8"
+            headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return WSResponse(
+                status_code=int(http.HTTPStatus.OK),
+                reason_phrase=http.HTTPStatus.OK.phrase,
+                headers=headers,
+                body=bench_html,
             )
         elif route_path == "/video":
             return None  # Let WebSocket handler take over

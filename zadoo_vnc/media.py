@@ -21,6 +21,97 @@ from .win32_input import *
 
 class MediaMixin:
 
+    def _apply_stream_profile(self, reason="adaptive"):
+        controller = getattr(self, "adaptive_stream", None)
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        try:
+            profile = controller.apply_to(self)
+            controller.last_reason = str(reason or controller.last_reason)
+            return profile
+        except Exception:
+            logging.debug("Adaptive stream profile apply failed", exc_info=True)
+            return None
+
+    def _stream_status_payload(self):
+        controller = getattr(self, "adaptive_stream", None)
+        if controller is not None:
+            status = controller.status()
+        else:
+            status = {
+                "enabled": False,
+                "transport_mode": "jpeg_ws",
+                "requested_transport": "jpeg_ws",
+                "fallback_reason": "",
+                "webrtc_configured": False,
+                "profile_name": "manual",
+                "status": "Balanced",
+                "last_reason": "manual",
+                "encoder_capabilities": getattr(self, "encoder_capabilities", {}),
+                "server": {},
+                "client": {},
+            }
+        status["video_clients"] = len(getattr(self, "video_clients", []))
+        status["skipped_sends"] = getattr(self, "_video_skipped_sends", 0)
+        status["inflight_sends"] = sum(
+            1 for task in getattr(self, "_video_send_tasks", {}).values() if not task.done()
+        )
+        status["effective_quality"] = getattr(self, "current_quality", None)
+        status["quality_locked"] = bool(getattr(self, "_quality_locked_by_user", True))
+        return status
+
+    async def _send_stream_status(self, websocket):
+        try:
+            await websocket.send(json.dumps({
+                "type": "stream_adaptation",
+                "stream": self._stream_status_payload(),
+            }))
+        except Exception:
+            pass
+
+    async def _broadcast_stream_status(self):
+        if not getattr(self, "video_clients", None):
+            return
+        message = json.dumps({
+            "type": "stream_adaptation",
+            "stream": self._stream_status_payload(),
+        })
+        for ws in list(self.video_clients):
+            try:
+                await ws.send(message)
+            except Exception:
+                self.video_clients.discard(ws)
+
+    def _capture_stats_payload(self):
+        if self.screen_capturer:
+            stats = self.screen_capturer.get_capture_stats()
+        else:
+            stats = {
+                "is_working": False,
+                "current_fps": 0,
+                "target_fps": self.current_fps,
+                "target_fps_mode": "max" if not self.current_fps else "fixed",
+            }
+        send_tasks = getattr(self, "_video_send_tasks", {})
+        stream = self._stream_status_payload()
+        encoder = stream.get("encoder_capabilities") or {}
+        stats.update({
+            "video_clients": len(self.video_clients),
+            "skipped_sends": getattr(self, "_video_skipped_sends", 0),
+            "inflight_sends": sum(1 for task in send_tasks.values() if not task.done()),
+            "stream_profile": stream.get("profile_name"),
+            "stream_status": stream.get("status"),
+            "stream_transport": stream.get("transport_mode"),
+            "requested_transport": stream.get("requested_transport"),
+            "webrtc_configured": stream.get("webrtc_configured"),
+            "stream_fallback_reason": stream.get("fallback_reason"),
+            "encoder_backend": encoder.get("active_encoder_backend"),
+            "preferred_video_encoder": encoder.get("preferred_video_encoder"),
+            "client_stream_stats": stream.get("client", {}),
+            "server_stream_stats": stream.get("server", {}),
+        })
+        return stats
+
     def _start_audio_capture(self, want_samplerate=48000, packet_frames=960, want_channels=2, mono_method="left"):
         """
         Robust SYSTEM-audio capture (loopback) for Windows 11 using python-soundcard.
@@ -405,6 +496,8 @@ class MediaMixin:
         self.video_clients.add(websocket)
         
         try:
+            self._apply_stream_profile("client_connected")
+            await self._send_stream_status(websocket)
             # Keep connection alive and handle any incoming messages
             async for message in websocket:
                 try:
@@ -422,6 +515,18 @@ class MediaMixin:
                     elif action == 'set_fps':
                         value = self._apply_fps(event.get('value', 30))
                         print(f" FPS set to: {value}")
+                    elif action == 'client_stream_stats':
+                        controller = getattr(self, "adaptive_stream", None)
+                        if controller is not None:
+                            controller.record_client_stats(event)
+                    elif action == 'stream_ping':
+                        await websocket.send(json.dumps({
+                            'type': 'stream_pong',
+                            'client_ts': event.get('client_ts'),
+                            'server_ts': time.time() * 1000.0,
+                        }))
+                    elif action == 'get_stream_status':
+                        await self._send_stream_status(websocket)
                     elif action == 'set_capture_method':
                         method = event.get('method', 'auto')
                         if self.screen_capturer:
@@ -462,17 +567,10 @@ class MediaMixin:
                             logging.getLogger("performance").info(msg)
                             print(f" {msg}")
                     elif action == 'get_capture_stats':
-                        if self.screen_capturer:
-                            stats = self.screen_capturer.get_capture_stats()
-                            await websocket.send(json.dumps({
-                                'type': 'capture_stats',
-                                'stats': stats
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                'type': 'capture_stats',
-                                'stats': {'is_working': False, 'current_fps': 0}
-                            }))
+                        await websocket.send(json.dumps({
+                            'type': 'capture_stats',
+                            'stats': self._capture_stats_payload()
+                        }))
                     elif action == 'verify_capture_method':
                         if self.screen_capturer:
                             verification = self.screen_capturer.verify_capture_method()
@@ -509,6 +607,9 @@ class MediaMixin:
             print(f"Error in video_stream_handler: {e}")
         finally:
             self.video_clients.discard(websocket)
+            task = getattr(self, "_video_send_tasks", {}).pop(websocket, None)
+            if task and not task.done():
+                task.cancel()
             print(f" Removed video client, {len(self.video_clients)} clients remaining")
 
     async def webcam_stream_handler(self, websocket):
@@ -1007,9 +1108,33 @@ class MediaMixin:
         frame_count = 0
         last_debug = 0
         last_sequence = 0
+        write_buffer_limit = 256_000
+        send_tasks = getattr(self, "_video_send_tasks", None)
+        if send_tasks is None:
+            send_tasks = {}
+            self._video_send_tasks = send_tasks
+        if not hasattr(self, "_video_skipped_sends"):
+            self._video_skipped_sends = 0
 
         while not self.stop_event.is_set():
             try:
+                disconnected = set()
+                for ws, task in list(send_tasks.items()):
+                    if not task.done():
+                        continue
+                    send_tasks.pop(ws, None)
+                    try:
+                        task.result()
+                        frame_count += 1
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.add(ws)
+                    except Exception as e:
+                        print(f"Error sending frame to client: {e}")
+                        disconnected.add(ws)
+
+                for ws in disconnected:
+                    self.video_clients.discard(ws)
+
                 event = getattr(self, "frame_ready_event", None)
                 if event is not None:
                     try:
@@ -1018,7 +1143,14 @@ class MediaMixin:
                     except asyncio.TimeoutError:
                         pass
                 else:
-                    await asyncio.sleep(1 / max(int(self.current_fps or 1), 1))
+                    try:
+                        target_fps = int(self.current_fps)
+                    except Exception:
+                        target_fps = 0
+                    if target_fps > 0:
+                        await asyncio.sleep(1 / target_fps)
+                    else:
+                        await asyncio.sleep(0)
 
                 if not self.screen_capturer:
                     continue
@@ -1036,46 +1168,72 @@ class MediaMixin:
                 if not self.video_clients:
                     continue
 
-                disconnected = []
-                send_tasks = []
+                max_write_buffer = 0
                 for ws in self.video_clients.copy():
+                    if ws in disconnected:
+                        continue
                     try:
                         transport = getattr(ws, "transport", None)
-                        if transport and transport.get_write_buffer_size() > 1_000_000:
+                        buffer_size = transport.get_write_buffer_size() if transport else 0
+                        max_write_buffer = max(max_write_buffer, int(buffer_size or 0))
+                        if buffer_size > write_buffer_limit:
+                            self._video_skipped_sends += 1
                             continue
-                        send_tasks.append((ws, asyncio.create_task(ws.send(frame))))
+                        existing = send_tasks.get(ws)
+                        if existing is not None and not existing.done():
+                            self._video_skipped_sends += 1
+                            continue
+                        send_tasks[ws] = asyncio.create_task(ws.send(frame))
                     except websockets.exceptions.ConnectionClosed:
-                        disconnected.append(ws)
+                        disconnected.add(ws)
                     except Exception as e:
                         print(f"Error scheduling frame send: {e}")
-                        disconnected.append(ws)
-
-                for ws, task in send_tasks:
-                    try:
-                        await asyncio.wait_for(task, timeout=0.25)
-                        frame_count += 1
-                    except websockets.exceptions.ConnectionClosed:
-                        disconnected.append(ws)
-                    except Exception as e:
-                        print(f"Error sending frame to client: {e}")
-                        task.cancel()
-                        disconnected.append(ws)
+                        disconnected.add(ws)
 
                 for ws in disconnected:
                     self.video_clients.discard(ws)
+                    task = send_tasks.pop(ws, None)
+                    if task and not task.done():
+                        task.cancel()
+
+                try:
+                    capture_stats = self.screen_capturer.get_capture_stats()
+                    frame_ts = float(capture_stats.get("last_frame_ts") or 0.0)
+                    frame_age_ms = max(0.0, (time.time() - frame_ts) * 1000.0) if frame_ts else 0.0
+                    controller = getattr(self, "adaptive_stream", None)
+                    if controller is not None and controller.observe_server(
+                        frame_bytes=len(frame),
+                        max_write_buffer=max_write_buffer,
+                        skipped_total=getattr(self, "_video_skipped_sends", 0),
+                        inflight_sends=sum(1 for task in send_tasks.values() if not task.done()),
+                        video_clients=len(self.video_clients),
+                        frame_age_ms=frame_age_ms,
+                        capture_stats=capture_stats,
+                    ):
+                        self._apply_stream_profile("adaptive_" + str(controller.last_reason))
+                        await self._broadcast_stream_status()
+                except Exception:
+                    logging.debug("Adaptive stream observe failed", exc_info=True)
 
                 if frame_count - last_debug >= 60:
                     logging.debug(
-                        "Sent %s frames to %s video client(s); seq=%s bytes=%s",
+                        "Sent %s frames to %s video client(s); seq=%s bytes=%s skipped=%s inflight=%s stream=%s",
                         frame_count,
                         len(self.video_clients),
                         sequence,
                         len(frame),
+                        getattr(self, "_video_skipped_sends", 0),
+                        sum(1 for task in send_tasks.values() if not task.done()),
+                        getattr(getattr(self, "adaptive_stream", None), "profile", None).name if getattr(self, "adaptive_stream", None) else "manual",
                     )
                     last_debug = frame_count
             except Exception as e:
                 print(f"Error in broadcast_frames: {e}")
                 await asyncio.sleep(0.05)
+
+        for task in send_tasks.values():
+            if not task.done():
+                task.cancel()
     async def broadcast_cursor_position(self):
         """Broadcast cursor position and button states to subscribed clients"""
         while not self.stop_event.is_set():

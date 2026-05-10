@@ -39,3 +39,7 @@ def load_terminal_html() -> str:
 
 def load_host_controls_html() -> str:
     return load_template("host_controls.html")
+
+
+def load_benchmark_html() -> str:
+    return load_template("benchmark.html")

@@ -66,7 +66,7 @@ def assert_imports() -> None:
     sys.path.insert(0, str(ROOT))
     import zadoo_vnc.config as config
     import zadoo_vnc.dependencies as deps
-    from zadoo_vnc.assets import load_host_controls_html, load_index_html, load_terminal_html
+    from zadoo_vnc.assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
 
@@ -77,6 +77,7 @@ def assert_imports() -> None:
         "index.html": load_index_html,
         "terminal.html": load_terminal_html,
         "host_controls.html": load_host_controls_html,
+        "benchmark.html": load_benchmark_html,
     }.items():
         if not loader().strip():
             fail(f"template did not load: {name}")
@@ -118,7 +119,62 @@ def assert_imports() -> None:
             if path == "/api/list-cameras":
                 assert_camera_payload(response.body, require_objects=True)
             else:
-                json.loads(response.body.decode("utf-8"))
+                payload = json.loads(response.body.decode("utf-8"))
+                if path.startswith("/api/set-quality") and payload.get("quality") != 80:
+                    fail(f"set-quality returned {payload.get('quality')}, expected 80")
+                if path.startswith("/api/set-fps") and payload.get("fps") != 20:
+                    fail(f"set-fps returned {payload.get('fps')}, expected 20")
+        if server.current_quality != 80:
+            fail(f"server current_quality is {server.current_quality}, expected 80")
+        if server.current_fps != 20:
+            fail(f"server current_fps is {server.current_fps}, expected 20")
+        max_fps_response = await server.process_request("/api/set-fps?value=max", headers)
+        if max_fps_response.status_code != 200:
+            fail(f"set-fps max returned {max_fps_response.status_code}, expected 200")
+        max_fps_payload = json.loads(max_fps_response.body.decode("utf-8"))
+        if max_fps_payload.get("fps") != 0 or server.current_fps != 0:
+            fail(f"set-fps max returned {max_fps_payload.get('fps')} and server current_fps={server.current_fps}, expected 0")
+        quality_100_response = await server.process_request("/api/set-quality?value=100", headers)
+        if quality_100_response.status_code != 200:
+            fail(f"set-quality 100 returned {quality_100_response.status_code}, expected 200")
+        quality_100_payload = json.loads(quality_100_response.body.decode("utf-8"))
+        if quality_100_payload.get("quality") != 100 or server.current_quality != 100:
+            fail(f"set-quality 100 returned {quality_100_payload.get('quality')} and server current_quality={server.current_quality}, expected 100")
+        if server.current_fps != 0:
+            fail(f"set-quality changed current_fps to {server.current_fps}, expected it to remain 0")
+        class DummyCapturer:
+            def __init__(self):
+                self.fps = 0
+                self.quality = 100
+                self.perf_enabled = None
+                self.perf_region = None
+                self.perf_scale_div = None
+                self.perf_grayscale = None
+            def set_performance_mode(self, enabled, region, scale_div):
+                self.perf_enabled = enabled
+                self.perf_region = region
+                self.perf_scale_div = scale_div
+            def set_grayscale(self, enabled):
+                self.perf_grayscale = enabled
+        dummy = DummyCapturer()
+        server.screen_capturer = dummy
+        if getattr(server, "adaptive_stream", None):
+            server.adaptive_stream.profile_index = 6
+        server._apply_stream_profile("smoke_quality_lock")
+        if server.current_quality != 100 or dummy.quality != 100:
+            fail("adaptive stream profile changed user-selected quality")
+        if dummy.perf_scale_div != 1 or dummy.perf_enabled:
+            fail(f"quality 100 did not force full-resolution scale: enabled={dummy.perf_enabled} scale={dummy.perf_scale_div}")
+        server.screen_capturer = None
+        stream_response = await server.process_request("/api/stream-stats", headers)
+        if stream_response.status_code != 200:
+            fail(f"stream-stats returned {stream_response.status_code}, expected 200")
+        stream_payload = json.loads(stream_response.body.decode("utf-8"))
+        if not stream_payload.get("success") or "stream" not in stream_payload:
+            fail("stream-stats payload missing success=true or stream data")
+        benchmark_response = await server.process_request("/benchmark.html", headers)
+        if benchmark_response.status_code != 200 or b"Stream Benchmark" not in benchmark_response.body:
+            fail("benchmark.html route did not return the benchmark page")
 
     asyncio.run(route_checks())
 
@@ -184,6 +240,15 @@ def assert_live(base_url: str) -> None:
     if status != 200:
         fail(f"live public-url failed: status={status}. Restart the app to load the updated routes.")
     json.loads(body.decode("utf-8"))
+
+    status, content_type, body = fetch(base_url, "/api/stream-stats", auth_headers)
+    if status != 200:
+        fail(f"live stream-stats failed: status={status}. Restart the app to load the updated routes.")
+    json.loads(body.decode("utf-8"))
+
+    status, content_type, body = fetch(base_url, "/benchmark.html", auth_headers)
+    if status != 200 or "text/html" not in content_type or b"Stream Benchmark" not in body:
+        fail(f"live benchmark route failed: status={status} content_type={content_type}")
 
     ok(f"live HTTP checks passed for {base_url}")
 

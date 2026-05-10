@@ -15,6 +15,7 @@ from .tunnel import CloudflareTunnelManager
 from .input_control import InputControlMixin
 from .media import MediaMixin
 from .routes import RoutesMixin
+from .streaming import AdaptiveStreamController, detect_encoder_capabilities
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
@@ -25,7 +26,13 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.enable_tunnel = True
         self.screen_capturer = None
         self.current_quality = 65
-        self.current_fps = 60
+        self._quality_locked_by_user = True
+        self.current_fps = 0
+        self.encoder_capabilities = detect_encoder_capabilities()
+        self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
+        if self.adaptive_stream.enabled:
+            startup_profile = self.adaptive_stream.profile
+            self.current_fps = startup_profile.target_fps
         self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.input_clients: Set[websockets.WebSocketServerProtocol] = set()
@@ -72,6 +79,8 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._blocked_keys_in_capture = set()
         self._custom_alert_cooldown_until = 0.0
         self.auth_sessions = {}
+        self._video_send_tasks = {}
+        self._video_skipped_sends = 0
 
     async def start_server(self):
         """Start WebSocket servers."""
@@ -91,6 +100,28 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         print(f"Network: http://{get_local_ip()}:{self.port}")
         print(" Internet: Check above for public URL")
         print("=" * 60)
+
+        # Bind before starting tunnels or background stream tasks, so failed
+        # starts cannot leave fresh cloudflared processes behind.
+        primary_server = await websockets.serve(
+            self.main_handler,
+            "0.0.0.0",
+            self.port,
+            process_request=self.process_request,
+            compression=None,
+        )
+
+        servers = [primary_server]
+        if self.secondary_port:
+            secondary_server = await websockets.serve(
+                self.main_handler,
+                "0.0.0.0",
+                self.secondary_port,
+                process_request=self.process_request,
+                compression=None,
+            )
+            servers.append(secondary_server)
+
         # Start host hotkey capture on server start (A/B/C/D)
         try:
             self.start_global_keyboard_hook()
@@ -118,9 +149,10 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         else:
             print(" Screen capturer not initialized")
         
-        # Start a tunnel only when enabled and one wasn't injected by app.main().
-        if self.enable_tunnel and not self.tunnel_manager:
-            self.tunnel_manager = CloudflareTunnelManager(self.port)
+        # Start a tunnel only after the server has bound successfully.
+        if self.enable_tunnel:
+            if not self.tunnel_manager:
+                self.tunnel_manager = CloudflareTunnelManager(self.port)
             threading.Thread(target=self.tunnel_manager.start_primary_tunnel, daemon=True).start()
                 
         # Start broadcast task for video streaming
@@ -129,24 +161,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # Start cursor broadcasting task
         cursor_broadcast_task = asyncio.create_task(self.broadcast_cursor_position())
         
-        # Start primary server; secondary is opt-in via ZADOO_SECONDARY_PORT.
-        primary_server = await websockets.serve(
-            self.main_handler,
-            "0.0.0.0",
-            self.port,
-            process_request=self.process_request,
-        )
-
-        servers = [primary_server]
-        if self.secondary_port:
-            secondary_server = await websockets.serve(
-                self.main_handler,
-                "0.0.0.0",
-                self.secondary_port,
-                process_request=self.process_request,
-            )
-            servers.append(secondary_server)
-
         ports = ", ".join(str(port) for port in (self.port, self.secondary_port) if port)
         print(f" VNC server running on port(s): {ports}")
         print(" Video streaming started")

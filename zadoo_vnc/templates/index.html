@@ -1404,13 +1404,14 @@
                     <div class="input-group">
                         <label class="input-label">Visual Quality <span id="quality-value" style="color:#00d4ff; font-weight:700;">65</span>%</label>
                         <input type="range" class="futuristic-range" id="quality-slider" 
-                               min="10" max="95" value="65" oninput="updateQuality(this.value)">
+                               min="10" max="100" value="65" oninput="updateQuality(this.value)" onchange="updateQuality(this.value, true)">
                     </div>
                     <div class="input-group">
                         <label class="input-label">Capture Method</label>
                         <select class="futuristic-select" id="capture-method-select" onchange="changeCaptureMethod(this.value)">
                             <option value="auto">Auto (Best Performance)</option>
                             <option value="dxcam">DXCam (100+ FPS)</option>
+                            <option value="bettercam">BetterCam (100+ FPS)</option>
                             <option value="fast_ctypes">Fast CTypes (70-125 FPS)</option>
                             <option value="mss">MSS (30-50 FPS)</option>
                         </select>
@@ -1461,6 +1462,10 @@
                     <div class="info-item">
                         <span class="info-label">Live FPS</span>
                         <span class="info-value"><span id="sidebar-fps">0</span></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Stream</span>
+                        <span class="info-value" id="stream-profile">Fast</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">Audio</span>
@@ -1718,9 +1723,24 @@
     
     const WSS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const WSS_URL = `${WSS_PROTOCOL}://${window.location.host}`;
-    const MAX_FRAME_RATE = 60;
+    let qualitySendTimer = null;
+    let pendingQualityValue = 65;
     let performanceModeEnabled = false;
     let performanceCustomRect = null;
+    const videoMetrics = {
+        receivedBytes: 0,
+        receivedFrames: 0,
+        displayedFrames: 0,
+        displayedSinceLast: 0,
+        droppedBlobs: 0,
+        droppedSinceLast: 0,
+        decodeMs: 0,
+        drawMs: 0,
+        receiveDelayMs: 0,
+        lastSentAt: performance.now(),
+        lastBytesAtSend: 0,
+        rttMs: 0
+    };
     window.performanceCustomRect = null;
     // User-blocked keys (configured via Keyboard Configure popup)
     const KB_BLOCKED_STORAGE = 'kb_blocked_v1';
@@ -2784,7 +2804,14 @@
     let videoDecodeBusy = false;
     let pendingVideoBlob = null;
 
+    function smoothMetric(previous, value, weight = 0.2) {
+        if (!Number.isFinite(value)) return previous || 0;
+        if (!previous) return value;
+        return previous * (1 - weight) + value * weight;
+    }
+
     function drawDecodedFrame(source) {
+        const drawStart = performance.now();
         const width = source.width || source.naturalWidth;
         const height = source.height || source.naturalHeight;
         if (width && height && (canvas.width !== width || canvas.height !== height)) {
@@ -2793,28 +2820,41 @@
         }
         ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
         frameCount++;
+        videoMetrics.displayedFrames++;
+        videoMetrics.displayedSinceLast++;
+        return performance.now() - drawStart;
     }
 
-    async function renderVideoBlob(blob) {
-        pendingVideoBlob = blob;
+    async function renderVideoBlob(blob, recvAt = performance.now()) {
+        if (pendingVideoBlob) {
+            videoMetrics.droppedBlobs++;
+            videoMetrics.droppedSinceLast++;
+        }
+        pendingVideoBlob = { blob, recvAt };
+        videoMetrics.receivedFrames++;
+        videoMetrics.receivedBytes += Number(blob && blob.size ? blob.size : 0);
         if (videoDecodeBusy) return;
         videoDecodeBusy = true;
         try {
             while (pendingVideoBlob) {
-                const nextBlob = pendingVideoBlob;
+                const packet = pendingVideoBlob;
                 pendingVideoBlob = null;
+                videoMetrics.receiveDelayMs = smoothMetric(videoMetrics.receiveDelayMs, performance.now() - packet.recvAt);
                 if (window.createImageBitmap) {
-                    const bitmap = await createImageBitmap(nextBlob);
-                    drawDecodedFrame(bitmap);
+                    const decodeStart = performance.now();
+                    const bitmap = await createImageBitmap(packet.blob);
+                    videoMetrics.decodeMs = smoothMetric(videoMetrics.decodeMs, performance.now() - decodeStart);
+                    const drawMs = drawDecodedFrame(bitmap);
+                    videoMetrics.drawMs = smoothMetric(videoMetrics.drawMs, drawMs);
                     if (bitmap.close) bitmap.close();
                 } else {
-                    await new Promise((resolve, reject) => {
+                    const decodeStart = performance.now();
+                    const image = await new Promise((resolve, reject) => {
                         const image = new Image();
-                        const url = URL.createObjectURL(nextBlob);
+                        const url = URL.createObjectURL(packet.blob);
                         image.onload = () => {
-                            drawDecodedFrame(image);
-                            URL.revokeObjectURL(url);
-                            resolve();
+                            image.__blobUrl = url;
+                            resolve(image);
                         };
                         image.onerror = () => {
                             URL.revokeObjectURL(url);
@@ -2822,6 +2862,10 @@
                         };
                         image.src = url;
                     });
+                    videoMetrics.decodeMs = smoothMetric(videoMetrics.decodeMs, performance.now() - decodeStart);
+                    const drawMs = drawDecodedFrame(image);
+                    videoMetrics.drawMs = smoothMetric(videoMetrics.drawMs, drawMs);
+                    if (image.__blobUrl) URL.revokeObjectURL(image.__blobUrl);
                 }
             }
         } catch (error) {
@@ -2830,6 +2874,45 @@
             videoDecodeBusy = false;
         }
     }
+
+    function handleStreamAdaptation(stream) {
+        if (!stream) return;
+        const status = stream.status || (stream.profile && stream.profile.status) || 'Balanced';
+        const el = document.getElementById('stream-profile');
+        if (el) el.textContent = status;
+    }
+
+    function sendClientStreamStats() {
+        const socket = window.videoSocket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const now = performance.now();
+        const elapsed = Math.max(0.25, (now - videoMetrics.lastSentAt) / 1000);
+        const bytesDelta = Math.max(0, videoMetrics.receivedBytes - videoMetrics.lastBytesAtSend);
+        const displayFps = videoMetrics.displayedSinceLast / elapsed;
+        const recvKbps = (bytesDelta * 8) / 1000 / elapsed;
+        const dropped = videoMetrics.droppedSinceLast;
+        videoMetrics.displayedSinceLast = 0;
+        videoMetrics.droppedSinceLast = 0;
+        videoMetrics.lastSentAt = now;
+        videoMetrics.lastBytesAtSend = videoMetrics.receivedBytes;
+        socket.send(JSON.stringify({
+            action: 'client_stream_stats',
+            display_fps: Number(displayFps.toFixed(2)),
+            decode_ms: Number(videoMetrics.decodeMs.toFixed(2)),
+            draw_ms: Number(videoMetrics.drawMs.toFixed(2)),
+            receive_delay_ms: Number(videoMetrics.receiveDelayMs.toFixed(2)),
+            recv_kbps: Number(recvKbps.toFixed(2)),
+            dropped_blobs: dropped,
+            rtt_ms: Number(videoMetrics.rttMs.toFixed(2))
+        }));
+    }
+
+    function sendStreamPing() {
+        const socket = window.videoSocket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ action: 'stream_ping', client_ts: performance.now() }));
+    }
+
     function connectVideo() {
         const videoSocket = new WebSocket(`${WSS_URL}/video`);
         videoSocket.binaryType = 'blob';
@@ -2837,13 +2920,12 @@
             updateStatus('Video Connected');
             window.videoSocket = videoSocket; // Make it globally accessible
             updateCaptureMethodSelector(); // Load available capture methods
-            updateFPS(MAX_FRAME_RATE);
-            sendPerformanceSettings();
+            videoSocket.send(JSON.stringify({ action: 'get_stream_status' }));
         };
         videoSocket.onmessage = (event) => {
             // Handle both binary (image) and text (JSON) messages
             if (event.data instanceof Blob) {
-                renderVideoBlob(event.data);
+                renderVideoBlob(event.data, performance.now());
             } else {
                 // Text data - JSON messages
                 try {
@@ -2856,6 +2938,11 @@
                         handleCaptureVerification(data.verification);
                     } else if (data.type === 'capture_stats') {
                         handleCaptureStats(data.stats);
+                    } else if (data.type === 'stream_adaptation') {
+                        handleStreamAdaptation(data.stream);
+                    } else if (data.type === 'stream_pong') {
+                        const clientTs = Number(data.client_ts || 0);
+                        if (clientTs) videoMetrics.rttMs = smoothMetric(videoMetrics.rttMs, performance.now() - clientTs);
                     }
                 } catch (e) {
                     console.error("Error parsing video message:", e);
@@ -2865,6 +2952,7 @@
         videoSocket.onerror = () => updateStatus('Video Error');
         videoSocket.onclose = () => {
             updateStatus('Video Lost. Retrying...');
+            if (window.videoSocket === videoSocket) window.videoSocket = null;
             setTimeout(connectVideo, 2000);
         };
     }
@@ -4269,6 +4357,9 @@
             lastTime = performance.now();
         }, 1000);
 
+        setInterval(sendClientStreamStats, 1000);
+        setInterval(sendStreamPing, 2000);
+
         function updateStatus(text) {
             document.getElementById('status').textContent = text;
             // Update connection status in sidebar
@@ -4300,21 +4391,32 @@
             });
         }
 
-        function updateQuality(value) {
+        function sendQualitySetting(value) {
+            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
+                window.videoSocket.send(JSON.stringify({action: 'set_quality', value: parseInt(value, 10)}));
+            }
+        }
+
+        function updateQuality(value, immediate = false) {
+            value = Math.max(10, Math.min(100, parseInt(value, 10) || 65));
+            pendingQualityValue = value;
             // Update all quality displays
             document.getElementById('current-quality').textContent = value;
             try { document.getElementById('sidebar-quality').textContent = value; } catch(e){}
             document.getElementById('quality-value').textContent = value; // Update value display
             try { document.getElementById('quality-slider').style.setProperty('--val', `${value}%`); } catch(_) {}
-            
-            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
-                window.videoSocket.send(JSON.stringify({action: 'set_quality', value: parseInt(value)}));
-            }
-        }
 
-        function updateFPS() {
-            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
-                window.videoSocket.send(JSON.stringify({action: 'set_fps', value: MAX_FRAME_RATE}));
+            if (qualitySendTimer) {
+                clearTimeout(qualitySendTimer);
+                qualitySendTimer = null;
+            }
+            if (immediate) {
+                sendQualitySetting(pendingQualityValue);
+            } else {
+                qualitySendTimer = setTimeout(() => {
+                    qualitySendTimer = null;
+                    sendQualitySetting(pendingQualityValue);
+                }, 120);
             }
         }
 
@@ -4327,7 +4429,8 @@
                 enabled: performanceModeEnabled,
                 region: region,
                 scale_div: scaleDiv,
-                grayscale: gray
+                grayscale: gray,
+                manual: true
             };
             if (region === 'custom' && performanceCustomRect) {
                 payload.rect_norm = performanceCustomRect;
@@ -4499,6 +4602,12 @@
 
         function handleCaptureStats(stats) {
             console.log('Capture stats:', stats);
+            if (stats.stream_status) {
+                handleStreamAdaptation({
+                    status: stats.stream_status,
+                    profile_name: stats.stream_profile
+                });
+            }
             
             if (stats.is_working) {
                 updateCaptureStatus('working', `${stats.active_method} (${stats.current_fps.toFixed(1)} FPS)`);

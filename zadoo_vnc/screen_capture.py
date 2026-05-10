@@ -10,7 +10,7 @@ from .dependencies import *
 
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
-    def __init__(self, fps=60, quality=65):
+    def __init__(self, fps=0, quality=65):
         super().__init__(daemon=True)
         self.latest_frame_jpeg = None
         self.frame_lock = threading.Lock()
@@ -49,6 +49,10 @@ class ScreenCapturer(threading.Thread):
         self.perf_grayscale = False
         self._frame_event_loop = None
         self._frame_ready_event = None
+        self.backend_perf = {}
+        self._backend_disabled_until = {}
+        self._auto_probe_counter = 0
+        self._auto_probe_index = 0
 
     def set_frame_event(self, loop, event):
         self._frame_event_loop = loop
@@ -110,6 +114,7 @@ class ScreenCapturer(threading.Thread):
                 with self.capture_control_lock:
                     frame = self._grab_screen(sct)
                 capture_ms = (time.perf_counter() - capture_start) * 1000.0
+                self._record_backend_perf(self.active_capture_method, capture_ms, frame is not None)
                 # Apply perf-region cropping before encoding (ndarray only)
                 if isinstance(frame, np.ndarray):
                     frame = self._apply_perf_region(frame)
@@ -157,18 +162,22 @@ class ScreenCapturer(threading.Thread):
             except Exception as e:
                 logging.error("Exception in ScreenCapturer run loop", exc_info=True)
             try:
-                target_fps = max(1, int(self.fps))
+                target_fps = int(self.fps)
             except Exception:
-                target_fps = 30
-            frame_period = 1.0 / target_fps
-            next_deadline += frame_period
-            now = time.perf_counter()
-            if next_deadline < now - frame_period:
-                next_deadline = now
-            sleep_for = max(0.0, next_deadline - now)
-            if sleep_for:
-                time.sleep(sleep_for)
+                target_fps = 0
+            if target_fps > 0:
+                frame_period = 1.0 / target_fps
+                next_deadline += frame_period
+                now = time.perf_counter()
+                if next_deadline < now - frame_period:
+                    next_deadline = now
+                sleep_for = max(0.0, next_deadline - now)
+                if sleep_for:
+                    time.sleep(sleep_for)
+                else:
+                    time.sleep(0)
             else:
+                next_deadline = time.perf_counter()
                 time.sleep(0)
         
         if sct:
@@ -250,7 +259,7 @@ class ScreenCapturer(threading.Thread):
                 if self.capture_method != "auto":
                     return None
 
-        if self.capture_method == "bettercam" and HAS_BETTERCAM:
+        if self.capture_method == "bettercam" and HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
             try:
                 logging.debug("Attempting BetterCam capture (explicit method)")
                 frame = self._grab_screen_bettercam()
@@ -275,76 +284,131 @@ class ScreenCapturer(threading.Thread):
         
         # Auto mode: try methods in order of performance
         if self.capture_method == "auto":
-            # Try DXCam first (fastest)
-            if HAS_DXCAM:
+            for method in self._auto_method_order(roi_mode):
+                frame = self._grab_auto_method(method, sct, roi_mode)
+                if frame is not None:
+                    self.active_capture_method = method
+                    return frame
+        
+        logging.error("All screen capture methods failed.")
+        return None
+
+    def _record_backend_perf(self, method, capture_ms, success):
+        if not success or method in (None, "", "unknown"):
+            return
+        stats = self.backend_perf.setdefault(str(method), {"samples": 0, "avg_ms": 0.0, "failures": 0})
+        samples = int(stats.get("samples") or 0)
+        avg_ms = float(stats.get("avg_ms") or 0.0)
+        stats["samples"] = samples + 1
+        stats["avg_ms"] = float(capture_ms) if samples == 0 else (avg_ms * 0.85 + float(capture_ms) * 0.15)
+
+    def _record_backend_failure(self, method):
+        if method in (None, "", "unknown"):
+            return
+        stats = self.backend_perf.setdefault(str(method), {"samples": 0, "avg_ms": 999.0, "failures": 0})
+        stats["failures"] = int(stats.get("failures") or 0) + 1
+        if str(method) == "bettercam" and int(stats["failures"]) >= 2:
+            self._disable_backend(method, seconds=45)
+
+    def _disable_backend(self, method, seconds=30):
+        method = str(method or "")
+        if not method:
+            return
+        self._backend_disabled_until[method] = time.time() + max(1, int(seconds))
+        if method == "bettercam":
+            self._release_bettercam()
+        logging.warning("%s capture backend disabled for %ss after repeated failures", method, seconds)
+
+    def _backend_is_disabled(self, method):
+        until = float(self._backend_disabled_until.get(str(method), 0.0) or 0.0)
+        if until <= 0:
+            return False
+        if time.time() >= until:
+            self._backend_disabled_until.pop(str(method), None)
+            return False
+        return True
+
+    def _auto_candidates(self, roi_mode):
+        methods = []
+        if HAS_DXCAM and not self._backend_is_disabled("dxcam"):
+            methods.append("dxcam")
+        if HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
+            methods.append("bettercam")
+        if HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode and not self._backend_is_disabled("fast_ctypes"):
+            methods.append("fast_ctypes")
+        if HAS_MSS and not self._backend_is_disabled("mss"):
+            methods.append("mss")
+        if (HAS_WINRT or HAS_PIL) and not self._backend_is_disabled("winrt"):
+            methods.append("winrt")
+        return methods
+
+    def _auto_method_order(self, roi_mode):
+        methods = self._auto_candidates(roi_mode)
+        if not methods:
+            return []
+        base_rank = {name: index for index, name in enumerate(methods)}
+
+        def score(method):
+            stats = self.backend_perf.get(method) or {}
+            samples = int(stats.get("samples") or 0)
+            if samples < 3:
+                return 1000.0 + base_rank.get(method, 99)
+            return float(stats.get("avg_ms") or 999.0) + float(stats.get("failures") or 0) * 20.0
+
+        ordered = sorted(methods, key=score)
+        self._auto_probe_counter += 1
+        if self._auto_probe_counter >= 120:
+            self._auto_probe_counter = 0
+            self._auto_probe_index = (self._auto_probe_index + 1) % len(methods)
+            probe = methods[self._auto_probe_index]
+            if probe in ordered:
+                ordered.remove(probe)
+                ordered.insert(0, probe)
+        return ordered
+
+    def _grab_auto_method(self, method, sct, roi_mode):
+        if self._backend_is_disabled(method):
+            return None
+        try:
+            frame = None
+            if method == "dxcam" and HAS_DXCAM:
                 if self.dxcam_camera is None:
                     try:
                         self.dxcam_camera = dxcam.create()
                     except Exception:
                         self.dxcam_camera = None
-                try:
-                    frame = self._grab_screen_dxcam()
-                    if frame is not None:
-                        self.active_capture_method = "dxcam"
-                        return frame
-                except Exception:
-                    pass
-            
-            # Try fast_ctypes only when not in ROI mode
-            if HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode:
-                try:
-                    frame = self._grab_screen_fast_ctypes()
-                    if frame is not None:
-                        self.active_capture_method = "fast_ctypes"
-                        return frame
-                except Exception:
-                    pass
-            
-            # Try MSS (region-aware & primary-only by default)
-            if sct:
-                try:
-                    # Prefer primary monitor; sct.monitors[0] is "all monitors"
-                    mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                    full_w, full_h = int(mon['width']), int(mon['height'])
-
-                    # Map perf/custom region to pixels and then to absolute MSS rect
-                    roi = self._roi_norm_to_pixels(full_w, full_h)
-                    rect = self._roi_pixels_to_mss_rect(roi, mon) if roi else mon
-
-                    sct_img = sct.grab(rect)
-                    h, w = sct_img.height, sct_img.width
-                    arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
-                    frame = np.ascontiguousarray(arr[..., :3][:, :, ::-1])
-                    self.active_capture_method = "mss"
-                    return frame
-                except mss.exception.ScreenShotError:
-                    pass
-
-            # Try BetterCam
-            if HAS_BETTERCAM:
-                try:
-                    logging.debug("Attempting BetterCam capture (auto mode)")
-                    frame = self._grab_screen_bettercam()
-                    if frame is not None:
-                        self.active_capture_method = "bettercam"
-                        logging.debug("BetterCam capture succeeded (auto)")
-                        return frame
-                except Exception:
-                    logging.exception("BetterCam auto capture threw exception")
-                    pass
-
-            # Try WinRT last
-            if HAS_WINRT or HAS_PIL:
-                try:
-                    frame = self._grab_screen_winrt()
-                    if frame is not None:
-                        self.active_capture_method = "winrt"
-                        return frame
-                except Exception:
-                    pass
-        
-        logging.error("All screen capture methods failed.")
+                        return None
+                frame = self._grab_screen_dxcam()
+            elif method == "bettercam" and HAS_BETTERCAM:
+                logging.debug("Attempting BetterCam capture (auto mode)")
+                frame = self._grab_screen_bettercam()
+            elif method == "fast_ctypes" and HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode:
+                frame = self._grab_screen_fast_ctypes()
+            elif method == "mss" and sct:
+                frame = self._grab_screen_mss(sct)
+            elif method == "winrt" and (HAS_WINRT or HAS_PIL):
+                frame = self._grab_screen_winrt()
+            if frame is None:
+                self._record_backend_failure(method)
+            return frame
+        except Exception:
+            self._record_backend_failure(method)
+            logging.debug("Auto capture method failed: %s", method, exc_info=True)
         return None
+
+    def _grab_screen_mss(self, sct):
+        # Prefer primary monitor; sct.monitors[0] is "all monitors"
+        mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+        full_w, full_h = int(mon['width']), int(mon['height'])
+
+        # Map perf/custom region to pixels and then to absolute MSS rect
+        roi = self._roi_norm_to_pixels(full_w, full_h)
+        rect = self._roi_pixels_to_mss_rect(roi, mon) if roi else mon
+
+        sct_img = sct.grab(rect)
+        h, w = sct_img.height, sct_img.width
+        arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
+        return np.ascontiguousarray(arr[..., :3][:, :, ::-1])
 
     def _grab_screen_dxcam(self):
         """DXCam capture method - returns RGB ndarray (region-aware)."""
@@ -400,7 +464,7 @@ class ScreenCapturer(threading.Thread):
                     self.bettercam_camera = bettercam.create(
                         device_idx=0,
                         output_idx=0,
-                        max_buffer_len=256,
+                        max_buffer_len=4,
                     )
                 except Exception:
                     logging.exception("BetterCam create() failed for device_idx=0, output_idx=0")
@@ -409,8 +473,12 @@ class ScreenCapturer(threading.Thread):
                 # Start only if start exists and we haven't started yet
                 if hasattr(self.bettercam_camera, 'start') and not self.bettercam_started:
                     try:
-                        # Align capture rate to current FPS target when available
-                        tfps = int(self.fps) if hasattr(self, 'fps') else None
+                        try:
+                            tfps = int(self.fps)
+                        except Exception:
+                            tfps = 0
+                        if tfps <= 0:
+                            tfps = None
                         logging.info(f"BetterCam: starting capture target_fps={tfps}")
                         if tfps is not None:
                             self.bettercam_camera.start(target_fps=tfps)
@@ -450,9 +518,11 @@ class ScreenCapturer(threading.Thread):
                     return arr
             except Exception:
                 logging.exception("BetterCam: failed to normalize frame to ndarray")
+                self._disable_backend("bettercam", seconds=45)
                 return None
         except Exception:
             logging.warning("BetterCam capture failed", exc_info=True)
+            self._disable_backend("bettercam", seconds=45)
             return None
 
     def _grab_screen_winrt(self):
@@ -560,6 +630,7 @@ class ScreenCapturer(threading.Thread):
                     self._release_bettercam()
                 if method == "bettercam" and self.dxcam_camera is not None:
                     self._release_dxcam()
+                self._backend_disabled_until.pop(method, None)
                 self.capture_method = method
                 self.capture_stats['method_switches'] += 1
                 self.capture_stats['last_method_switch'] = time.time()
@@ -602,7 +673,7 @@ class ScreenCapturer(threading.Thread):
                 logging.debug("Added winrt capture method")
             
         # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "fast_ctypes", "mss", "bettercam", "winrt"]
+        pref = ["auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt"]
         methods = [m for m in pref if m in dict.fromkeys(methods)]
         logging.debug("Available capture methods: %s", methods)
         return methods
@@ -629,6 +700,15 @@ class ScreenCapturer(threading.Thread):
             'last_capture_ms': self.capture_stats.get('last_capture_ms', 0.0),
             'last_encode_ms': self.capture_stats.get('last_encode_ms', 0.0),
             'last_loop_ms': self.capture_stats.get('last_loop_ms', 0.0),
+            'target_fps': self.fps,
+            'target_fps_mode': 'max' if not self.fps else 'fixed',
+            'quality': self.quality,
+            'perf_enabled': self.perf_enabled,
+            'perf_region': self.perf_region,
+            'perf_scale_div': self.perf_scale_div,
+            'perf_grayscale': self.perf_grayscale,
+            'backend_perf': self.backend_perf,
+            'backend_disabled_until': self._backend_disabled_until,
             'is_working': is_working
         }
 
