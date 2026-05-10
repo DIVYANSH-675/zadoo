@@ -232,9 +232,23 @@ class RoutesMixin:
     def _http_feature_for_route(self, route_path):
         if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
             return "public"
-        if route_path in {"/api/public-url", "/api/stream-stats", "/api/capture-methods", "/benchmark.html", "/snapshot"}:
+        if route_path in {
+            "/api/public-url",
+            "/api/stream-stats",
+            "/api/capture-methods",
+            "/api/turbo/status",
+            "/api/turbo/config",
+            "/benchmark.html",
+            "/snapshot",
+        }:
             return "view"
-        if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
+        if route_path in {
+            "/api/set-quality",
+            "/api/set-fps",
+            "/api/set-clipboard-image",
+            "/api/turbo/start",
+            "/api/turbo/stop",
+        }:
             return "control"
         if route_path == "/api/refresh-tunnel":
             return "host"
@@ -451,6 +465,45 @@ class RoutesMixin:
                 stats = self._capture_stats_payload()
                 stream = self._stream_status_payload()
                 return self._json_response({"success": True, "stats": stats, "stream": stream})
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/turbo/status":
+            try:
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is None:
+                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
+                return self._json_response(turbo.status(host_header=self._header_get(request_headers, "Host", "")))
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/turbo/config":
+            try:
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is None:
+                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
+                return self._json_response(turbo.config_payload(host_header=self._header_get(request_headers, "Host", "")))
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/turbo/start":
+            try:
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is None:
+                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
+                loop = asyncio.get_event_loop()
+                status = await loop.run_in_executor(
+                    None,
+                    turbo.ensure_started,
+                    self._header_get(request_headers, "Host", ""),
+                )
+                return self._json_response(status)
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/turbo/stop":
+            try:
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is None:
+                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
+                turbo.stop()
+                return self._json_response(turbo.status(host_header=self._header_get(request_headers, "Host", "")))
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif isinstance(path, str) and route_path == "/api/capture-methods":

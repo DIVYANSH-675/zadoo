@@ -59,6 +59,11 @@ class MediaMixin:
         )
         status["effective_quality"] = getattr(self, "current_quality", None)
         status["quality_locked"] = bool(getattr(self, "_quality_locked_by_user", True))
+        try:
+            turbo = getattr(self, "turbo_stream", None)
+            status["turbo_stream"] = turbo.status() if turbo else {"available": False, "active": False}
+        except Exception:
+            status["turbo_stream"] = {"available": False, "active": False}
         return status
 
     async def _send_stream_status(self, websocket):
@@ -110,6 +115,7 @@ class MediaMixin:
             "preferred_video_encoder": encoder.get("preferred_video_encoder"),
             "client_stream_stats": stream.get("client", {}),
             "server_stream_stats": stream.get("server", {}),
+            "turbo_stream": stream.get("turbo_stream", {}),
         })
         return stats
 

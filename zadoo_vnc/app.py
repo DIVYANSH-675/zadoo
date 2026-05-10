@@ -273,6 +273,10 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         print("\nShutting down...")
     finally:
+        try:
+            vnc_server.stop()
+        except Exception:
+            pass
         capturer.stop()
         if vnc_server.tunnel_manager:
             vnc_server.tunnel_manager.cleanup()
