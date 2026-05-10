@@ -124,7 +124,7 @@ class InputControlMixin:
                         continue
 
                     # This handler should ONLY process input actions or cursor subscriptions
-                    if action in ['click', 'move', 'drag', 'key', 'key_combo', 'scroll', 'type_text', 'get_clipboard', 'set_clipboard', 'set_clipboard_image']:
+                    if action in ['click', 'move', 'drag', 'key', 'key_combo', 'scroll', 'get_clipboard', 'set_clipboard', 'set_clipboard_image']:
                         # Drop input while blocked
                         if getattr(self, 'block_host_input', False):
                             _log_try_ok('input_event_handler.blocked', action)
@@ -313,9 +313,6 @@ class InputControlMixin:
             elif action == 'scroll':
                 with self._injection_guard():
                     self._handle_scroll_event(event)
-            elif action == 'type_text':
-                with self._injection_guard():
-                    self._handle_type_text(event, websocket)
             elif action == 'get_clipboard':
                 if websocket is not None:
                     self._handle_get_clipboard(websocket)
@@ -1146,74 +1143,6 @@ class InputControlMixin:
     def disable_keystroke_capture(self):
         """Disable keystroke capture"""
         self.keystroke_capture_enabled = False
-
-    def _handle_type_text(self, event, websocket=None):
-        """Handle live typing text by calculating append-only delta and typing it."""
-        try:
-            text = event.get('text', '')
-            if not isinstance(text, str):
-                text = str(text)
-            # Initialize state map lazily
-            if not hasattr(self, 'live_typing_text_by_client'):
-                self.live_typing_text_by_client = {}
-            key = websocket if websocket is not None else 'global'
-            prev = self.live_typing_text_by_client.get(key, '')
-            # Compute common prefix length
-            max_len = min(len(prev), len(text))
-            prefix_len = 0
-            while prefix_len < max_len and prev[prefix_len] == text[prefix_len]:
-                prefix_len += 1
-            # If it's a simple append at the end, type appended part
-            if len(text) > len(prev) and prefix_len == len(prev):
-                append_part = text[len(prev):]
-                if append_part:
-                    # Strip indentation that follows a newline so remote doesn't receive auto-indented spaces/tabs
-                    try:
-                        import re
-                        append_part = re.sub(r"\n[\t ]+", "\n", append_part)
-                    except Exception:
-                        pass
-                    try:
-                        pyautogui.typewrite(append_part, interval=0)
-                    except Exception:
-                        for ch in append_part:
-                            try:
-                                pyautogui.typewrite(ch, interval=0)
-                            except Exception:
-                                continue
-            else:
-                # Attempt to detect a pure insertion (no deletion) somewhere in the middle.
-                # Compute common suffix length after the common prefix
-                suffix_len = 0
-                remaining_prev = len(prev) - prefix_len
-                remaining_text = len(text) - prefix_len
-                while (suffix_len < remaining_prev and suffix_len < remaining_text and
-                       prev[len(prev) - 1 - suffix_len] == text[len(text) - 1 - suffix_len]):
-                    suffix_len += 1
-                # Pure insertion if new text is longer and no characters were deleted
-                deleted_count = remaining_prev - suffix_len
-                if len(text) > len(prev) and deleted_count == 0:
-                    inserted = text[prefix_len: len(text) - suffix_len]
-                    if inserted:
-                        try:
-                            import re
-                            inserted = re.sub(r"\n[\t ]+", "\n", inserted)
-                        except Exception:
-                            pass
-                        try:
-                            pyautogui.typewrite(inserted, interval=0)
-                        except Exception:
-                            for ch in inserted:
-                                try:
-                                    pyautogui.typewrite(ch, interval=0)
-                                except Exception:
-                                    # Log the error instead of silently ignoring it
-                                    logging.warning(f"Failed to type character: {repr(ch)}")
-                                    continue 
-            # Update last seen text
-            self.live_typing_text_by_client[key] = text
-        except Exception as e:
-            print(f"Error handling type_text: {e}")
 
     def _handle_key_combo(self, event):
         """Handle special key combinations like Ctrl+Alt+Del"""
