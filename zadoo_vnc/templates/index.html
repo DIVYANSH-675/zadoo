@@ -1424,8 +1424,6 @@
                             <option value="auto">Auto (Best Performance)</option>
                             <option value="dxcam">DXCam (100+ FPS)</option>
                             <option value="bettercam">BetterCam (100+ FPS)</option>
-                            <option value="fast_ctypes">Fast CTypes (70-125 FPS)</option>
-                            <option value="mss">MSS (30-50 FPS)</option>
                         </select>
                     </div>
                     <div class="input-group">
@@ -4690,12 +4688,9 @@
             const methodInfo = {
                 'auto': 'Auto (Best Performance)',
                 'dxcam': 'DXCam (100+ FPS)',
-                'bettercam': 'BetterCam (High FPS)',
-                'fast_ctypes': 'Fast CTypes (70-125 FPS)',
-                'mss': 'MSS (30-50 FPS)',
-                'winrt': 'WinRT/PIL Fallback'
+                'bettercam': 'BetterCam (High FPS)'
             };
-            const fallbackOrder = ['auto', 'dxcam', 'bettercam', 'fast_ctypes', 'mss', 'winrt'];
+            const fallbackOrder = ['auto', 'dxcam', 'bettercam'];
             const availableSet = new Set(Array.isArray(availableMethods) ? availableMethods : []);
             const catalog = Array.isArray(methodStatus) && methodStatus.length
                 ? methodStatus

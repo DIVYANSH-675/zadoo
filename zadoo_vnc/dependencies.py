@@ -5,13 +5,6 @@ import logging
 
 
 try:
-    import mss
-    HAS_MSS = True
-except ImportError:
-    mss = None
-    HAS_MSS = False
-
-try:
     import numpy as np
     HAS_NUMPY = True
 except ImportError:
@@ -66,14 +59,16 @@ except ImportError:
 try:
     import dxcam
     HAS_DXCAM = True
-except ImportError:
+except Exception:
+    logging.debug("DXCam import/probe failed", exc_info=True)
     dxcam = None
     HAS_DXCAM = False
 
 try:
     import bettercam
     HAS_BETTERCAM = True
-except ImportError:
+except Exception:
+    logging.debug("BetterCam import/probe failed", exc_info=True)
     bettercam = None
     HAS_BETTERCAM = False
 
@@ -120,20 +115,6 @@ if HAS_BETTERCAM:
                 pass
     except Exception:
         logging.debug("BetterCam patching failed", exc_info=True)
-
-try:
-    import winrt  # type: ignore
-    HAS_WINRT = True
-except ImportError:
-    winrt = None
-    HAS_WINRT = False
-
-try:
-    import fast_ctypes_screenshots
-    HAS_FAST_CTYPES = True
-except ImportError:
-    fast_ctypes_screenshots = None
-    HAS_FAST_CTYPES = False
 
 try:
     import pyperclip

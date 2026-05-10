@@ -96,7 +96,7 @@ def assert_imports() -> None:
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
 
-    if not (deps.HAS_PYAUTOGUI and (deps.HAS_MSS or deps.WIN32_AVAILABLE or deps.HAS_PIL)):
+    if not (deps.HAS_PYAUTOGUI and (deps.HAS_DXCAM or deps.HAS_BETTERCAM) and (deps.HAS_IMAGECODECS or deps.HAS_PIL)):
         fail("core capture/input dependency flags are not usable")
 
     for name, loader in {
@@ -161,7 +161,7 @@ def assert_imports() -> None:
                     payload = json.loads(response.body.decode("utf-8"))
                     if path == "/api/capture-methods":
                         method_ids = {item.get("id") for item in payload.get("methods", [])}
-                        expected_ids = {"auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt"}
+                        expected_ids = {"auto", "dxcam", "bettercam"}
                         if method_ids != expected_ids:
                             fail(f"capture method catalog returned {sorted(method_ids)}, expected {sorted(expected_ids)}")
                         continue
