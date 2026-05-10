@@ -736,12 +736,6 @@
             flex: 0 0 38px !important;
             justify-content: center;
         }
-        .preset-active { border-color:#00d4ff !important; box-shadow:0 8px 24px rgba(0,212,255,0.12); }
-        .audioq-wrap { position: relative; padding: 10px 6px 0; }
-        .audioq-range { -webkit-appearance:none; width:100%; height: 10px; background: linear-gradient(90deg, rgba(0,212,255,0.12) 0%, rgba(0,212,255,0.08) 100%); border:1px solid #2a3344; border-radius:8px; outline:none; }
-        .audioq-range::-webkit-slider-thumb { -webkit-appearance:none; width: 38px; height: 18px; background:#0b1220; border:2px solid #00d4ff; border-radius:4px; box-shadow: 0 6px 18px rgba(0,212,255,0.16); cursor:pointer; margin-top: -4px; }
-        .audioq-range::-moz-range-thumb { width:38px; height:18px; background:#0b1220; border:2px solid #00d4ff; border-radius:4px; box-shadow: 0 6px 18px rgba(0,212,255,0.16); cursor:pointer; }
-        .audioq-ticks { display:flex; justify-content:space-between; color:#8aa3b8; font-size:9px; margin-top:6px; padding:0 2px; }
         .futuristic-range { 
             -webkit-appearance:none; width:100%; height: 10px; 
             --val: 50%;
@@ -1584,16 +1578,6 @@
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
                                 <span class="btn-label">Mic</span>
                             </button>
-                        </div>
-                        <div class="input-group">
-                            <label class="input-label" style="display:flex; align-items:center; gap:8px;">
-                                <span style="font-weight:700; letter-spacing:.4px; color:#9fb6c8;">Audio Quality</span>
-                                <span id="audioq-value" style="color:#00d4ff; font-weight:700;">Balanced</span>
-                            </label>
-                            <div class="audioq-wrap">
-                                <input type="range" class="audioq-range" id="audioq-steps" min="0" max="3" step="1" value="1" oninput="handleAudioQSlider(this.value)">
-                                <div class="audioq-ticks"><span>Low</span><span>Balanced</span><span>High</span><span>Ultra</span></div>
-                            </div>
                         </div>
                         <div class="btn-group" style="display:flex; gap:6px;">
                             <button class="sidebar-btn icon-only" id="btn-disable-mouse" onclick="toggleMouseBlock()" title="Disable Mouse">
@@ -4521,39 +4505,6 @@
             } else {
                 updateCaptureStatus('error', 'Not working');
             }
-        }
-
-        function updateAudioQuality(value) {
-            const label = document.getElementById('audioq-value');
-            let side = null; try { side = document.getElementById('audioq-label'); } catch(e){}
-            let text = 'Balanced';
-            if (value <= 25) text = 'Low'; else if (value <= 50) text = 'Balanced'; else if (value <= 75) text = 'High'; else text = 'Ultra';
-            if (label) label.textContent = text;
-            if (side) side.textContent = text;
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({action: 'set_audio_quality', value: parseInt(value)}));
-            }
-            // If audio is on, restart client path to adopt new latency quickly
-            if (audioPlaying) {
-                stopAudio();
-                startAudio();
-            }
-        }
-
-        function setAudioQualityPreset(v) {
-            try {
-                document.querySelectorAll('#audioq-preset .sidebar-btn').forEach(b=>b.classList.remove('preset-active'));
-                const btn = document.querySelector(`#audioq-preset .sidebar-btn[data-q="${v}"]`);
-                if (btn) btn.classList.add('preset-active');
-            } catch(_) {}
-            updateAudioQuality(parseInt(v));
-        }
-
-        function handleAudioQSlider(step) {
-            const map = [12, 37, 62, 87];
-            const idx = Math.max(0, Math.min(3, parseInt(step)));
-            const v = map[idx];
-            updateAudioQuality(v);
         }
 
         // Initialize non-network UI. Streams connect after server-side auth succeeds.

@@ -37,14 +37,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.stop_event = asyncio.Event()
         self.loop = None
         self.frame_ready_event = None
-        # Audio quality targets
-        self.audio_samplerate_target = 24000
-        self.audio_channels_target = 1
-        self.audio_blocksize_target = 960
-        # Audio format state
-        self.audio_samplerate = 24000
-        self.audio_channels = 1
-        self.audio_blocksize = 960
         self.selected_camera = None
         self.selected_camera_id = None
         self.keyboard_hook_active = False

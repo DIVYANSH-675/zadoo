@@ -485,19 +485,6 @@ class MediaMixin:
                                 'type': 'capture_verification',
                                 'verification': {'is_working': False, 'status': 'no_capturer'}
                             }))
-                    elif action == 'set_audio_quality':
-                        value = int(event.get('value', 50))
-                        # Map 0..100 to samplerate
-                        if value <= 25:
-                            self.audio_samplerate_target = 16000
-                        elif value <= 50:
-                            self.audio_samplerate_target = 24000
-                        elif value <= 75:
-                            self.audio_samplerate_target = 32000
-                        else:
-                            self.audio_samplerate_target = 48000
-                        # Restart capture with new rate on next client connect
-                        print(f" Audio quality set: {self.audio_samplerate_target} Hz")
                     elif action == 'toggle_keystroke_capture':
                         enabled = event.get('enabled')
                         if enabled is None:
