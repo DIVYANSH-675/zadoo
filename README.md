@@ -32,8 +32,9 @@ Copy `.env.example` to `.env` and fill only the values you need.
 - `CODE_FULL`, `CODE_LIMITED`, `CODE_PARTIAL`, `CODE_LOCKDOWN`, and `CUSTOM_PASSWORD` control server-side access sessions. If none are set, the app prints one temporary full-access code at startup.
 - `ZADOO_DISABLE_TUNNEL=1` keeps the UI local-only.
 - `ZADOO_CLOUDFLARED_PATH` points at a managed `cloudflared.exe`; `ZADOO_AUTO_DOWNLOAD_CLOUDFLARED=1` permits downloading it when no local binary exists.
-- `ZADOO_FFMPEG_PATH` and `ZADOO_MEDIAMTX_PATH` enable the optional Turbo WebRTC stream. The app probes `ddagrab`, `gfxcapture`, `gdigrab`, `h264_mf`, `h264_qsv`, `h264_amf`, `h264_nvenc`, and `libx264`, benchmarks a safe profile, and falls back to JPEG WebSocket when WebRTC is not available.
+- `ZADOO_FFMPEG_PATH` and `ZADOO_MEDIAMTX_PATH` enable the optional Turbo WebRTC stream. The app probes `ddagrab`, `gfxcapture`, `gdigrab`, `h264_mf`, `h264_qsv`, `h264_amf`, `h264_nvenc`, and `libx264`, benchmarks a safe profile, and falls back to JPEG WebSocket when WebRTC is not available. Run `powershell -ExecutionPolicy Bypass -File scripts\setup_turbo_stream.ps1` to install the local toolchain under `tools/`.
 - `ZADOO_TURBO_PROFILE`, `ZADOO_TURBO_CAPTURE`, and `ZADOO_TURBO_ENCODER` can force a specific profile or backend for diagnostics. Default laptop target is `540p30`; upgrades to `540p60` or `720p30` happen only after a local benchmark passes.
+- `ZADOO_TURBO_TRANSPORT=rtsp` is the default fast path: FFmpeg publishes H.264 to MediaMTX over RTSP and browsers play it back through MediaMTX WebRTC. `whip` and `auto` are available for diagnostics.
 - `ZADOO_INSTALL_STARTUP_TASK=1` and `ZADOO_ENABLE_PROCESS_PROTECTOR=1` opt into persistence/restart behavior for packaged deployments.
 - `ALERT_A`, `ALERT_B`, `ALERT_C`, and `ALERT_D` customize host alert presets.
 
@@ -41,7 +42,14 @@ No API keys or access codes are intentionally bundled. If a previous key or code
 
 ## Turbo WebRTC Notes
 
-The fastest path needs both `ffmpeg.exe` with WHIP support and `mediamtx.exe`.
+The fastest path needs both `ffmpeg.exe` and `mediamtx.exe`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_turbo_stream.ps1
+python zadoo_vnc_single.py
+```
+
+The installer downloads FFmpeg and MediaMTX into `tools/`, which is ignored by git. You can also point at your own binaries:
 
 ```powershell
 $env:ZADOO_FFMPEG_PATH="C:\tools\ffmpeg\bin\ffmpeg.exe"
@@ -49,7 +57,7 @@ $env:ZADOO_MEDIAMTX_PATH="C:\tools\mediamtx\mediamtx.exe"
 python zadoo_vnc_single.py
 ```
 
-Local/LAN playback uses MediaMTX on port `8889` and the app remains on port `6173`. For public internet WebRTC, expose the MediaMTX WebRTC HTTP and media ports and configure STUN/TURN or MediaMTX `webrtcAdditionalHosts`; an HTTP-only tunnel can still show the JPEG fallback but cannot reliably carry WebRTC media.
+Local/LAN playback uses MediaMTX RTSP on port `8554`, MediaMTX WebRTC on port `8889`, and the app remains on port `6173`. For public internet WebRTC, expose the MediaMTX WebRTC HTTP and media ports and configure STUN/TURN or MediaMTX `webrtcAdditionalHosts`; an HTTP-only tunnel can still show the JPEG fallback but cannot reliably carry WebRTC media.
 
 ## Smoke Tests
 

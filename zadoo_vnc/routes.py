@@ -238,6 +238,7 @@ class RoutesMixin:
             "/api/capture-methods",
             "/api/turbo/status",
             "/api/turbo/config",
+            "/api/turbo/diagnostics",
             "/benchmark.html",
             "/snapshot",
         }:
@@ -481,6 +482,14 @@ class RoutesMixin:
                 if turbo is None:
                     return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
                 return self._json_response(turbo.config_payload(host_header=self._header_get(request_headers, "Host", "")))
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/turbo/diagnostics":
+            try:
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is None:
+                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
+                return self._json_response(turbo.diagnostics(host_header=self._header_get(request_headers, "Host", "")))
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif isinstance(path, str) and route_path == "/api/turbo/start":

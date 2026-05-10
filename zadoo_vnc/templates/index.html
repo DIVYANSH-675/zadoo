@@ -2952,7 +2952,17 @@
         }
         hideTurboFrame();
         const el = document.getElementById('stream-profile');
-        if (el && payload.available && !payload.active) el.textContent = 'Turbo Ready';
+        if (!el) return;
+        if (payload.available && !payload.active) {
+            el.textContent = payload.reason ? 'Turbo ready: starting' : 'Turbo Ready';
+        } else if (!payload.available) {
+            const reason = String(payload.reason || '').toLowerCase();
+            if (reason.includes('ffmpeg') || reason.includes('mediamtx')) {
+                el.textContent = 'JPEG fallback: install Turbo';
+            } else {
+                el.textContent = 'JPEG fallback';
+            }
+        }
     }
 
     async function refreshTurboStreamStatus() {

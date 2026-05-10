@@ -193,7 +193,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 profile = (selected.get("profile") or {}).get("name", "unknown")
                 encoder = (selected.get("encoder") or {}).get("name", "unknown")
                 capture = (selected.get("capture") or {}).get("name", "unknown")
-                print(f" Turbo WebRTC stream active: {profile} via {capture}/{encoder}")
+                transport = selected.get("publish_transport", "unknown")
+                zero_copy = "zero-copy" if selected.get("zero_copy") else "cpu-copy"
+                print(f" Turbo WebRTC stream active: {profile} via {capture}/{encoder}/{transport}/{zero_copy}")
             elif status.get("available"):
                 print(f" Turbo WebRTC stream ready but inactive: {status.get('reason') or status.get('last_error')}")
             else:
