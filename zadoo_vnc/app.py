@@ -73,6 +73,9 @@ def configure_logging():
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("websockets.server").setLevel(logging.WARNING)
         logging.getLogger("websockets").setLevel(logging.WARNING)
+        logging.getLogger("dxcam").setLevel(logging.WARNING)
+        logging.getLogger("dxcam.core.dxgi_duplicator").setLevel(logging.WARNING)
+        logging.getLogger("bettercam").setLevel(logging.WARNING)
         try:
             logging.getLogger("comtypes").setLevel(logging.WARNING)
             logging.getLogger("comtypes.client").setLevel(logging.WARNING)

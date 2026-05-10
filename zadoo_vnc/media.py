@@ -17,6 +17,7 @@ import websockets
 
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
 from .dependencies import *
+from .screen_capture import unavailable_capture_method_catalog
 from .win32_input import *
 
 class MediaMixin:
@@ -531,26 +532,46 @@ class MediaMixin:
                         method = event.get('method', 'auto')
                         if self.screen_capturer:
                             success = self.screen_capturer.set_capture_method(method)
+                            catalog = self.screen_capturer.get_capture_method_catalog()
                             if success:
                                 print(f" Capture method changed to: {method}")
                             else:
                                 print(f" Failed to set capture method to: {method}")
+                            await websocket.send(json.dumps({
+                                'type': 'capture_method_set',
+                                'success': success,
+                                'method': method,
+                                'current': self.screen_capturer.get_current_method(),
+                                'methods': self.screen_capturer.get_available_methods(),
+                                'method_status': catalog,
+                            }))
                         else:
                             print(" Screen capturer not available")
+                            await websocket.send(json.dumps({
+                                'type': 'capture_method_set',
+                                'success': False,
+                                'method': method,
+                                'current': 'auto',
+                                'methods': [],
+                                'method_status': unavailable_capture_method_catalog(),
+                            }))
                     elif action == 'get_available_capture_methods':
                         if self.screen_capturer:
                             methods = self.screen_capturer.get_available_methods()
                             current = self.screen_capturer.get_current_method()
+                            catalog = self.screen_capturer.get_capture_method_catalog()
                             await websocket.send(json.dumps({
                                 'type': 'available_capture_methods',
                                 'methods': methods,
-                                'current': current
+                                'current': current,
+                                'method_status': catalog,
                             }))
                         else:
                             await websocket.send(json.dumps({
                                 'type': 'available_capture_methods',
-                                'methods': ['auto'],
-                                'current': 'auto'
+                                'methods': [],
+                                'current': 'auto',
+                                'method_status': unavailable_capture_method_catalog(),
                             }))
                     elif action == 'set_performance':
                         enabled = bool(event.get('enabled'))

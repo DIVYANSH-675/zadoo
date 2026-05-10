@@ -8,6 +8,32 @@ import time
 
 from .dependencies import *
 
+CAPTURE_METHOD_ORDER = ("auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt")
+CAPTURE_METHOD_LABELS = {
+    "auto": "Auto (Best Available)",
+    "dxcam": "DXCam (100+ FPS)",
+    "bettercam": "BetterCam (High FPS)",
+    "fast_ctypes": "Fast CTypes (70-125 FPS)",
+    "mss": "MSS (Stable)",
+    "winrt": "WinRT/PIL Fallback",
+}
+
+
+def unavailable_capture_method_catalog(reason="Screen capturer is not initialized."):
+    return [
+        {
+            "id": method,
+            "label": CAPTURE_METHOD_LABELS.get(method, method),
+            "available": False,
+            "reason": reason,
+            "active": False,
+            "selected": method == "auto",
+            "cooldown_seconds": 0.0,
+        }
+        for method in CAPTURE_METHOD_ORDER
+    ]
+
+
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
     def __init__(self, fps=0, quality=65):
@@ -18,7 +44,7 @@ class ScreenCapturer(threading.Thread):
         self.is_running = False
         self.quality = quality
         self.fps = fps
-        self.capture_method = "auto"  # auto, dxcam, fast_ctypes, mss, win32, pil
+        self.capture_method = "auto"
         self.dxcam_camera = None
         self.fast_ctypes_capture = None
         self.bettercam_camera = None
@@ -209,6 +235,11 @@ class ScreenCapturer(threading.Thread):
         # Use specific method if set, otherwise use auto-detection
         # Helper: ROI mode active?
         roi_mode = bool(getattr(self, "perf_enabled", False) and getattr(self, "perf_region", "full") != "full")
+        if self.capture_method != "auto" and self._backend_is_disabled(self.capture_method):
+            logging.warning("%s capture backend is cooling down; falling back to auto", self.capture_method)
+            self.capture_method = "auto"
+            self.capture_stats['method_switches'] += 1
+            self.capture_stats['last_method_switch'] = time.time()
         # Ensure DXCam is available on demand (lazy init)
         if self.capture_method == "dxcam" and HAS_DXCAM:
             if self.dxcam_camera is None:
@@ -301,13 +332,14 @@ class ScreenCapturer(threading.Thread):
         avg_ms = float(stats.get("avg_ms") or 0.0)
         stats["samples"] = samples + 1
         stats["avg_ms"] = float(capture_ms) if samples == 0 else (avg_ms * 0.85 + float(capture_ms) * 0.15)
+        stats["failures"] = max(0, int(stats.get("failures") or 0) - 1)
 
     def _record_backend_failure(self, method):
         if method in (None, "", "unknown"):
             return
         stats = self.backend_perf.setdefault(str(method), {"samples": 0, "avg_ms": 999.0, "failures": 0})
         stats["failures"] = int(stats.get("failures") or 0) + 1
-        if str(method) == "bettercam" and int(stats["failures"]) >= 2:
+        if str(method) in {"bettercam", "dxcam"} and int(stats["failures"]) >= 2:
             self._disable_backend(method, seconds=45)
 
     def _disable_backend(self, method, seconds=30):
@@ -317,6 +349,8 @@ class ScreenCapturer(threading.Thread):
         self._backend_disabled_until[method] = time.time() + max(1, int(seconds))
         if method == "bettercam":
             self._release_bettercam()
+        elif method == "dxcam":
+            self._release_dxcam()
         logging.warning("%s capture backend disabled for %ss after repeated failures", method, seconds)
 
     def _backend_is_disabled(self, method):
@@ -644,37 +678,55 @@ class ScreenCapturer(threading.Thread):
             logging.warning(f" Capture method '{method}' not available. Available: {available_methods}")
             return False
 
+    def _method_status(self, method):
+        if method == "auto":
+            available = any(self._method_status(item)["available"] for item in CAPTURE_METHOD_ORDER if item != "auto")
+            reason = "Selects the fastest working installed backend." if available else "No screen capture backend is installed."
+        elif method == "dxcam":
+            available = bool(HAS_DXCAM)
+            reason = "Ready." if available else "Install dxcam to enable this backend."
+        elif method == "bettercam":
+            available = bool(HAS_BETTERCAM)
+            reason = "Ready." if available else "Install bettercam to enable this backend."
+        elif method == "fast_ctypes":
+            available = bool(HAS_FAST_CTYPES)
+            reason = "Ready." if available else "Install fast-ctypes-screenshots to enable this backend."
+        elif method == "mss":
+            available = bool(HAS_MSS)
+            reason = "Ready." if available else "Install mss to enable this backend."
+        elif method == "winrt":
+            available = bool(HAS_WINRT or HAS_PIL)
+            reason = "Ready." if available else "Install Pillow or WinRT support to enable this fallback."
+        else:
+            available = False
+            reason = "Unknown capture backend."
+        disabled_until = float(self._backend_disabled_until.get(method, 0) or 0)
+        cooldown_seconds = max(0.0, disabled_until - time.time())
+        if cooldown_seconds > 0:
+            available = False
+            reason = f"Cooling down after repeated failures for {cooldown_seconds:.0f}s."
+        return {
+            "id": method,
+            "label": CAPTURE_METHOD_LABELS.get(method, method),
+            "available": bool(available),
+            "reason": reason,
+            "active": self.active_capture_method == method,
+            "selected": self.capture_method == method,
+            "cooldown_seconds": cooldown_seconds,
+        }
+
+    def get_capture_method_catalog(self):
+        """Return every supported capture method with availability details."""
+        return [self._method_status(method) for method in CAPTURE_METHOD_ORDER]
+
     def get_available_methods(self):
         """Get list of available capture methods"""
-        methods = ["auto"]
-        
         logging.debug("Checking available capture methods")
         logging.debug("HAS_DXCAM=%s dxcam_camera=%s", HAS_DXCAM, self.dxcam_camera is not None)
         logging.debug("HAS_FAST_CTYPES=%s fast_ctypes_capture=%s", HAS_FAST_CTYPES, self.fast_ctypes_capture is not None)
         logging.debug("HAS_MSS=%s", HAS_MSS)
         logging.debug("HAS_BETTERCAM=%s bettercam_camera=%s", HAS_BETTERCAM, self.bettercam_camera is not None)
-        
-        if HAS_DXCAM:
-            methods.append("dxcam")
-            logging.debug("Added dxcam capture method")
-        if HAS_FAST_CTYPES:
-            methods.append("fast_ctypes")
-            logging.debug("Added fast_ctypes capture method")
-        if HAS_MSS:
-            methods.append("mss")
-            logging.debug("Added mss capture method")
-        if HAS_BETTERCAM:
-            methods.append("bettercam")
-            logging.debug("Added bettercam capture method")
-        # Expose WinRT option if either winrt is available or PIL ImageGrab fallback can be used
-        if HAS_WINRT or HAS_PIL:
-            if "winrt" not in methods:
-                methods.append("winrt")
-                logging.debug("Added winrt capture method")
-            
-        # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt"]
-        methods = [m for m in pref if m in dict.fromkeys(methods)]
+        methods = [item["id"] for item in self.get_capture_method_catalog() if item["available"]]
         logging.debug("Available capture methods: %s", methods)
         return methods
 
@@ -709,6 +761,7 @@ class ScreenCapturer(threading.Thread):
             'perf_grayscale': self.perf_grayscale,
             'backend_perf': self.backend_perf,
             'backend_disabled_until': self._backend_disabled_until,
+            'capture_method_catalog': self.get_capture_method_catalog(),
             'is_working': is_working
         }
 

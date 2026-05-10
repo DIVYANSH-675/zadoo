@@ -2933,7 +2933,9 @@
                     console.log(" Video message received:", data);
                     
                     if (data.type === 'available_capture_methods') {
-                        updateCaptureMethodOptions(data.methods, data.current);
+                        updateCaptureMethodOptions(data.methods, data.current, data.method_status);
+                    } else if (data.type === 'capture_method_set') {
+                        handleCaptureMethodSet(data);
                     } else if (data.type === 'capture_verification') {
                         handleCaptureVerification(data.verification);
                     } else if (data.type === 'capture_stats') {
@@ -3011,7 +3013,9 @@
                 if (data.type === 'keystroke_capture') {
                     handleKeystrokeCapture(data);
                 } else if (data.type === 'available_capture_methods') {
-                    updateCaptureMethodOptions(data.methods, data.current);
+                    updateCaptureMethodOptions(data.methods, data.current, data.method_status);
+                } else if (data.type === 'capture_method_set') {
+                    handleCaptureMethodSet(data);
                 } else if (data.type === 'capture_verification') {
                     handleCaptureVerification(data.verification);
                 } else if (data.type === 'capture_stats') {
@@ -4467,13 +4471,18 @@
 
         function changeCaptureMethod(method) {
             console.log('Changing capture method to:', method);
+            const select = document.getElementById('capture-method-select');
+            const selectedOption = select && select.selectedOptions ? select.selectedOptions[0] : null;
+            if (selectedOption && selectedOption.disabled) {
+                updateCaptureStatus('warning', selectedOption.title || 'Method is not installed');
+                return;
+            }
             
             if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
                 window.videoSocket.send(JSON.stringify({action: 'set_capture_method', method: method}));
             }
             
             // Show feedback
-            const select = document.getElementById('capture-method-select');
             if (select) {
                 select.style.borderColor = '#00d4ff';
                 select.style.boxShadow = '0 0 0 2px rgba(0,212,255,0.25)';
@@ -4533,7 +4542,7 @@
             }
         }
 
-        function updateCaptureMethodOptions(availableMethods, currentMethod) {
+        function updateCaptureMethodOptions(availableMethods, currentMethod, methodStatus) {
             const select = document.getElementById('capture-method-select');
             if (!select) return;
 
@@ -4544,22 +4553,49 @@
             const methodInfo = {
                 'auto': 'Auto (Best Performance)',
                 'dxcam': 'DXCam (100+ FPS)',
+                'bettercam': 'BetterCam (High FPS)',
                 'fast_ctypes': 'Fast CTypes (70-125 FPS)',
-                'mss': 'MSS (30-50 FPS)'
+                'mss': 'MSS (30-50 FPS)',
+                'winrt': 'WinRT/PIL Fallback'
             };
+            const fallbackOrder = ['auto', 'dxcam', 'bettercam', 'fast_ctypes', 'mss', 'winrt'];
+            const availableSet = new Set(Array.isArray(availableMethods) ? availableMethods : []);
+            const catalog = Array.isArray(methodStatus) && methodStatus.length
+                ? methodStatus
+                : fallbackOrder.map(method => ({
+                    id: method,
+                    label: methodInfo[method] || method,
+                    available: availableSet.has(method),
+                    reason: availableSet.has(method) ? 'Ready.' : 'Missing optional dependency.'
+                }));
 
-            // Add available methods
-            availableMethods.forEach(method => {
+            // Add every supported method. Missing dependencies remain visible but disabled.
+            catalog.forEach(info => {
+                const method = info.id || info.method;
+                if (!method) return;
                 const option = document.createElement('option');
                 option.value = method;
-                option.textContent = methodInfo[method] || method;
+                const label = info.label || methodInfo[method] || method;
+                option.textContent = info.available ? label : `${label} (missing)`;
+                option.disabled = !info.available;
+                option.title = info.reason || (info.available ? 'Ready.' : 'Missing optional dependency.');
                 if (method === currentMethod) {
                     option.selected = true;
                 }
                 select.appendChild(option);
             });
 
-            console.log('Updated capture method selector:', availableMethods, 'current:', currentMethod);
+            console.log('Updated capture method selector:', catalog, 'current:', currentMethod);
+        }
+
+        function handleCaptureMethodSet(data) {
+            updateCaptureMethodOptions(data.methods, data.current, data.method_status);
+            if (data.success) {
+                updateCaptureStatus('checking', `Switched to ${data.current || data.method}`);
+                setTimeout(() => verifyCaptureMethod(), 500);
+            } else {
+                updateCaptureStatus('warning', `${data.method || 'Method'} is not available`);
+            }
         }
 
         function handleCaptureVerification(verification) {

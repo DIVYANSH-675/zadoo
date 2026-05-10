@@ -20,6 +20,7 @@ from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
 from .logging_utils import _log_except, _log_try_ok
+from .screen_capture import unavailable_capture_method_catalog
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
@@ -231,7 +232,7 @@ class RoutesMixin:
     def _http_feature_for_route(self, route_path):
         if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
             return "public"
-        if route_path in {"/api/public-url", "/api/stream-stats", "/benchmark.html", "/snapshot"}:
+        if route_path in {"/api/public-url", "/api/stream-stats", "/api/capture-methods", "/benchmark.html", "/snapshot"}:
             return "view"
         if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
             return "control"
@@ -450,6 +451,24 @@ class RoutesMixin:
                 stats = self._capture_stats_payload()
                 stream = self._stream_status_payload()
                 return self._json_response({"success": True, "stats": stats, "stream": stream})
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif isinstance(path, str) and route_path == "/api/capture-methods":
+            try:
+                if self.screen_capturer:
+                    catalog = self.screen_capturer.get_capture_method_catalog()
+                    current = self.screen_capturer.get_current_method()
+                    available = self.screen_capturer.get_available_methods()
+                else:
+                    catalog = unavailable_capture_method_catalog()
+                    current = "auto"
+                    available = []
+                return self._json_response({
+                    "success": True,
+                    "current": current,
+                    "available": available,
+                    "methods": catalog,
+                })
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif isinstance(path, str) and route_path == "/api/set-clipboard-image":

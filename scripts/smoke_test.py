@@ -146,6 +146,7 @@ def assert_imports() -> None:
                 "/api/list-cameras": 200,
                 "/api/set-quality?value=80": 200,
                 "/api/set-fps?value=20": 200,
+                "/api/capture-methods": 200,
                 "/api/set-clipboard-image": 400,
             }
             for path, expected_status in checks.items():
@@ -158,6 +159,12 @@ def assert_imports() -> None:
                     assert_camera_payload(response.body, require_objects=True)
                 else:
                     payload = json.loads(response.body.decode("utf-8"))
+                    if path == "/api/capture-methods":
+                        method_ids = {item.get("id") for item in payload.get("methods", [])}
+                        expected_ids = {"auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt"}
+                        if method_ids != expected_ids:
+                            fail(f"capture method catalog returned {sorted(method_ids)}, expected {sorted(expected_ids)}")
+                        continue
                     if path.startswith("/api/set-quality") and payload.get("quality") != 80:
                         fail(f"set-quality returned {payload.get('quality')}, expected 80")
                     if path.startswith("/api/set-fps") and payload.get("fps") != 20:
