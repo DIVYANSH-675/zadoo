@@ -1741,6 +1741,7 @@
     let turboStreamActive = false;
     let turboStatusTimer = null;
     let turboLastProfile = '';
+    let turboLastFps = 0;
     window.__turboAspect = null;
     const videoMetrics = {
         receivedBytes: 0,
@@ -2920,6 +2921,7 @@
         turboLastProfile = turboProfileText(payload || {});
         const selected = payload && payload.selected ? payload.selected : {};
         const profile = (payload && payload.profile) || selected.profile || {};
+        turboLastFps = Number(profile.fps || 0);
         if (profile.width && profile.height) {
             window.__turboAspect = Number(profile.width) / Math.max(1, Number(profile.height));
         }
@@ -2931,6 +2933,7 @@
     function hideTurboFrame() {
         turboStreamActive = false;
         turboLastProfile = '';
+        turboLastFps = 0;
         window.__turboAspect = null;
         if (!turboFrame) return;
         turboFrame.style.display = 'none';
@@ -4486,8 +4489,10 @@
         setInterval(() => {
             const elapsedSeconds = (performance.now() - lastTime) / 1000;
             if (elapsedSeconds > 0) {
-                const fps = (frameCount / elapsedSeconds).toFixed(0);
-                updateStatus(`Connected | ${fps} FPS`);
+                const fps = turboStreamActive && turboLastFps
+                    ? String(Math.round(turboLastFps))
+                    : (frameCount / elapsedSeconds).toFixed(0);
+                updateStatus(`${turboStreamActive ? 'Turbo' : 'Connected'} | ${fps} FPS`);
                 // Update sidebar FPS display
                 document.getElementById('sidebar-fps').textContent = fps;
                 document.getElementById('current-fps').textContent = fps;
@@ -4502,7 +4507,7 @@
         function updateStatus(text) {
             document.getElementById('status').textContent = text;
             // Update connection status in sidebar
-            if (text.includes('Connected')) {
+            if (text.includes('Connected') || text.includes('Turbo')) {
                 document.getElementById('server-status').textContent = 'Connected';
             } else if (text.includes('Connecting')) {
                 document.getElementById('server-status').textContent = 'Connecting';

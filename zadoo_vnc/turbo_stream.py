@@ -92,7 +92,10 @@ TURBO_PROFILES = (
     TurboProfile("540p30", 960, 540, 30, 3500, 6000, "Turbo 540p30"),
     TurboProfile("540p45", 960, 540, 45, 5000, 7000, "Turbo 540p45"),
     TurboProfile("540p60", 960, 540, 60, 6000, 8000, "Turbo 540p60"),
+    TurboProfile("540p100", 960, 540, 100, 6500, 8000, "Turbo 540p100"),
+    TurboProfile("540p120", 960, 540, 120, 8000, 10000, "Turbo 540p120"),
     TurboProfile("720p30", 1280, 720, 30, 5000, 7000, "Turbo 720p30"),
+    TurboProfile("720p60", 1280, 720, 60, 7000, 9000, "Turbo 720p60"),
     TurboProfile("360p30", 640, 360, 30, 1800, 2500, "Turbo 360p30"),
     TurboProfile("360p24", 640, 360, 24, 1200, 2000, "Turbo 360p24"),
 )
@@ -216,6 +219,7 @@ class WindowsTurboStream:
         self.display_index = self._int_env("ZADOO_TURBO_DISPLAY_INDEX", 0, 0, 16)
         self.rtsp_port = self._int_env("ZADOO_MEDIAMTX_RTSP_PORT", 8554, 1, 65535)
         self.webrtc_port = self._int_env("ZADOO_MEDIAMTX_WEBRTC_PORT", 8889, 1, 65535)
+        self.max_fps = self._int_env("ZADOO_TURBO_MAX_FPS", 100, 24, 240)
         self.benchmark_seconds = self._float_env("ZADOO_TURBO_BENCH_SECONDS", 1.8, 0.5, 8.0)
         self.force_profile_name = os.getenv("ZADOO_TURBO_PROFILE", "").strip().lower()
         self.force_capture_name = os.getenv("ZADOO_TURBO_CAPTURE", "").strip().lower()
@@ -435,10 +439,14 @@ class WindowsTurboStream:
             self._profile_by_name("720p30"),
             self._profile_by_name("540p45"),
             self._profile_by_name("540p60"),
+            self._profile_by_name("720p60"),
+            self._profile_by_name("540p100"),
+            self._profile_by_name("540p120"),
         ]
         profiles = [item for item in upgrades if item is not None]
+        profiles = [item for item in profiles if int(item.fps) <= int(self.max_fps)]
         if encoder_name == "libx264" and not self.allow_cpu_60:
-            profiles = [item for item in profiles if item.name != "540p60"]
+            profiles = [item for item in profiles if int(item.fps) <= 30]
         return profiles
 
     def ensure_started(self, host_header: str | None = None) -> dict:
@@ -495,6 +503,7 @@ class WindowsTurboStream:
             "selected": selected,
             "profile": profile,
             "stream_name": self.stream_name,
+            "max_fps": self.max_fps,
             "playback_url": urls["playback_url"],
             "whep_url": urls["whep_url"],
             "publish_url": self._publish_url((selected or {}).get("publish_transport", "rtsp")),
