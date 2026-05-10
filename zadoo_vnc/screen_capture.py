@@ -474,6 +474,7 @@ class ScreenCapturer(threading.Thread):
     def _encode_frame(self, frame):
         global HAS_IMAGECODECS
         try:
+            lossless_quality = int(getattr(self, "quality", 65) or 65) >= 100
             # Fast path: ndarray -> JPEG (supports RGB or grayscale)
             if isinstance(frame, np.ndarray):
                 arr = frame
@@ -495,6 +496,24 @@ class ScreenCapturer(threading.Thread):
                             arr = arr[::self.perf_scale_div, ::self.perf_scale_div]
                     except Exception:
                         pass
+                if lossless_quality:
+                    if HAS_IMAGECODECS and hasattr(imagecodecs, "png_encode"):
+                        try:
+                            if not arr.flags.c_contiguous:
+                                arr = np.ascontiguousarray(arr)
+                            return imagecodecs.png_encode(arr)
+                        except Exception:
+                            logging.warning("imagecodecs png_encode failed  falling back", exc_info=True)
+                    if HAS_PIL:
+                        buffer = io.BytesIO()
+                        img = Image.fromarray(arr)
+                        if getattr(self, 'perf_grayscale', False) and img.mode != 'L':
+                            try:
+                                img = img.convert('L')
+                            except Exception:
+                                pass
+                        img.save(buffer, format='PNG', compress_level=1)
+                        return buffer.getvalue()
                 if HAS_IMAGECODECS:
                     try:
                         # Ensure contiguous memory for encoder (avoid implicit copy stalls)
@@ -512,14 +531,17 @@ class ScreenCapturer(threading.Thread):
                             img = img.convert('L')
                         except Exception:
                             pass
-                    img.save(buffer, format='JPEG', quality=self.quality)
+                    img.save(buffer, format='JPEG', quality=self.quality, subsampling=0 if int(self.quality) >= 95 else -1)
                     return buffer.getvalue()
                 return None
 
             # PIL Image
             if HAS_PIL and hasattr(frame, 'save'):
                 buffer = io.BytesIO()
-                frame.save(buffer, format='JPEG', quality=self.quality)
+                if lossless_quality:
+                    frame.save(buffer, format='PNG', compress_level=1)
+                else:
+                    frame.save(buffer, format='JPEG', quality=self.quality, subsampling=0 if int(self.quality) >= 95 else -1)
                 return buffer.getvalue()
             else:
                 logging.error("No JPEG encoder available - both imagecodecs and Pillow failed")

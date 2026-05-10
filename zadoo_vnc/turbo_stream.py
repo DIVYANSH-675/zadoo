@@ -17,6 +17,9 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import json
+import logging
+from logging.handlers import RotatingFileHandler
 from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,6 +40,7 @@ class TurboProfile:
     bitrate_kbps: int
     maxrate_kbps: int
     status: str
+    native_resolution: bool = False
 
     @property
     def bitrate(self) -> str:
@@ -49,6 +53,10 @@ class TurboProfile:
     @property
     def bufsize(self) -> str:
         return f"{max(self.maxrate_kbps * 2, self.bitrate_kbps * 2)}k"
+
+    @property
+    def uses_native_resolution(self) -> bool:
+        return bool(self.native_resolution or self.width <= 0 or self.height <= 0)
 
 
 @dataclass(frozen=True)
@@ -78,10 +86,12 @@ class StreamSelection:
     benchmark_ms: float
 
     def as_dict(self) -> dict:
+        profile = asdict(self.profile)
+        profile["native_resolution"] = bool(self.profile.uses_native_resolution)
         return {
             "capture": asdict(self.capture),
             "encoder": asdict(self.encoder),
-            "profile": asdict(self.profile),
+            "profile": profile,
             "publish_transport": self.publish_transport,
             "zero_copy": bool(self.zero_copy),
             "benchmark_ms": round(float(self.benchmark_ms), 1),
@@ -98,6 +108,9 @@ TURBO_PROFILES = (
     TurboProfile("720p60", 1280, 720, 60, 7000, 9000, "Turbo 720p60"),
     TurboProfile("360p30", 640, 360, 30, 1800, 2500, "Turbo 360p30"),
     TurboProfile("360p24", 640, 360, 24, 1200, 2000, "Turbo 360p24"),
+    TurboProfile("native30", 0, 0, 30, 12000, 18000, "Turbo Native 30 (100% quality)", True),
+    TurboProfile("native60", 0, 0, 60, 20000, 28000, "Turbo Native 60 (100% quality)", True),
+    TurboProfile("native100", 0, 0, 100, 28000, 36000, "Turbo Native 100 (100% quality)", True),
 )
 
 CAPTURE_PRIORITY = ("ddagrab", "gfxcapture", "gdigrab")
@@ -125,6 +138,33 @@ def _hidden_creationflags() -> int:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _turbo_logger() -> logging.Logger:
+    logger = logging.getLogger("zadoo.turbo")
+    logger.setLevel(logging.DEBUG)
+    try:
+        log_dir = _repo_root() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "turbo_stream.log"
+        has_handler = any(
+            isinstance(handler, RotatingFileHandler)
+            and str(getattr(handler, "baseFilename", "")).lower() == str(log_path).lower()
+            for handler in logger.handlers
+        )
+        if not has_handler:
+            handler = RotatingFileHandler(
+                log_path,
+                maxBytes=5_000_000,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            logger.addHandler(handler)
+        logger.propagate = True
+    except Exception:
+        pass
+    return logger
 
 
 def _split_env_paths(value: str | None) -> list[Path]:
@@ -220,6 +260,8 @@ class WindowsTurboStream:
         self.rtsp_port = self._int_env("ZADOO_MEDIAMTX_RTSP_PORT", 8554, 1, 65535)
         self.webrtc_port = self._int_env("ZADOO_MEDIAMTX_WEBRTC_PORT", 8889, 1, 65535)
         self.max_fps = self._int_env("ZADOO_TURBO_MAX_FPS", 100, 24, 240)
+        self.quality_percent = self._int_env("ZADOO_TURBO_QUALITY", 65, 10, 100)
+        self.full_quality_at = self._int_env("ZADOO_TURBO_FULL_QUALITY_AT", 100, 85, 100)
         self.benchmark_seconds = self._float_env("ZADOO_TURBO_BENCH_SECONDS", 1.8, 0.5, 8.0)
         self.force_profile_name = os.getenv("ZADOO_TURBO_PROFILE", "").strip().lower()
         self.force_capture_name = os.getenv("ZADOO_TURBO_CAPTURE", "").strip().lower()
@@ -253,6 +295,16 @@ class WindowsTurboStream:
         self._last_ffmpeg_command: list[str] = []
         self._ffmpeg_log_tail: Deque[str] = deque(maxlen=80)
         self._mediamtx_log_tail: Deque[str] = deque(maxlen=80)
+        self._logger = _turbo_logger()
+        self._log_event(
+            "initialized",
+            enabled=self.enabled,
+            auto_start=self.auto_start_enabled,
+            max_fps=self.max_fps,
+            quality=self.quality_percent,
+            full_quality_at=self.full_quality_at,
+            transport=self.transport_mode,
+        )
 
     @staticmethod
     def _int_env(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -269,6 +321,56 @@ class WindowsTurboStream:
             return max(min_value, min(max_value, value))
         except Exception:
             return default
+
+    def _log_event(self, message: str, **details) -> None:
+        try:
+            suffix = ""
+            if details:
+                suffix = " " + json.dumps(details, sort_keys=True, default=str)
+            self._logger.info("%s%s", message, suffix)
+        except Exception:
+            pass
+
+    def _full_quality_requested(self, quality: int | None = None) -> bool:
+        value = self.quality_percent if quality is None else quality
+        return int(value) >= int(self.full_quality_at)
+
+    def set_quality(self, raw_value, restart_active: bool = True) -> dict:
+        try:
+            value = max(10, min(100, int(raw_value)))
+        except Exception:
+            value = self.quality_percent
+        with self._start_lock:
+            previous_quality = self.quality_percent
+            previous_full_quality = self._full_quality_requested(previous_quality)
+            next_full_quality = self._full_quality_requested(value)
+            was_active = self._is_ffmpeg_running()
+            mode_changed = previous_full_quality != next_full_quality
+            self.quality_percent = value
+            restart_required = bool(restart_active and mode_changed and (was_active or self._selection))
+            if mode_changed:
+                self._selection = None
+                self._benchmark_results = []
+                self._last_limit_reason = "quality_changed"
+                if restart_required:
+                    self._terminate_process("_ffmpeg_proc")
+            if previous_quality != value or mode_changed:
+                self._log_event(
+                    "quality_changed",
+                    previous_quality=previous_quality,
+                    quality=value,
+                    previous_full_quality=previous_full_quality,
+                    full_quality=next_full_quality,
+                    restart_required=restart_required,
+                    was_active=was_active,
+                )
+            return {
+                "quality": value,
+                "full_quality": next_full_quality,
+                "mode_changed": mode_changed,
+                "restart_required": restart_required,
+                "was_active": was_active,
+            }
 
     def probe(self, force: bool = False) -> dict:
         with self._probe_lock:
@@ -383,6 +485,14 @@ class WindowsTurboStream:
                 "last_probe_at": self._last_probe_at,
             }
             self._probe_done = True
+            self._log_event(
+                "probe_complete",
+                available=available,
+                captures=available_captures,
+                encoders=available_encoders,
+                transports=transports,
+                reason=self.reason,
+            )
             return dict(self.capabilities)
 
     def _ordered_capture_methods(self, methods: list[CaptureMethod]) -> list[CaptureMethod]:
@@ -426,6 +536,10 @@ class WindowsTurboStream:
         forced = self._profile_by_name(self.force_profile_name)
         if forced:
             return [forced]
+        if self._full_quality_requested():
+            return [
+                self._profile_by_name("native30"),
+            ]
         return [
             self._profile_by_name("540p30"),
             self._profile_by_name("360p30"),
@@ -435,14 +549,20 @@ class WindowsTurboStream:
     def _upgrade_profiles(self, encoder_name: str) -> list[TurboProfile]:
         if self.force_profile_name:
             return []
-        upgrades = [
-            self._profile_by_name("720p30"),
-            self._profile_by_name("540p45"),
-            self._profile_by_name("540p60"),
-            self._profile_by_name("720p60"),
-            self._profile_by_name("540p100"),
-            self._profile_by_name("540p120"),
-        ]
+        if self._full_quality_requested():
+            upgrades = [
+                self._profile_by_name("native60"),
+                self._profile_by_name("native100"),
+            ]
+        else:
+            upgrades = [
+                self._profile_by_name("720p30"),
+                self._profile_by_name("540p45"),
+                self._profile_by_name("540p60"),
+                self._profile_by_name("720p60"),
+                self._profile_by_name("540p100"),
+                self._profile_by_name("540p120"),
+            ]
         profiles = [item for item in upgrades if item is not None]
         profiles = [item for item in profiles if int(item.fps) <= int(self.max_fps)]
         if encoder_name == "libx264" and not self.allow_cpu_60:
@@ -504,6 +624,9 @@ class WindowsTurboStream:
             "profile": profile,
             "stream_name": self.stream_name,
             "max_fps": self.max_fps,
+            "quality": self.quality_percent,
+            "full_quality": self._full_quality_requested(),
+            "full_quality_at": self.full_quality_at,
             "playback_url": urls["playback_url"],
             "whep_url": urls["whep_url"],
             "publish_url": self._publish_url((selected or {}).get("publish_transport", "rtsp")),
@@ -536,6 +659,7 @@ class WindowsTurboStream:
             "ffmpeg_log_tail": list(self._ffmpeg_log_tail),
             "mediamtx_log_tail": list(self._mediamtx_log_tail),
             "last_ffmpeg_command": self._redact_command(self._last_ffmpeg_command),
+            "turbo_log_path": str((_repo_root() / "logs" / "turbo_stream.log").resolve()),
             "setup_hint": r"Run scripts\setup_turbo_stream.ps1, then restart the app.",
             "fps_floor_explanation": self._fps_floor_explanation(payload),
         }
@@ -555,6 +679,8 @@ class WindowsTurboStream:
             "ZADOO_TURBO_ENCODER": "optional fixed encoder",
             "ZADOO_TURBO_TRANSPORT": "rtsp, whip, or auto; rtsp is preferred",
             "ZADOO_TURBO_AUTO": "1 to auto-start, 0 to start on demand",
+            "ZADOO_TURBO_QUALITY": "initial UI quality value from 10 to 100",
+            "ZADOO_TURBO_FULL_QUALITY_AT": "quality threshold that switches Turbo to native-resolution profiles; default 100",
         }
         return payload
 
@@ -574,12 +700,12 @@ class WindowsTurboStream:
                 for encoder in encoders:
                     for zero_copy in self._zero_copy_modes(capture, encoder):
                         for profile in base_profiles:
+                            if zero_copy and profile.uses_native_resolution:
+                                continue
                             selection = self._try_candidate(capture, encoder, profile, transport, zero_copy)
                             if selection:
                                 selected = selection
                                 break
-                        if selected:
-                            break
                     if selected:
                         break
                 if selected:
@@ -590,6 +716,7 @@ class WindowsTurboStream:
         if selected is None:
             self._last_error = "Turbo benchmark failed for all capture and encoder candidates."
             self._last_limit_reason = "benchmark_failed"
+            self._log_event("selection_failed", quality=self.quality_percent, full_quality=self._full_quality_requested())
             return None
 
         for profile in self._upgrade_profiles(selected.encoder.name):
@@ -606,6 +733,16 @@ class WindowsTurboStream:
                 self._last_limit_reason = f"{profile.name}_benchmark_failed"
 
         self._last_error = ""
+        self._log_event(
+            "selection_ready",
+            capture=selected.capture.name,
+            encoder=selected.encoder.name,
+            profile=selected.profile.name,
+            transport=selected.publish_transport,
+            zero_copy=selected.zero_copy,
+            quality=self.quality_percent,
+            full_quality=self._full_quality_requested(),
+        )
         return selected
 
     def _zero_copy_modes(self, capture: CaptureMethod, encoder: EncoderMethod) -> list[bool]:
@@ -639,6 +776,7 @@ class WindowsTurboStream:
             "error": "" if ok else str(output or "")[:500],
         }
         self._benchmark_results.append(bench)
+        self._log_event("benchmark_candidate", **bench)
         if ok:
             return StreamSelection(capture, encoder, profile, transport, zero_copy, elapsed_ms)
         return None
@@ -670,9 +808,11 @@ class WindowsTurboStream:
             return
         if self._is_mediamtx_ready_for(transport):
             self._mediamtx_owned = False
+            self._log_event("mediamtx_reused", transport=transport)
             return
         try:
             self._mediamtx_log_tail.clear()
+            self._log_event("mediamtx_starting", transport=transport, path=self.mediamtx_path)
             self._mediamtx_proc = subprocess.Popen(
                 [self.mediamtx_path],
                 cwd=str(Path(self.mediamtx_path).resolve().parent),
@@ -688,11 +828,14 @@ class WindowsTurboStream:
             self._mediamtx_owned = True
             for _ in range(30):
                 if self._is_mediamtx_ready_for(transport):
+                    self._log_event("mediamtx_ready", transport=transport)
                     return
                 time.sleep(0.2)
             self._last_error = "MediaMTX started but the required RTSP/WebRTC port is not reachable."
+            self._log_event("mediamtx_not_ready", transport=transport, error=self._last_error)
         except Exception as exc:
             self._last_error = f"Failed to start MediaMTX: {exc}"
+            self._log_event("mediamtx_start_failed", transport=transport, error=str(exc))
 
     def _start_ffmpeg(self, selection: StreamSelection) -> None:
         if not self.ffmpeg_path:
@@ -702,6 +845,15 @@ class WindowsTurboStream:
         self._last_ffmpeg_command = list(cmd)
         try:
             self._ffmpeg_log_tail.clear()
+            self._log_event(
+                "ffmpeg_starting",
+                capture=selection.capture.name,
+                encoder=selection.encoder.name,
+                profile=selection.profile.name,
+                transport=selection.publish_transport,
+                zero_copy=selection.zero_copy,
+                command=self._redact_command(cmd),
+            )
             self._ffmpeg_proc = subprocess.Popen(
                 cmd,
                 cwd=str(_repo_root()),
@@ -720,11 +872,14 @@ class WindowsTurboStream:
                 code = self._ffmpeg_proc.poll() if self._ffmpeg_proc else None
                 tail = " ".join(list(self._ffmpeg_log_tail)[-5:])
                 self._last_error = f"FFmpeg exited during startup with code {code}. {tail}".strip()
+                self._log_event("ffmpeg_start_failed", code=code, tail=tail)
                 self._ffmpeg_proc = None
             else:
                 self._last_error = ""
+                self._log_event("ffmpeg_ready", profile=selection.profile.name)
         except Exception as exc:
             self._last_error = f"Failed to start FFmpeg: {exc}"
+            self._log_event("ffmpeg_start_exception", error=str(exc))
 
     def _build_publish_command(self, selection: StreamSelection) -> list[str]:
         capture = selection.capture
@@ -757,11 +912,17 @@ class WindowsTurboStream:
             )
             cmd.extend(["-f", "lavfi", "-i", source])
         elif capture.name == "gfxcapture":
-            source = (
-                f"gfxcapture=monitor_idx={self.display_index}:max_framerate={profile.fps}:"
-                f"width={profile.width}:height={profile.height}:resize_mode=scale_aspect:"
-                "capture_cursor=1:output_fmt=8bit"
-            )
+            if profile.uses_native_resolution:
+                source = (
+                    f"gfxcapture=monitor_idx={self.display_index}:max_framerate={profile.fps}:"
+                    "capture_cursor=1:output_fmt=8bit"
+                )
+            else:
+                source = (
+                    f"gfxcapture=monitor_idx={self.display_index}:max_framerate={profile.fps}:"
+                    f"width={profile.width}:height={profile.height}:resize_mode=scale_aspect:"
+                    "capture_cursor=1:output_fmt=8bit"
+                )
             cmd.extend(["-f", "lavfi", "-i", source])
         else:
             cmd.extend(["-f", "gdigrab", "-framerate", str(profile.fps), "-draw_mouse", "1", "-i", "desktop"])
@@ -777,7 +938,10 @@ class WindowsTurboStream:
         if zero_copy:
             filters: list[str] = []
             if capture.name == "ddagrab":
-                filters.append(f"scale_d3d11=width={profile.width}:height={profile.height}:format=nv12")
+                if profile.uses_native_resolution:
+                    filters.append("format=nv12")
+                else:
+                    filters.append(f"scale_d3d11=width={profile.width}:height={profile.height}:format=nv12")
             if capture.name == "gfxcapture":
                 filters.append(f"fps={profile.fps}")
             return ",".join(filters)
@@ -785,13 +949,10 @@ class WindowsTurboStream:
         filters = []
         if capture.name in {"ddagrab", "gfxcapture"}:
             filters.extend(["hwdownload", "format=bgra"])
-        filters.extend(
-            [
-                f"fps={profile.fps}",
-                f"scale=w={profile.width}:h={profile.height}:flags=fast_bilinear",
-                "format=yuv420p" if encoder.name == "libx264" else "format=nv12",
-            ]
-        )
+        filters.append(f"fps={profile.fps}")
+        if not profile.uses_native_resolution:
+            filters.append(f"scale=w={profile.width}:h={profile.height}:flags=fast_bilinear")
+        filters.append("format=yuv420p" if encoder.name == "libx264" else "format=nv12")
         return ",".join(filters)
 
     def _encoder_args(self, encoder: EncoderMethod, profile: TurboProfile, zero_copy: bool) -> list[str]:
@@ -886,12 +1047,14 @@ class WindowsTurboStream:
             if code not in (0, None):
                 tail = " ".join(list(self._ffmpeg_log_tail)[-5:])
                 self._last_error = f"FFmpeg exited with code {code}. {tail}".strip()
+                self._log_event("ffmpeg_exited", code=code, tail=tail)
             self._ffmpeg_proc = None
         if self._mediamtx_proc is not None and self._mediamtx_proc.poll() is not None:
             code = self._mediamtx_proc.returncode
             if code not in (0, None):
                 tail = " ".join(list(self._mediamtx_log_tail)[-5:])
                 self._last_error = f"MediaMTX exited with code {code}. {tail}".strip()
+                self._log_event("mediamtx_exited", code=code, tail=tail)
             self._mediamtx_proc = None
             self._mediamtx_owned = False
 
@@ -901,10 +1064,12 @@ class WindowsTurboStream:
             return
         try:
             if proc.poll() is None:
+                self._log_event("process_terminating", process=attr_name)
                 proc.terminate()
                 try:
                     proc.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
+                    self._log_event("process_killing", process=attr_name)
                     proc.kill()
         except Exception:
             pass
@@ -920,6 +1085,7 @@ class WindowsTurboStream:
                     cleaned = str(line or "").strip()
                     if cleaned:
                         sink.append(cleaned)
+                        self._log_event("process_output", line=cleaned)
             except Exception:
                 pass
 

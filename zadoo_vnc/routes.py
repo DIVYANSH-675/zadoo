@@ -313,6 +313,13 @@ class RoutesMixin:
         if self.screen_capturer:
             self.screen_capturer.quality = value
         try:
+            turbo = getattr(self, "turbo_stream", None)
+            if turbo is not None:
+                result = turbo.set_quality(value)
+                self._turbo_restart_needed = bool(result.get("restart_required"))
+        except Exception:
+            self._turbo_restart_needed = False
+        try:
             # Quality controls compression and visual resolution. Re-apply the
             # active adaptive profile so high quality immediately restores
             # full-resolution capture instead of waiting for the next profile change.
@@ -903,7 +910,16 @@ class RoutesMixin:
             qs = urllib.parse.parse_qs(parsed.query or "")
             raw = (qs.get("value") or qs.get("quality") or [self.current_quality])[0]
             value = self._apply_quality(raw, self.current_quality)
-            return {"success": True, "quality": value}
+            turbo_status = None
+            if getattr(self, "_turbo_restart_needed", False):
+                turbo = getattr(self, "turbo_stream", None)
+                if turbo is not None:
+                    loop = asyncio.get_event_loop()
+                    turbo_status = await loop.run_in_executor(None, turbo.ensure_started, None)
+                self._turbo_restart_needed = False
+            elif getattr(self, "turbo_stream", None) is not None:
+                turbo_status = self.turbo_stream.status()
+            return {"success": True, "quality": value, "turbo_stream": turbo_status}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

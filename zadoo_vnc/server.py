@@ -28,10 +28,12 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.screen_capturer = None
         self.current_quality = 65
         self._quality_locked_by_user = True
+        self._turbo_restart_needed = False
         self.current_fps = 0
         self.encoder_capabilities = detect_encoder_capabilities()
         self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
         self.turbo_stream = WindowsTurboStream()
+        self.turbo_stream.set_quality(self.current_quality, restart_active=False)
         if self.adaptive_stream.enabled:
             startup_profile = self.adaptive_stream.profile
             self.current_fps = startup_profile.target_fps

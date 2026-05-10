@@ -518,6 +518,30 @@ class MediaMixin:
                         await self.handle_get_url_via_websocket(websocket)
                     elif action == 'set_quality':
                         value = self._apply_quality(event.get('value', 75))
+                        turbo_status = None
+                        if getattr(self, "_turbo_restart_needed", False):
+                            try:
+                                turbo = getattr(self, "turbo_stream", None)
+                                if turbo is not None:
+                                    loop = asyncio.get_running_loop()
+                                    turbo_status = await loop.run_in_executor(None, turbo.ensure_started, None)
+                            except Exception as exc:
+                                turbo_status = {"success": False, "error": str(exc)}
+                            finally:
+                                self._turbo_restart_needed = False
+                        elif getattr(self, "turbo_stream", None) is not None:
+                            try:
+                                turbo_status = self.turbo_stream.status()
+                            except Exception:
+                                turbo_status = None
+                        try:
+                            await websocket.send(json.dumps({
+                                'type': 'quality_set',
+                                'quality': value,
+                                'turbo_stream': turbo_status,
+                            }))
+                        except Exception:
+                            pass
                         print(f" Quality set to: {value}%")
                     elif action == 'set_fps':
                         value = self._apply_fps(event.get('value', 30))
