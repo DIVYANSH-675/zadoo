@@ -255,6 +255,7 @@ class WindowsTurboStream:
         self.auto_start_enabled = _env_flag("ZADOO_TURBO_AUTO", True)
         self.benchmark_enabled = _env_flag("ZADOO_TURBO_BENCHMARK", True)
         self.allow_cpu_60 = _env_flag("ZADOO_TURBO_CPU_60", False)
+        self.allow_cpu_720 = _env_flag("ZADOO_TURBO_CPU_720", False)
         self.stream_name = os.getenv("ZADOO_TURBO_STREAM_NAME", "zadoo").strip() or "zadoo"
         self.display_index = self._int_env("ZADOO_TURBO_DISPLAY_INDEX", 0, 0, 16)
         self.rtsp_port = self._int_env("ZADOO_MEDIAMTX_RTSP_PORT", 8554, 1, 65535)
@@ -538,6 +539,8 @@ class WindowsTurboStream:
             return [forced]
         if self._full_quality_requested():
             return [
+                self._profile_by_name("native100"),
+                self._profile_by_name("native60"),
                 self._profile_by_name("native30"),
             ]
         return [
@@ -547,26 +550,22 @@ class WindowsTurboStream:
         ]
 
     def _upgrade_profiles(self, encoder_name: str) -> list[TurboProfile]:
-        if self.force_profile_name:
+        if self.force_profile_name or self._full_quality_requested():
             return []
-        if self._full_quality_requested():
-            upgrades = [
-                self._profile_by_name("native60"),
-                self._profile_by_name("native100"),
-            ]
-        else:
-            upgrades = [
-                self._profile_by_name("720p30"),
-                self._profile_by_name("540p45"),
-                self._profile_by_name("540p60"),
-                self._profile_by_name("720p60"),
-                self._profile_by_name("540p100"),
-                self._profile_by_name("540p120"),
-            ]
+        upgrades = [
+            self._profile_by_name("540p120"),
+            self._profile_by_name("540p100"),
+            self._profile_by_name("540p60"),
+            self._profile_by_name("720p60"),
+            self._profile_by_name("540p45"),
+            self._profile_by_name("720p30"),
+        ]
         profiles = [item for item in upgrades if item is not None]
         profiles = [item for item in profiles if int(item.fps) <= int(self.max_fps)]
         if encoder_name == "libx264" and not self.allow_cpu_60:
             profiles = [item for item in profiles if int(item.fps) <= 30]
+        if encoder_name == "libx264" and not self.allow_cpu_720:
+            profiles = [item for item in profiles if int(item.width or 0) <= 960]
         return profiles
 
     def ensure_started(self, host_header: str | None = None) -> dict:
@@ -679,6 +678,8 @@ class WindowsTurboStream:
             "ZADOO_TURBO_ENCODER": "optional fixed encoder",
             "ZADOO_TURBO_TRANSPORT": "rtsp, whip, or auto; rtsp is preferred",
             "ZADOO_TURBO_AUTO": "1 to auto-start, 0 to start on demand",
+            "ZADOO_TURBO_CPU_60": "1 to allow CPU x264 profiles above 30 FPS after benchmark success",
+            "ZADOO_TURBO_CPU_720": "1 to allow CPU x264 720p profiles after benchmark success",
             "ZADOO_TURBO_QUALITY": "initial UI quality value from 10 to 100",
             "ZADOO_TURBO_FULL_QUALITY_AT": "quality threshold that switches Turbo to native-resolution profiles; default 100",
         }
@@ -695,10 +696,20 @@ class WindowsTurboStream:
             return None
 
         selected: StreamSelection | None = None
+        disabled_zero_copy_captures: set[str] = set()
         for transport in transports:
             for capture in captures:
                 for encoder in encoders:
                     for zero_copy in self._zero_copy_modes(capture, encoder):
+                        if zero_copy and capture.name in disabled_zero_copy_captures:
+                            self._log_event(
+                                "benchmark_skip",
+                                capture=capture.name,
+                                encoder=encoder.name,
+                                zero_copy=True,
+                                reason="zero_copy_previously_failed_for_capture",
+                            )
+                            continue
                         for profile in base_profiles:
                             if zero_copy and profile.uses_native_resolution:
                                 continue
@@ -706,6 +717,33 @@ class WindowsTurboStream:
                             if selection:
                                 selected = selection
                                 break
+                            last_error = ""
+                            try:
+                                last_error = str((self._benchmark_results[-1] or {}).get("error") or "")
+                            except Exception:
+                                last_error = ""
+                            if zero_copy and self._is_zero_copy_path_failure(last_error):
+                                disabled_zero_copy_captures.add(capture.name)
+                                self._log_event(
+                                    "benchmark_skip_remaining_zero_copy",
+                                    capture=capture.name,
+                                    encoder=encoder.name,
+                                    profile=profile.name,
+                                    reason="zero_copy_filter_failed",
+                                )
+                                break
+                            if self._is_encoder_path_failure(last_error):
+                                self._log_event(
+                                    "benchmark_skip_remaining_profiles",
+                                    capture=capture.name,
+                                    encoder=encoder.name,
+                                    profile=profile.name,
+                                    zero_copy=zero_copy,
+                                    reason="encoder_path_failed",
+                                )
+                                break
+                        if selected:
+                            break
                     if selected:
                         break
                 if selected:
@@ -729,6 +767,7 @@ class WindowsTurboStream:
             )
             if upgraded:
                 selected = upgraded
+                break
             else:
                 self._last_limit_reason = f"{profile.name}_benchmark_failed"
 
@@ -780,6 +819,34 @@ class WindowsTurboStream:
         if ok:
             return StreamSelection(capture, encoder, profile, transport, zero_copy, elapsed_ms)
         return None
+
+    @staticmethod
+    def _is_zero_copy_path_failure(error_text: str) -> bool:
+        text = str(error_text or "").lower()
+        zero_copy_markers = (
+            "parsed_scale_d3d11",
+            "failed to configure output pad",
+            "could not create the texture",
+            "impossible to convert between the formats supported by the filter",
+            "link 'parsed_scale_d3d11",
+        )
+        return any(marker in text for marker in zero_copy_markers)
+
+    @staticmethod
+    def _is_encoder_path_failure(error_text: str) -> bool:
+        text = str(error_text or "").lower()
+        encoder_markers = (
+            "dll amfrt64.dll failed to open",
+            "error creating a mfx session",
+            "the current mfx implementation is not supported",
+            "failed to create  hardware device context",
+            "format negotiation failed",
+            "error while opening encoder",
+            "no capable devices found",
+            "cannot load nvcuda.dll",
+            "encoder not found",
+        )
+        return any(marker in text for marker in encoder_markers)
 
     def _benchmark_candidate(
         self,

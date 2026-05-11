@@ -1737,6 +1737,8 @@
     let qualitySendTimer = null;
     let pendingQualityValue = 65;
     let qualityTurboReconnectTimer = null;
+    let turboReconnectRetryTimer = null;
+    let turboIntentionalReconnectUntil = 0;
     let performanceModeEnabled = false;
     let performanceCustomRect = null;
     let turboStreamActive = false;
@@ -3025,7 +3027,15 @@
         }
     }
 
-    async function connectTurboStream() {
+    function scheduleTurboReconnect(delayMs = 1500, silent = false) {
+        if (turboReconnectRetryTimer) clearTimeout(turboReconnectRetryTimer);
+        turboReconnectRetryTimer = setTimeout(() => {
+            turboReconnectRetryTimer = null;
+            connectTurboStream({ silent });
+        }, Math.max(250, Number(delayMs) || 1500));
+    }
+
+    async function connectTurboStream(options = {}) {
         if (turboStatusTimer) {
             clearInterval(turboStatusTimer);
             turboStatusTimer = null;
@@ -3037,6 +3047,11 @@
                 handleTurboStatus(payload);
                 return;
             }
+            if (!payload.active && Date.now() < turboIntentionalReconnectUntil) {
+                handleTurboStatus(payload);
+                scheduleTurboReconnect(1500, true);
+                return;
+            }
             if (!payload.active) {
                 const startRes = await fetch('/api/turbo/start', { credentials: 'same-origin', cache: 'no-store' });
                 payload = await startRes.json();
@@ -3044,6 +3059,11 @@
             handleTurboStatus(payload);
             turboStatusTimer = setInterval(refreshTurboStreamStatus, 5000);
         } catch (error) {
+            const intentionalReconnect = Date.now() < turboIntentionalReconnectUntil || !!options.silent;
+            if (intentionalReconnect) {
+                scheduleTurboReconnect(1500, true);
+                return;
+            }
             console.warn('Turbo stream unavailable, using JPEG fallback:', error);
             hideTurboFrame();
         }
@@ -4600,10 +4620,11 @@
             }
             if (turboStreamActive || turboCaptureSelectorApplied) {
                 if (qualityTurboReconnectTimer) clearTimeout(qualityTurboReconnectTimer);
+                turboIntentionalReconnectUntil = Date.now() + 20000;
                 qualityTurboReconnectTimer = setTimeout(() => {
                     qualityTurboReconnectTimer = null;
-                    connectTurboStream();
-                }, 800);
+                    connectTurboStream({ silent: true });
+                }, 1800);
             }
         }
 
