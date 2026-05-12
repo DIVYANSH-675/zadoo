@@ -2957,11 +2957,21 @@
         }
     }
 
+    function turboFrameUrl(url) {
+        const parsed = new URL(url, window.location.href);
+        parsed.searchParams.set('controls', '0');
+        parsed.searchParams.set('muted', '1');
+        parsed.searchParams.set('autoplay', '1');
+        parsed.searchParams.set('playsinline', '1');
+        return parsed.toString();
+    }
+
     function showTurboFrame(url, payload) {
         if (!turboFrame || !isTurboUrlUsable(url)) return false;
-        if (turboFrame.dataset.src !== url) {
-            turboFrame.dataset.src = url;
-            turboFrame.src = url;
+        const frameUrl = turboFrameUrl(url);
+        if (turboFrame.dataset.src !== frameUrl) {
+            turboFrame.dataset.src = frameUrl;
+            turboFrame.src = frameUrl;
         }
         turboFrame.style.display = 'block';
         turboStreamActive = true;
@@ -3021,6 +3031,11 @@
         try {
             const res = await fetch('/api/turbo/status', { credentials: 'same-origin', cache: 'no-store' });
             const payload = await res.json();
+            if (payload && payload.available && !payload.active) {
+                handleTurboStatus(payload);
+                scheduleTurboReconnect(750, true);
+                return;
+            }
             handleTurboStatus(payload);
         } catch (_) {
             hideTurboFrame();

@@ -289,6 +289,9 @@ class WindowsTurboStream:
         self._benchmark_results: list[dict] = []
         self._last_error = ""
         self._last_limit_reason = ""
+        self._runtime_capture_failures: dict[str, int] = {}
+        self._runtime_bad_captures: set[str] = set()
+        self._last_runtime_restart_at = 0.0
         self._ffmpeg_proc: subprocess.Popen | None = None
         self._mediamtx_proc: subprocess.Popen | None = None
         self._mediamtx_owned = False
@@ -352,6 +355,8 @@ class WindowsTurboStream:
             if mode_changed:
                 self._selection = None
                 self._benchmark_results = []
+                self._runtime_capture_failures = {}
+                self._runtime_bad_captures = set()
                 self._last_limit_reason = "quality_changed"
                 if restart_required:
                     self._terminate_process("_ffmpeg_proc")
@@ -575,6 +580,9 @@ class WindowsTurboStream:
             if not capabilities.get("available"):
                 return self.status(host_header=host_header)
 
+            if self._selection and self._is_ffmpeg_running() and not self._is_ffmpeg_healthy():
+                self._handle_unhealthy_ffmpeg()
+
             if not self._selection:
                 self._selection = self._select_stream_path()
             if not self._selection:
@@ -587,7 +595,9 @@ class WindowsTurboStream:
                     self._last_error = "MediaMTX did not open the required RTSP/WebRTC ports."
                 return self.status(host_header=host_header)
 
-            if self._selection and not self._is_ffmpeg_running():
+            if self._selection and (
+                not self._is_ffmpeg_running() or not self._is_ffmpeg_healthy()
+            ):
                 self._start_ffmpeg(self._selection)
 
             return self.status(host_header=host_header)
@@ -605,10 +615,13 @@ class WindowsTurboStream:
         selected = self._selection.as_dict() if self._selection else None
         profile = selected.get("profile") if selected else None
         urls = self._urls_for_host(host_header)
-        active = self._is_ffmpeg_running() and self._is_mediamtx_ready_for(
+        ffmpeg_running = self._is_ffmpeg_running()
+        ffmpeg_healthy = ffmpeg_running and self._is_ffmpeg_healthy()
+        runtime_error = self._ffmpeg_runtime_error() if ffmpeg_running and not ffmpeg_healthy else ""
+        active = ffmpeg_running and ffmpeg_healthy and self._is_mediamtx_ready_for(
             (selected or {}).get("publish_transport", "rtsp")
         )
-        reason = capabilities.get("reason") or self._last_error
+        reason = capabilities.get("reason") or runtime_error or self._last_error
         if capabilities.get("available") and not active and not reason:
             reason = "Turbo stream is ready but not started yet."
         return {
@@ -635,7 +648,8 @@ class WindowsTurboStream:
             "benchmark_results": list(self._benchmark_results[-30:]),
             "capabilities": capabilities,
             "processes": {
-                "ffmpeg": self._is_ffmpeg_running(),
+                "ffmpeg": ffmpeg_running,
+                "ffmpeg_healthy": ffmpeg_healthy,
                 "mediamtx": self._is_mediamtx_ready_for((selected or {}).get("publish_transport", "rtsp")),
                 "mediamtx_owned": self._mediamtx_owned,
                 "rtsp_port_open": _tcp_open("127.0.0.1", self.rtsp_port),
@@ -658,6 +672,8 @@ class WindowsTurboStream:
             "ffmpeg_log_tail": list(self._ffmpeg_log_tail),
             "mediamtx_log_tail": list(self._mediamtx_log_tail),
             "last_ffmpeg_command": self._redact_command(self._last_ffmpeg_command),
+            "runtime_capture_failures": dict(self._runtime_capture_failures),
+            "runtime_bad_captures": sorted(self._runtime_bad_captures),
             "turbo_log_path": str((_repo_root() / "logs" / "turbo_stream.log").resolve()),
             "setup_hint": r"Run scripts\setup_turbo_stream.ps1, then restart the app.",
             "fps_floor_explanation": self._fps_floor_explanation(payload),
@@ -688,6 +704,10 @@ class WindowsTurboStream:
     def _select_stream_path(self) -> StreamSelection | None:
         self._benchmark_results = []
         captures = [item for item in self.capture_methods if item.available]
+        if self._runtime_bad_captures:
+            healthy_captures = [item for item in captures if item.name not in self._runtime_bad_captures]
+            if healthy_captures:
+                captures = healthy_captures
         encoders = [item for item in self.encoder_methods if item.available]
         transports = self._candidate_transports()
         base_profiles = [item for item in self._base_profiles() if item is not None]
@@ -1107,6 +1127,48 @@ class WindowsTurboStream:
 
     def _is_ffmpeg_running(self) -> bool:
         return self._ffmpeg_proc is not None and self._ffmpeg_proc.poll() is None
+
+    def _ffmpeg_runtime_error(self) -> str:
+        text = "\n".join(list(self._ffmpeg_log_tail)[-12:]).lower()
+        fatal_markers = (
+            "acquirenextframe failed",
+            "error during demuxing",
+            "failed to configure output pad",
+            "error reinitializing filters",
+            "error while opening encoder",
+            "conversion failed",
+            "no capable devices found",
+            "cannot load nvcuda.dll",
+        )
+        if not any(marker in text for marker in fatal_markers):
+            return ""
+        tail = " ".join(list(self._ffmpeg_log_tail)[-4:])
+        return f"FFmpeg stream is unhealthy. {tail}".strip()
+
+    def _is_ffmpeg_healthy(self) -> bool:
+        return not self._ffmpeg_runtime_error()
+
+    def _handle_unhealthy_ffmpeg(self) -> None:
+        error = self._ffmpeg_runtime_error() or "FFmpeg stream stopped producing usable frames."
+        capture_name = self._selection.capture.name if self._selection else ""
+        failure_count = 0
+        if capture_name:
+            failure_count = self._runtime_capture_failures.get(capture_name, 0) + 1
+            self._runtime_capture_failures[capture_name] = failure_count
+            if failure_count >= 2:
+                self._runtime_bad_captures.add(capture_name)
+                self._selection = None
+        self._last_error = error
+        self._last_limit_reason = "ffmpeg_runtime_unhealthy"
+        self._last_runtime_restart_at = time.time()
+        self._log_event(
+            "ffmpeg_unhealthy_restart",
+            capture=capture_name,
+            failure_count=failure_count,
+            bad_captures=sorted(self._runtime_bad_captures),
+            error=error,
+        )
+        self._terminate_process("_ffmpeg_proc")
 
     def _reap_processes(self) -> None:
         if self._ffmpeg_proc is not None and self._ffmpeg_proc.poll() is not None:
