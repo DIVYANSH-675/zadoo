@@ -51,7 +51,8 @@
             background: #000;
             cursor: default;
         }
-        #turbo-frame {
+        #turbo-frame,
+        #turbo-video {
             position: absolute;
             inset: 0;
             width: 100%;
@@ -61,6 +62,9 @@
             background: #000;
             pointer-events: none;
             z-index: 4;
+        }
+        #turbo-video {
+            object-fit: contain;
         }
         @supports (height: 100dvh) {
             #screen { height: 100dvh; }
@@ -1369,6 +1373,7 @@
         <div class="video-area">
             <div id="mouse-overlay"></div>
             <canvas id="screen"></canvas>
+            <video id="turbo-video" muted autoplay playsinline></video>
             <iframe id="turbo-frame" title="Turbo WebRTC screen stream" allow="autoplay; fullscreen; encrypted-media"></iframe>
             <div id="snapshot-selection-box"></div>
             <!-- Hidden status element for JavaScript -->
@@ -1723,6 +1728,7 @@
 <script>
     const canvas = document.getElementById('screen');
     const ctx = canvas.getContext('2d');
+    const turboVideo = document.getElementById('turbo-video');
     const turboFrame = document.getElementById('turbo-frame');
     let publicUrl = '';
     // Show Mouse logging helpers
@@ -1745,6 +1751,17 @@
     let turboStatusTimer = null;
     let turboLastProfile = '';
     let turboLastFps = 0;
+    let turboActualFps = 0;
+    let turboActualMbps = 0;
+    let turboActualDroppedFps = 0;
+    let turboLastFrameAt = 0;
+    let turboPlaybackKey = '';
+    let turboPeerConnection = null;
+    let turboWhepSessionUrl = '';
+    let turboStatsTimer = null;
+    let turboStatsSample = null;
+    let turboLowFpsSamples = 0;
+    let turboStartingSince = 0;
     let turboCaptureSelectorApplied = false;
     window.__turboAspect = null;
     const videoMetrics = {
@@ -2966,14 +2983,225 @@
         return parsed.toString();
     }
 
-    function showTurboFrame(url, payload) {
+    function turboWhepUrl(url, payload) {
+        const explicit = payload && payload.whep_url ? payload.whep_url : '';
+        if (explicit) return new URL(explicit, window.location.href).toString();
+        const parsed = new URL(url, window.location.href);
+        parsed.pathname = parsed.pathname.replace(/\/$/, '') + '/whep';
+        return parsed.toString();
+    }
+
+    function resetTurboActualMetrics() {
+        turboActualFps = 0;
+        turboActualMbps = 0;
+        turboActualDroppedFps = 0;
+        turboLastFrameAt = 0;
+        turboStatsSample = null;
+        turboLowFpsSamples = 0;
+        turboStartingSince = performance.now();
+    }
+
+    function hideTurboIframe() {
+        if (!turboFrame) return;
+        turboFrame.style.display = 'none';
+        if (turboFrame.dataset.src) {
+            turboFrame.dataset.src = '';
+            try { turboFrame.removeAttribute('src'); } catch (_) {}
+        }
+    }
+
+    function closeTurboPeerConnection(clearVideo = true) {
+        if (turboStatsTimer) {
+            clearInterval(turboStatsTimer);
+            turboStatsTimer = null;
+        }
+        const pc = turboPeerConnection;
+        const sessionUrl = turboWhepSessionUrl;
+        turboPeerConnection = null;
+        turboWhepSessionUrl = '';
+        if (sessionUrl) {
+            fetch(sessionUrl, { method: 'DELETE', cache: 'no-store' }).catch(() => {});
+        }
+        try { if (pc) pc.close(); } catch (_) {}
+        if (clearVideo && turboVideo) {
+            try { turboVideo.pause(); } catch (_) {}
+            try { turboVideo.srcObject = null; } catch (_) {}
+            turboVideo.style.display = 'none';
+        }
+    }
+
+    function waitForIceGatheringComplete(pc, timeoutMs = 3500) {
+        if (!pc || pc.iceGatheringState === 'complete') return Promise.resolve();
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                try { pc.removeEventListener('icegatheringstatechange', onState); } catch (_) {}
+                resolve();
+            };
+            const onState = () => {
+                if (pc.iceGatheringState === 'complete') finish();
+            };
+            pc.addEventListener('icegatheringstatechange', onState);
+            setTimeout(finish, Math.max(500, timeoutMs));
+        });
+    }
+
+    async function collectTurboPlaybackStats() {
+        if (!turboStreamActive || !turboVideo || !turboPeerConnection) return;
+        const now = performance.now();
+        const quality = turboVideo.getVideoPlaybackQuality ? turboVideo.getVideoPlaybackQuality() : {};
+        let inbound = null;
+        try {
+            const report = await turboPeerConnection.getStats();
+            report.forEach((item) => {
+                if (!inbound && item.type === 'inbound-rtp' && (item.kind === 'video' || item.mediaType === 'video')) {
+                    inbound = item;
+                }
+            });
+        } catch (_) {}
+
+        const framesDecoded = Number((inbound && inbound.framesDecoded) || quality.totalVideoFrames || 0);
+        const framesDropped = Number((inbound && inbound.framesDropped) || quality.droppedVideoFrames || 0);
+        const bytesReceived = Number((inbound && inbound.bytesReceived) || 0);
+        if (!turboStatsSample) {
+            turboStatsSample = { time: now, framesDecoded, framesDropped, bytesReceived };
+            if (framesDecoded > 0) turboLastFrameAt = now;
+            return;
+        }
+
+        const elapsed = Math.max(0.25, (now - turboStatsSample.time) / 1000);
+        const decodedDelta = Math.max(0, framesDecoded - turboStatsSample.framesDecoded);
+        const droppedDelta = Math.max(0, framesDropped - turboStatsSample.framesDropped);
+        const bytesDelta = Math.max(0, bytesReceived - turboStatsSample.bytesReceived);
+        const measuredFps = decodedDelta / elapsed;
+        const instantFps = Number((inbound && inbound.framesPerSecond) || 0);
+        const nextFps = measuredFps > 0 ? measuredFps : instantFps;
+        if (nextFps > 0) {
+            turboActualFps = turboActualFps ? (turboActualFps * 0.55 + nextFps * 0.45) : nextFps;
+            turboLastFrameAt = now;
+        }
+        turboActualDroppedFps = droppedDelta / elapsed;
+        turboActualMbps = bytesDelta > 0 ? (bytesDelta * 8) / elapsed / 1000000 : turboActualMbps;
+        turboStatsSample = { time: now, framesDecoded, framesDropped, bytesReceived };
+
+        const target = Math.max(1, Number(turboLastFps || 0));
+        const lowThreshold = Math.min(30, Math.max(12, target * 0.45));
+        if (target >= 45 && turboActualFps > 0 && turboActualFps < lowThreshold) {
+            turboLowFpsSamples += 1;
+        } else {
+            turboLowFpsSamples = 0;
+        }
+        if (turboLowFpsSamples >= 6) {
+            const el = document.getElementById('stream-profile');
+            if (el) el.textContent = `${turboLastProfile || 'Turbo WebRTC'} | low real FPS`;
+        }
+
+        const hasInitialFrame = framesDecoded > 0 || Number((quality && quality.totalVideoFrames) || 0) > 0;
+        const stalledMs = turboLastFrameAt ? now - turboLastFrameAt : now - turboStartingSince;
+        if (!hasInitialFrame && stalledMs > 10000) {
+            console.warn('Turbo WebRTC is not receiving decoded frames; reconnecting playback');
+            closeTurboPeerConnection(true);
+            scheduleTurboReconnect(500, true);
+        }
+    }
+
+    function startTurboStatsTimer() {
+        if (turboStatsTimer) clearInterval(turboStatsTimer);
+        turboStatsTimer = setInterval(collectTurboPlaybackStats, 1000);
+        collectTurboPlaybackStats();
+    }
+
+    function showTurboIframe(url) {
         if (!turboFrame || !isTurboUrlUsable(url)) return false;
         const frameUrl = turboFrameUrl(url);
         if (turboFrame.dataset.src !== frameUrl) {
             turboFrame.dataset.src = frameUrl;
             turboFrame.src = frameUrl;
         }
+        if (turboVideo) turboVideo.style.display = 'none';
         turboFrame.style.display = 'block';
+        return true;
+    }
+
+    async function startTurboWebRtcPlayback(url, payload) {
+        if (!turboVideo || !window.RTCPeerConnection) {
+            showTurboIframe(url);
+            return;
+        }
+        const whepUrl = turboWhepUrl(url, payload || {});
+        if (!isTurboUrlUsable(whepUrl)) {
+            showTurboIframe(url);
+            return;
+        }
+        if (turboPlaybackKey === whepUrl && turboPeerConnection) {
+            turboVideo.style.display = 'block';
+            hideTurboIframe();
+            return;
+        }
+
+        closeTurboPeerConnection(true);
+        resetTurboActualMetrics();
+        turboPlaybackKey = whepUrl;
+        hideTurboIframe();
+        turboVideo.controls = false;
+        turboVideo.muted = true;
+        turboVideo.autoplay = true;
+        turboVideo.playsInline = true;
+        turboVideo.style.display = 'block';
+
+        const pc = new RTCPeerConnection();
+        turboPeerConnection = pc;
+        window.__zadooTurboPeerConnection = pc;
+        const stream = new MediaStream();
+        turboVideo.srcObject = stream;
+
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addEventListener('track', (event) => {
+            if (event.streams && event.streams[0]) {
+                turboVideo.srcObject = event.streams[0];
+            } else if (event.track) {
+                stream.addTrack(event.track);
+            }
+            turboVideo.play().catch(() => {});
+        });
+        pc.addEventListener('connectionstatechange', () => {
+            if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+                if (turboPeerConnection === pc) {
+                    closeTurboPeerConnection(true);
+                    scheduleTurboReconnect(1000, true);
+                }
+            }
+        });
+
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            await waitForIceGatheringComplete(pc);
+            const localDescription = pc.localDescription;
+            const response = await fetch(whepUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/sdp' },
+                body: localDescription ? localDescription.sdp : offer.sdp,
+                cache: 'no-store'
+            });
+            if (!response.ok) throw new Error(`WHEP ${response.status}`);
+            const location = response.headers.get('Location') || '';
+            if (location) turboWhepSessionUrl = new URL(location, whepUrl).toString();
+            const answer = await response.text();
+            await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+            startTurboStatsTimer();
+        } catch (error) {
+            console.warn('Turbo direct WebRTC failed, falling back to MediaMTX player:', error);
+            closeTurboPeerConnection(true);
+            showTurboIframe(url);
+        }
+    }
+
+    function showTurboFrame(url, payload) {
+        if (!turboFrame || !isTurboUrlUsable(url)) return false;
         turboStreamActive = true;
         turboLastProfile = turboProfileText(payload || {});
         const selected = payload && payload.selected ? payload.selected : {};
@@ -2987,6 +3215,7 @@
         const el = document.getElementById('stream-profile');
         if (el) el.textContent = turboLastProfile;
         applyTurboCaptureSelector(payload || {});
+        startTurboWebRtcPlayback(url, payload || {});
         return true;
     }
 
@@ -2994,14 +3223,13 @@
         turboStreamActive = false;
         turboLastProfile = '';
         turboLastFps = 0;
+        turboPlaybackKey = '';
+        resetTurboActualMetrics();
         window.__turboAspect = null;
         restoreCaptureSelectorIfNeeded();
+        closeTurboPeerConnection(true);
         if (!turboFrame) return;
-        turboFrame.style.display = 'none';
-        if (turboFrame.dataset.src) {
-            turboFrame.dataset.src = '';
-            try { turboFrame.removeAttribute('src'); } catch (_) {}
-        }
+        hideTurboIframe();
     }
 
     function handleTurboStatus(payload) {
@@ -3106,6 +3334,20 @@
     function sendClientStreamStats() {
         const socket = window.videoSocket;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        if (turboStreamActive) {
+            socket.send(JSON.stringify({
+                action: 'client_stream_stats',
+                display_fps: Number((turboActualFps || 0).toFixed(2)),
+                decode_ms: 0,
+                draw_ms: 0,
+                receive_delay_ms: 0,
+                recv_kbps: Number(((turboActualMbps || 0) * 1000).toFixed(2)),
+                dropped_blobs: Number((turboActualDroppedFps || 0).toFixed(2)),
+                rtt_ms: Number(videoMetrics.rttMs.toFixed(2)),
+                turbo: true
+            }));
+            return;
+        }
         const now = performance.now();
         const elapsed = Math.max(0.25, (now - videoMetrics.lastSentAt) / 1000);
         const bytesDelta = Math.max(0, videoMetrics.receivedBytes - videoMetrics.lastBytesAtSend);
@@ -4575,10 +4817,16 @@
         setInterval(() => {
             const elapsedSeconds = (performance.now() - lastTime) / 1000;
             if (elapsedSeconds > 0) {
-                const fps = turboStreamActive && turboLastFps
-                    ? String(Math.round(turboLastFps))
-                    : (frameCount / elapsedSeconds).toFixed(0);
-                updateStatus(`${turboStreamActive ? 'Turbo' : 'Connected'} | ${fps} FPS`);
+                let fps;
+                if (turboStreamActive) {
+                    fps = turboActualFps > 0 ? String(Math.round(turboActualFps)) : '0';
+                } else {
+                    fps = (frameCount / elapsedSeconds).toFixed(0);
+                }
+                const statusPrefix = turboStreamActive
+                    ? (turboActualFps > 0 ? 'Turbo' : 'Turbo starting')
+                    : 'Connected';
+                updateStatus(`${statusPrefix} | ${fps} FPS`);
                 // Update sidebar FPS display
                 document.getElementById('sidebar-fps').textContent = fps;
                 document.getElementById('current-fps').textContent = fps;

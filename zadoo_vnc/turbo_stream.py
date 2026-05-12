@@ -995,7 +995,7 @@ class WindowsTurboStream:
         if capture.name == "ddagrab":
             source = (
                 f"ddagrab=output_idx={self.display_index}:framerate={profile.fps}:"
-                "draw_mouse=1:dup_frames=1:output_fmt=8bit"
+                "draw_mouse=1:dup_frames=0:output_fmt=8bit"
             )
             cmd.extend(["-f", "lavfi", "-i", source])
         elif capture.name == "gfxcapture":
@@ -1029,14 +1029,11 @@ class WindowsTurboStream:
                     filters.append("format=nv12")
                 else:
                     filters.append(f"scale_d3d11=width={profile.width}:height={profile.height}:format=nv12")
-            if capture.name == "gfxcapture":
-                filters.append(f"fps={profile.fps}")
             return ",".join(filters)
 
         filters = []
         if capture.name in {"ddagrab", "gfxcapture"}:
             filters.extend(["hwdownload", "format=bgra"])
-        filters.append(f"fps={profile.fps}")
         if not profile.uses_native_resolution:
             filters.append(f"scale=w={profile.width}:h={profile.height}:flags=fast_bilinear")
         filters.append("format=yuv420p" if encoder.name == "libx264" else "format=nv12")
