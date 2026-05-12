@@ -1054,6 +1054,8 @@ class WindowsTurboStream:
     def _encoder_args(self, encoder: EncoderMethod, profile: TurboProfile, zero_copy: bool) -> list[str]:
         fps = max(1, int(profile.fps))
         base = [
+            "-fps_mode:v",
+            "vfr",
             "-c:v",
             encoder.name,
             "-b:v",
@@ -1071,6 +1073,8 @@ class WindowsTurboStream:
             base.extend(["-pix_fmt", "yuv420p"])
         if encoder.name == "libx264":
             return [
+                "-fps_mode:v",
+                "vfr",
                 "-c:v",
                 "libx264",
                 "-preset",
