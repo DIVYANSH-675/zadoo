@@ -263,6 +263,7 @@ class WindowsTurboStream:
         self.max_fps = self._int_env("ZADOO_TURBO_MAX_FPS", 100, 24, 240)
         self.quality_percent = self._int_env("ZADOO_TURBO_QUALITY", 65, 10, 100)
         self.full_quality_at = self._int_env("ZADOO_TURBO_FULL_QUALITY_AT", 100, 85, 100)
+        self.native_max_fps = self._int_env("ZADOO_TURBO_NATIVE_MAX_FPS", 30, 15, 100)
         self.benchmark_seconds = self._float_env("ZADOO_TURBO_BENCH_SECONDS", 1.8, 0.5, 8.0)
         self.force_profile_name = os.getenv("ZADOO_TURBO_PROFILE", "").strip().lower()
         self.force_capture_name = os.getenv("ZADOO_TURBO_CAPTURE", "").strip().lower()
@@ -307,6 +308,7 @@ class WindowsTurboStream:
             max_fps=self.max_fps,
             quality=self.quality_percent,
             full_quality_at=self.full_quality_at,
+            native_max_fps=self.native_max_fps,
             transport=self.transport_mode,
         )
 
@@ -487,6 +489,7 @@ class WindowsTurboStream:
                 "available_captures": available_captures,
                 "available_encoders": available_encoders,
                 "available_transports": transports,
+                "native_max_fps": self.native_max_fps,
                 "reason": self.reason,
                 "last_probe_at": self._last_probe_at,
             }
@@ -543,11 +546,17 @@ class WindowsTurboStream:
         if forced:
             return [forced]
         if self._full_quality_requested():
-            return [
-                self._profile_by_name("native100"),
-                self._profile_by_name("native60"),
-                self._profile_by_name("native30"),
+            native_order = (
+                ("native100", 100),
+                ("native60", 60),
+                ("native30", 30),
+            )
+            candidates = [
+                self._profile_by_name(name)
+                for name, fps in native_order
+                if fps <= min(int(self.max_fps), int(self.native_max_fps))
             ]
+            return [item for item in candidates if item is not None] or [self._profile_by_name("native30")]
         return [
             self._profile_by_name("540p30"),
             self._profile_by_name("360p30"),
@@ -636,6 +645,7 @@ class WindowsTurboStream:
             "profile": profile,
             "stream_name": self.stream_name,
             "max_fps": self.max_fps,
+            "native_max_fps": self.native_max_fps,
             "quality": self.quality_percent,
             "full_quality": self._full_quality_requested(),
             "full_quality_at": self.full_quality_at,
@@ -694,6 +704,8 @@ class WindowsTurboStream:
             "ZADOO_TURBO_ENCODER": "optional fixed encoder",
             "ZADOO_TURBO_TRANSPORT": "rtsp, whip, or auto; rtsp is preferred",
             "ZADOO_TURBO_AUTO": "1 to auto-start, 0 to start on demand",
+            "ZADOO_TURBO_MAX_FPS": "upper FPS limit for benchmarked Turbo profiles, default 100",
+            "ZADOO_TURBO_NATIVE_MAX_FPS": "upper FPS limit for native-resolution 100% quality mode, default 30",
             "ZADOO_TURBO_CPU_60": "1 to allow CPU x264 profiles above 30 FPS after benchmark success",
             "ZADOO_TURBO_CPU_720": "1 to allow CPU x264 720p profiles after benchmark success",
             "ZADOO_TURBO_QUALITY": "initial UI quality value from 10 to 100",
