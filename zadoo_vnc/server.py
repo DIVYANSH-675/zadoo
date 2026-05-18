@@ -16,7 +16,6 @@ from .input_control import InputControlMixin
 from .media import MediaMixin
 from .routes import RoutesMixin
 from .streaming import AdaptiveStreamController, detect_encoder_capabilities
-from .turbo_stream import WindowsTurboStream
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
@@ -28,12 +27,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.screen_capturer = None
         self.current_quality = 65
         self._quality_locked_by_user = True
-        self._turbo_restart_needed = False
         self.current_fps = 0
         self.encoder_capabilities = detect_encoder_capabilities()
         self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
-        self.turbo_stream = WindowsTurboStream()
-        self.turbo_stream.set_quality(self.current_quality, restart_active=False)
         if self.adaptive_stream.enabled:
             startup_profile = self.adaptive_stream.profile
             self.current_fps = startup_profile.target_fps
@@ -129,9 +125,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             )
             servers.append(secondary_server)
 
-        if getattr(self.turbo_stream, "auto_start_enabled", False):
-            asyncio.create_task(self._maybe_start_turbo_stream())
-
         # Start host hotkey capture on server start (A/B/C/D)
         try:
             self.start_global_keyboard_hook()
@@ -182,29 +175,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             cursor_broadcast_task
         )
 
-    async def _maybe_start_turbo_stream(self):
-        """Start the FFmpeg/WebRTC stream when the local toolchain supports it."""
-        turbo = getattr(self, "turbo_stream", None)
-        if turbo is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            status = await loop.run_in_executor(None, turbo.ensure_started, f"localhost:{self.port}")
-            if status.get("active"):
-                selected = status.get("selected") or {}
-                profile = (selected.get("profile") or {}).get("name", "unknown")
-                encoder = (selected.get("encoder") or {}).get("name", "unknown")
-                capture = (selected.get("capture") or {}).get("name", "unknown")
-                transport = selected.get("publish_transport", "unknown")
-                zero_copy = "zero-copy" if selected.get("zero_copy") else "cpu-copy"
-                print(f" Turbo WebRTC stream active: {profile} via {capture}/{encoder}/{transport}/{zero_copy}")
-            elif status.get("available"):
-                print(f" Turbo WebRTC stream ready but inactive: {status.get('reason') or status.get('last_error')}")
-            else:
-                print(f" Turbo WebRTC unavailable; JPEG fallback active: {status.get('reason')}")
-        except Exception as exc:
-            print(f" Turbo WebRTC startup skipped: {exc}")
-
     def set_tunnel_manager(self, tunnel_manager):
         """Set the tunnel manager for API access"""
         self.tunnel_manager = tunnel_manager
@@ -250,13 +220,5 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             await self.video_stream_handler(websocket)
 
     def stop(self):
-        try:
-            if getattr(self, "turbo_stream", None):
-                self.turbo_stream.stop()
-        except Exception:
-            pass
         if self.loop:
-            try:
-                self.loop.call_soon_threadsafe(self.stop_event.set)
-            except Exception:
-                pass
+            self.loop.call_soon_threadsafe(self.stop_event.set)

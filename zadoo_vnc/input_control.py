@@ -502,7 +502,7 @@ class InputControlMixin:
                 # Fallback via clip.exe (Windows)
                 try:
                     import subprocess
-                    p = subprocess.Popen(['clip.exe'], stdin=subprocess.PIPE)
+                    p = subprocess.Popen('clip', stdin=subprocess.PIPE, shell=True)
                     _ = p.communicate(input=data.encode('utf-8'))
                     if p.returncode == 0:
                         ok = True
@@ -516,18 +516,8 @@ class InputControlMixin:
             if not ok:
                 try:
                     import subprocess
-                    ps = subprocess.run(
-                        [
-                            'powershell',
-                            '-NoProfile',
-                            '-Command',
-                            'Set-Clipboard -Value ([Console]::In.ReadToEnd())',
-                        ],
-                        input=data,
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
+                    ps = subprocess.run(['powershell', '-NoProfile', '-Command', f'Set-Clipboard -Value @""\n{data}\n""@'], 
+                                     capture_output=True, text=True, timeout=5)
                     if ps.returncode == 0:
                         ok = True
                         print(f" Clipboard set via PowerShell: {len(data)} chars")

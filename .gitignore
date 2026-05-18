@@ -16,5 +16,4 @@ zadoo_run_*.out.log
 run_*.err.log
 run_*.out.log
 cloudflared.exe
-tools/
 output/

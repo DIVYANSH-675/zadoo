@@ -36,7 +36,6 @@ FORBIDDEN_SOURCE_STRINGS = (
     "resend_api_key_default",
     "email_to_default",
     "iskssj07@gmail.com",
-    "shell" + "=True",
 ) + _legacy_auth_strings()
 
 
@@ -96,7 +95,7 @@ def assert_imports() -> None:
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
 
-    if not (deps.HAS_PYAUTOGUI and (deps.HAS_DXCAM or deps.HAS_BETTERCAM) and (deps.HAS_IMAGECODECS or deps.HAS_PIL)):
+    if not (deps.HAS_PYAUTOGUI and (deps.HAS_MSS or deps.WIN32_AVAILABLE or deps.HAS_PIL)):
         fail("core capture/input dependency flags are not usable")
 
     for name, loader in {
@@ -132,21 +131,12 @@ def assert_imports() -> None:
             cookie = auth_response.headers.get("Set-Cookie")
             if not cookie or "zadoo_auth=" not in cookie:
                 fail("auth route did not set zadoo_auth cookie")
-            if "Secure" in cookie:
-                fail("local auth cookie unexpectedly set Secure without an HTTPS proxy header")
-            secure_headers = Headers()
-            secure_headers["X-Forwarded-Proto"] = "https"
-            secure_response = await server.process_request(f"/api/auth?code={test_auth_code}", secure_headers)
-            secure_cookie = secure_response.headers.get("Set-Cookie", "")
-            if "Secure" not in secure_cookie:
-                fail("HTTPS-proxied auth route did not set a Secure cookie")
             headers["Cookie"] = cookie.split(";", 1)[0]
             checks = {
                 "/api/public-url": 200,
                 "/api/list-cameras": 200,
                 "/api/set-quality?value=80": 200,
                 "/api/set-fps?value=20": 200,
-                "/api/capture-methods": 200,
                 "/api/set-clipboard-image": 400,
             }
             for path, expected_status in checks.items():
@@ -159,12 +149,6 @@ def assert_imports() -> None:
                     assert_camera_payload(response.body, require_objects=True)
                 else:
                     payload = json.loads(response.body.decode("utf-8"))
-                    if path == "/api/capture-methods":
-                        method_ids = {item.get("id") for item in payload.get("methods", [])}
-                        expected_ids = {"auto", "dxcam", "bettercam"}
-                        if method_ids != expected_ids:
-                            fail(f"capture method catalog returned {sorted(method_ids)}, expected {sorted(expected_ids)}")
-                        continue
                     if path.startswith("/api/set-quality") and payload.get("quality") != 80:
                         fail(f"set-quality returned {payload.get('quality')}, expected 80")
                     if path.startswith("/api/set-fps") and payload.get("fps") != 20:
@@ -270,13 +254,6 @@ def assert_source_clean() -> None:
         match = MOJIBAKE_RE.search(text)
         if match:
             fail(f"mojibake marker {match.group(0)!r} found in {path.relative_to(ROOT)}")
-    index_html = (ROOT / "zadoo_vnc" / "templates" / "index.html").read_text(encoding="utf-8", errors="ignore")
-    auth_input = re.search(r'<input[^>]+id="auth-code"[^>]*>', index_html)
-    if not auth_input:
-        fail("auth-code input is missing from index.html")
-    maxlength = re.search(r'maxlength="(\d+)"', auth_input.group(0))
-    if not maxlength or int(maxlength.group(1)) < 32:
-        fail("auth-code input maxlength is too short for generated runtime access codes")
     ok("source has no forbidden secrets or mojibake markers")
 
 

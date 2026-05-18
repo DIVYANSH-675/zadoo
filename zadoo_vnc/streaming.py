@@ -124,6 +124,10 @@ class AdaptiveStreamController:
         self.last_client_at = 0.0
         self.effective_scale_div = self.profile.scale_div
         self.quality_scale_lock = "adaptive"
+        self.measured_fps_cap = None
+        self.effective_target_fps = self.profile.target_fps
+        self.fps_cap_reason = ""
+        self.downshift_reason = "startup"
 
     def _index_for_name(self, name: str, default: int = 0) -> int:
         for index, profile in enumerate(STREAM_LADDER):
@@ -137,7 +141,11 @@ class AdaptiveStreamController:
 
     def apply_to(self, server) -> StreamProfile:
         profile = self.profile
-        server.current_fps = int(profile.target_fps)
+        target_fps = int(profile.target_fps)
+        if self.measured_fps_cap:
+            target_fps = max(1, min(target_fps, int(self.measured_fps_cap)))
+        self.effective_target_fps = target_fps
+        server.current_fps = target_fps
         capturer = getattr(server, "screen_capturer", None)
         quality = int(getattr(server, "current_quality", 65) or 65)
         scale_div = int(profile.scale_div)
@@ -151,7 +159,7 @@ class AdaptiveStreamController:
             self.quality_scale_lock = "adaptive"
         self.effective_scale_div = scale_div
         if capturer is not None:
-            capturer.fps = int(profile.target_fps)
+            capturer.fps = target_fps
             try:
                 capturer.set_performance_mode(scale_div > 1, "full", scale_div)
                 capturer.set_grayscale(bool(profile.grayscale))
@@ -221,6 +229,8 @@ class AdaptiveStreamController:
         capture_ms = self.last_server_stats["capture_ms"]
         encode_ms = self.last_server_stats["encode_ms"]
         capture_fps = self.last_server_stats["capture_fps"]
+        quality = int(capture_stats.get("quality") or 65)
+        full_resolution_locked = quality >= 85
 
         network_backlog = max_write_buffer > 128_000 or skipped_delta > max(2, video_clients * 3)
         stale_frames = frame_age_ms > 220 or inflight_sends > video_clients
@@ -235,9 +245,33 @@ class AdaptiveStreamController:
             or (capture_fps > 0 and capture_fps < target_fps * 0.55)
         )
         overloaded = network_backlog or stale_frames or browser_slow or host_slow
+        cap_reason = ""
+        desired_cap = int(profile.target_fps)
+        if host_slow:
+            host_ms = max(1.0, capture_ms + encode_ms)
+            desired_cap = min(desired_cap, max(15, int(1000.0 / (host_ms * 1.25))))
+            if capture_fps > 0:
+                desired_cap = min(desired_cap, max(15, int(capture_fps * 0.95)))
+            cap_reason = "host_capture_encode"
+        if browser_slow and display_fps > 0:
+            desired_cap = min(desired_cap, max(15, int(display_fps * 0.95)))
+            cap_reason = cap_reason or "browser_decode"
+        if network_backlog:
+            desired_cap = min(desired_cap, max(15, int(max(15, self.effective_target_fps) * 0.75)))
+            cap_reason = cap_reason or "network_backlog"
 
         if overloaded:
             self.good_intervals = 0
+            if full_resolution_locked:
+                new_cap = max(15, min(int(profile.target_fps), int(desired_cap)))
+                old_cap = int(self.measured_fps_cap or profile.target_fps)
+                self.measured_fps_cap = min(old_cap, new_cap)
+                self.fps_cap_reason = cap_reason or "overloaded"
+                self.downshift_reason = self.fps_cap_reason
+                self.last_reason = self.fps_cap_reason
+                if self.measured_fps_cap != old_cap:
+                    self.last_change_at = now
+                return self.measured_fps_cap != old_cap
             if self.profile_index < len(STREAM_LADDER) - 1 and now - self.last_change_at >= 1.5:
                 self.profile_index += 1
                 self.last_change_at = now
@@ -251,8 +285,10 @@ class AdaptiveStreamController:
                 if host_slow:
                     reasons.append("host_capture_encode")
                 self.last_reason = ",".join(reasons) or "overloaded"
+                self.downshift_reason = self.last_reason
                 return True
             self.last_reason = "overloaded"
+            self.downshift_reason = cap_reason or self.last_reason
             return False
 
         client_ok = not client or (
@@ -265,11 +301,24 @@ class AdaptiveStreamController:
         else:
             self.good_intervals = 0
 
+        if self.measured_fps_cap and self.good_intervals >= 6 and now - self.last_change_at >= 8.0:
+            old_cap = int(self.measured_fps_cap)
+            self.measured_fps_cap = min(int(profile.target_fps), old_cap + 15)
+            if self.measured_fps_cap >= int(profile.target_fps):
+                self.measured_fps_cap = None
+                self.fps_cap_reason = ""
+            self.good_intervals = 0
+            self.last_change_at = now
+            self.last_reason = "stable_headroom"
+            self.downshift_reason = self.last_reason
+            return True
+
         if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0:
             self.profile_index -= 1
             self.good_intervals = 0
             self.last_change_at = now
             self.last_reason = "stable_headroom"
+            self.downshift_reason = self.last_reason
             return True
         self.last_reason = "stable"
         return False
@@ -285,6 +334,10 @@ class AdaptiveStreamController:
             "profile": asdict(profile),
             "profile_name": profile.name,
             "status": profile.status,
+            "effective_target_fps": self.effective_target_fps,
+            "measured_fps_cap": self.measured_fps_cap,
+            "fps_cap_reason": self.fps_cap_reason,
+            "downshift_reason": self.downshift_reason,
             "effective_scale_div": self.effective_scale_div,
             "quality_scale_lock": self.quality_scale_lock,
             "last_reason": self.last_reason,

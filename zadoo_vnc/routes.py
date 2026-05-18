@@ -20,7 +20,6 @@ from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
 from .logging_utils import _log_except, _log_try_ok
-from .screen_capture import unavailable_capture_method_catalog
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
@@ -96,36 +95,6 @@ class RoutesMixin:
         except Exception:
             return None
 
-    def _is_secure_request(self, request_headers) -> bool:
-        proto = str(self._header_get(request_headers, "X-Forwarded-Proto", "") or "").lower()
-        if proto.split(",", 1)[0].strip() == "https":
-            return True
-        forwarded = str(self._header_get(request_headers, "Forwarded", "") or "").lower()
-        if "proto=https" in forwarded:
-            return True
-        cf_visitor = str(self._header_get(request_headers, "Cf-Visitor", "") or "")
-        if cf_visitor:
-            try:
-                return str(json.loads(cf_visitor).get("scheme", "")).lower() == "https"
-            except Exception:
-                return '"scheme":"https"' in cf_visitor.replace(" ", "").lower()
-        return False
-
-    def _redact_request_path(self, path: str) -> str:
-        try:
-            parsed = urllib.parse.urlparse(path)
-            if parsed.path != "/api/auth" or not parsed.query:
-                return path
-            redacted_query = urllib.parse.urlencode(
-                [
-                    (key, "<redacted>" if key.lower() in {"code", "token", "password"} else value)
-                    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-                ]
-            )
-            return urllib.parse.urlunparse(parsed._replace(query=redacted_query))
-        except Exception:
-            return "/api/auth?<redacted>" if str(path).startswith("/api/auth") else str(path)
-
     def _auth_codes(self):
         def clean(value):
             return str(value if value is not None else "").strip()
@@ -144,7 +113,7 @@ class RoutesMixin:
             return configured
         runtime_codes = getattr(self, "_runtime_auth_codes", None)
         if not isinstance(runtime_codes, dict) or not runtime_codes:
-            code = secrets.token_urlsafe(12).replace("-", "").replace("_", "").upper()
+            code = secrets.token_urlsafe(6).replace("-", "").replace("_", "").upper()[:6]
             runtime_codes = {"full": code}
             self._runtime_auth_codes = runtime_codes
             self._runtime_auth_generated = True
@@ -232,24 +201,9 @@ class RoutesMixin:
     def _http_feature_for_route(self, route_path):
         if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
             return "public"
-        if route_path in {
-            "/api/public-url",
-            "/api/stream-stats",
-            "/api/capture-methods",
-            "/api/turbo/status",
-            "/api/turbo/config",
-            "/api/turbo/diagnostics",
-            "/benchmark.html",
-            "/snapshot",
-        }:
+        if route_path in {"/api/public-url", "/api/stream-stats", "/benchmark.html", "/snapshot"}:
             return "view"
-        if route_path in {
-            "/api/set-quality",
-            "/api/set-fps",
-            "/api/set-clipboard-image",
-            "/api/turbo/start",
-            "/api/turbo/stop",
-        }:
+        if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
             return "control"
         if route_path == "/api/refresh-tunnel":
             return "host"
@@ -271,7 +225,7 @@ class RoutesMixin:
             return False
         return self._is_authorized(request_headers, feature)
 
-    async def handle_auth(self, path, request_headers=None):
+    async def handle_auth(self, path):
         parsed = urllib.parse.urlparse(str(path or ""))
         query = urllib.parse.parse_qs(parsed.query or "")
         role = self._match_auth_code((query.get("code") or [""])[0])
@@ -285,16 +239,10 @@ class RoutesMixin:
             self.auth_sessions = {}
             sessions = self.auth_sessions
         sessions[token] = {"role": role, "expires_at": expires_at}
-        cookie_parts = [
-            f"{self.AUTH_COOKIE_NAME}={token}",
-            "Path=/",
-            f"Max-Age={self.AUTH_TTL_SECONDS}",
-            "HttpOnly",
-            "SameSite=Lax",
-        ]
-        if self._is_secure_request(request_headers):
-            cookie_parts.append("Secure")
-        cookie = "; ".join(cookie_parts)
+        cookie = (
+            f"{self.AUTH_COOKIE_NAME}={token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
+            "HttpOnly; SameSite=Lax"
+        )
         return self._json_response(
             {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS},
             extra_headers={"Set-Cookie": cookie},
@@ -312,13 +260,6 @@ class RoutesMixin:
         self._quality_locked_by_user = True
         if self.screen_capturer:
             self.screen_capturer.quality = value
-        try:
-            turbo = getattr(self, "turbo_stream", None)
-            if turbo is not None:
-                result = turbo.set_quality(value)
-                self._turbo_restart_needed = bool(result.get("restart_required"))
-        except Exception:
-            self._turbo_restart_needed = False
         try:
             # Quality controls compression and visual resolution. Re-apply the
             # active adaptive profile so high quality immediately restores
@@ -387,7 +328,7 @@ class RoutesMixin:
             path = "/"
         route_path = urllib.parse.urlparse(path).path
 
-        logging.debug("process_request: path=%s", self._redact_request_path(path))
+        logging.debug("process_request: path=%s", path)
 
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:
@@ -453,7 +394,7 @@ class RoutesMixin:
                 body=html.encode("utf-8"),
             )
         elif route_path == "/api/auth":
-            return await self.handle_auth(path, request_headers)
+            return await self.handle_auth(path)
         elif isinstance(path, str) and route_path == "/api/public-url":
             try:
                 return self._json_response(json.loads(await self.handle_get_public_url()))
@@ -473,71 +414,6 @@ class RoutesMixin:
                 stats = self._capture_stats_payload()
                 stream = self._stream_status_payload()
                 return self._json_response({"success": True, "stats": stats, "stream": stream})
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/turbo/status":
-            try:
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is None:
-                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
-                return self._json_response(turbo.status(host_header=self._header_get(request_headers, "Host", "")))
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/turbo/config":
-            try:
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is None:
-                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
-                return self._json_response(turbo.config_payload(host_header=self._header_get(request_headers, "Host", "")))
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/turbo/diagnostics":
-            try:
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is None:
-                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
-                return self._json_response(turbo.diagnostics(host_header=self._header_get(request_headers, "Host", "")))
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/turbo/start":
-            try:
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is None:
-                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
-                loop = asyncio.get_event_loop()
-                status = await loop.run_in_executor(
-                    None,
-                    turbo.ensure_started,
-                    self._header_get(request_headers, "Host", ""),
-                )
-                return self._json_response(status)
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/turbo/stop":
-            try:
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is None:
-                    return self._json_response({"success": False, "available": False, "reason": "Turbo stream is not initialized."})
-                turbo.stop()
-                return self._json_response(turbo.status(host_header=self._header_get(request_headers, "Host", "")))
-            except Exception as e:
-                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/capture-methods":
-            try:
-                if self.screen_capturer:
-                    catalog = self.screen_capturer.get_capture_method_catalog()
-                    current = self.screen_capturer.get_current_method()
-                    available = self.screen_capturer.get_available_methods()
-                else:
-                    catalog = unavailable_capture_method_catalog()
-                    current = "auto"
-                    available = []
-                return self._json_response({
-                    "success": True,
-                    "current": current,
-                    "available": available,
-                    "methods": catalog,
-                })
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif isinstance(path, str) and route_path == "/api/set-clipboard-image":
@@ -910,16 +786,7 @@ class RoutesMixin:
             qs = urllib.parse.parse_qs(parsed.query or "")
             raw = (qs.get("value") or qs.get("quality") or [self.current_quality])[0]
             value = self._apply_quality(raw, self.current_quality)
-            turbo_status = None
-            if getattr(self, "_turbo_restart_needed", False):
-                turbo = getattr(self, "turbo_stream", None)
-                if turbo is not None:
-                    loop = asyncio.get_event_loop()
-                    turbo_status = await loop.run_in_executor(None, turbo.ensure_started, None)
-                self._turbo_restart_needed = False
-            elif getattr(self, "turbo_stream", None) is not None:
-                turbo_status = self.turbo_stream.status()
-            return {"success": True, "quality": value, "turbo_stream": turbo_status}
+            return {"success": True, "quality": value}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -944,98 +811,142 @@ class RoutesMixin:
         return http.HTTPStatus.BAD_REQUEST, {"Content-Type": "application/json; charset=utf-8"}, response_data
 
     def _capture_screen_image(self, rect_norm=None):
-        """One-shot snapshot using the active DXCam/BetterCam pipeline only."""
+        """One-shot snapshot; reuse instances and capture at source (dxcam region  MSS region)."""
+        import time as _t
+        t0 = _t.perf_counter()
+        # Track which backend we actually used for logging
         try:
-            self._last_snapshot_backend = "none"
+            self._last_snapshot_backend = 'none'
         except Exception:
             pass
-
-        def _crop_norm(img):
-            if img is None or not rect_norm:
-                return img
+        # Helper: convert normalized rect to absolute desktop rect
+        def _norm_to_abs_rect():
+            if not rect_norm:
+                return None
             try:
-                width, height = img.size
-                x0 = max(0, min(width, int(float(rect_norm["x0"]) * width)))
-                y0 = max(0, min(height, int(float(rect_norm["y0"]) * height)))
-                x1 = max(0, min(width, int(float(rect_norm["x1"]) * width)))
-                y1 = max(0, min(height, int(float(rect_norm["y1"]) * height)))
-                if x1 > x0 and y1 > y0:
-                    return img.crop((x0, y0, x1, y1))
-            except Exception:
-                pass
-            return img
-
-        def _frame_to_image(frame):
-            try:
-                if frame is None:
+                try:
+                    import ctypes as _ct
+                    u32 = _ct.windll.user32
+                    u32.SetProcessDPIAware()
+                    sw = u32.GetSystemMetrics(0)
+                    sh = u32.GetSystemMetrics(1)
+                except Exception:
+                    import pyautogui as _pg
+                    sw, sh = _pg.size()
+                x0 = max(0, min(sw, int(float(rect_norm['x0']) * sw)))
+                y0 = max(0, min(sh, int(float(rect_norm['y0']) * sh)))
+                x1 = max(0, min(sw, int(float(rect_norm['x1']) * sw)))
+                y1 = max(0, min(sh, int(float(rect_norm['y1']) * sh)))
+                if x1 <= x0 or y1 <= y0:
                     return None
-                if HAS_PIL and hasattr(frame, "convert"):
-                    return frame.convert("RGB")
-                if isinstance(frame, np.ndarray):
-                    arr = frame
-                    if arr.ndim == 3 and arr.shape[2] == 4:
-                        arr = arr[:, :, :3]
-                    if arr.ndim == 3:
-                        if not arr.flags.c_contiguous:
-                            arr = np.ascontiguousarray(arr)
-                        return Image.fromarray(arr).convert("RGB")
+                return (x0, y0, x1, y1)
             except Exception:
-                logging.warning("Snapshot frame conversion failed", exc_info=True)
-            return None
+                return None
 
-        capturer = getattr(self, "screen_capturer", None)
-        if capturer is None:
-            return None
+        abs_rect = _norm_to_abs_rect()
 
-        try:
-            import io as _io
-            if hasattr(capturer, "get_latest_frame_packet"):
-                _, jpeg = capturer.get_latest_frame_packet()
-            else:
-                jpeg = getattr(capturer, "latest_frame_jpeg", None)
-            if jpeg and HAS_PIL:
-                img = Image.open(_io.BytesIO(jpeg)).convert("RGB")
-                self._last_snapshot_backend = "latest_frame"
-                return _crop_norm(img)
-        except Exception:
-            logging.warning("Snapshot latest-frame read failed", exc_info=True)
-
-        methods = []
-        for method in (
-            getattr(capturer, "capture_method", ""),
-            getattr(capturer, "active_capture_method", ""),
-            "dxcam",
-            "bettercam",
-        ):
-            if method and method not in {"auto", "unknown"} and method not in methods:
-                methods.append(method)
-
-        try:
-            lock = getattr(capturer, "capture_control_lock", None)
-            if lock is None:
-                lock_cm = None
-            else:
-                lock_cm = lock
-            if lock_cm is not None:
-                lock_cm.__enter__()
+        # Heuristic: for small ROIs, MSS region can be faster than dxcam
+        prefer_mss_first = False
+        if abs_rect:
             try:
-                for method in methods:
-                    frame = None
-                    if method == "dxcam" and HAS_DXCAM:
-                        if getattr(capturer, "dxcam_camera", None) is None:
-                            capturer.dxcam_camera = dxcam.create()
-                        frame = capturer._grab_screen_dxcam()
-                    elif method == "bettercam" and HAS_BETTERCAM:
-                        frame = capturer._grab_screen_bettercam()
-                    img = _frame_to_image(frame)
-                    if img is not None:
-                        self._last_snapshot_backend = method
-                        return _crop_norm(img)
-            finally:
-                if lock_cm is not None:
-                    lock_cm.__exit__(None, None, None)
-        except Exception:
-            logging.warning("Snapshot capture failed", exc_info=True)
+                # Get desktop size for ratio
+                try:
+                    import ctypes as _ct2
+                    u322 = _ct2.windll.user32
+                    u322.SetProcessDPIAware()
+                    sw2 = u322.GetSystemMetrics(0)
+                    sh2 = u322.GetSystemMetrics(1)
+                except Exception:
+                    try:
+                        import pyautogui as _pg2
+                        sw2, sh2 = _pg2.size()
+                    except Exception:
+                        sw2, sh2 = 0, 0
+                if sw2 > 0 and sh2 > 0:
+                    l, t, r, b = abs_rect
+                    area_ratio = ((r - l) * (b - t)) / float(sw2 * sh2)
+                    prefer_mss_first = area_ratio <= 0.25
+            except Exception:
+                prefer_mss_first = False
+
+        def _try_dxcam_then_none():
+            try:
+                cam = getattr(self, 'dxcam_camera', None)
+                if cam is not None:
+                    arr = cam.grab(region=abs_rect)
+                    if arr is not None:
+                        rgb = arr[:, :, :3][:, :, ::-1].copy(order='C')
+                        try:
+                            self._last_snapshot_backend = 'dxcam'
+                        except Exception:
+                            pass
+                        # Pillow deprecation: mode parameter on fromarray will be removed in Pillow 13
+                        try:
+                            return Image.fromarray(rgb)
+                        except Exception:
+                            return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
+            except Exception:
+                logging.warning('Snapshot dxcam failed; falling back', exc_info=True)
+            return None
+
+        def _try_mss_then_none():
+            if HAS_MSS:
+                try:
+                    if not hasattr(self, '_snapshot_sct') or self._snapshot_sct is None:
+                        self._snapshot_sct = mss.mss()
+                    sct = self._snapshot_sct
+                    mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                    rect = None
+                    if abs_rect:
+                        l, t, r, b = abs_rect
+                        rect = {'left': l, 'top': t, 'width': max(1, r - l), 'height': max(1, b - t)}
+                    sct_img = sct.grab(rect or mon)
+                    h, w = sct_img.height, sct_img.width
+                    arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
+                    rgb = np.ascontiguousarray(arr[..., :3][:, :, ::-1])
+                    try:
+                        self._last_snapshot_backend = 'mss'
+                    except Exception:
+                        pass
+                    try:
+                        return Image.fromarray(rgb)
+                    except Exception:
+                        return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
+                except Exception:
+                    logging.warning('Snapshot MSS failed', exc_info=True)
+            return None
+
+        # Order backends based on ROI size
+        if prefer_mss_first:
+            img = _try_mss_then_none()
+            if img is not None:
+                return img
+            img = _try_dxcam_then_none()
+            if img is not None:
+                return img
+        else:
+            img = _try_dxcam_then_none()
+            if img is not None:
+                return img
+            img = _try_mss_then_none()
+            if img is not None:
+                return img
+
+        # 2) fast_ctypes (full, then crop)
+        if HAS_FAST_CTYPES:
+            try:
+                sct = getattr(self, 'fast_ctypes_capture', None)
+                if sct is None:
+                    self.fast_ctypes_capture = fast_ctypes_screenshots.ScreenshotOfAllMonitors()
+                    sct = self.fast_ctypes_capture
+                frame = sct.screenshot_monitors()
+                if frame is not None:
+                    img = Image.fromarray(frame)
+                    if abs_rect:
+                        img = img.crop(abs_rect)
+                    return img
+            except Exception:
+                logging.warning('Snapshot fast_ctypes failed; falling back', exc_info=True)
 
         return None
 

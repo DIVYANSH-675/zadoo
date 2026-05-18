@@ -17,7 +17,6 @@ import websockets
 
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
 from .dependencies import *
-from .screen_capture import unavailable_capture_method_catalog
 from .win32_input import *
 
 class MediaMixin:
@@ -59,11 +58,6 @@ class MediaMixin:
         )
         status["effective_quality"] = getattr(self, "current_quality", None)
         status["quality_locked"] = bool(getattr(self, "_quality_locked_by_user", True))
-        try:
-            turbo = getattr(self, "turbo_stream", None)
-            status["turbo_stream"] = turbo.status() if turbo else {"available": False, "active": False}
-        except Exception:
-            status["turbo_stream"] = {"available": False, "active": False}
         return status
 
     async def _send_stream_status(self, websocket):
@@ -115,7 +109,6 @@ class MediaMixin:
             "preferred_video_encoder": encoder.get("preferred_video_encoder"),
             "client_stream_stats": stream.get("client", {}),
             "server_stream_stats": stream.get("server", {}),
-            "turbo_stream": stream.get("turbo_stream", {}),
         })
         return stats
 
@@ -518,30 +511,6 @@ class MediaMixin:
                         await self.handle_get_url_via_websocket(websocket)
                     elif action == 'set_quality':
                         value = self._apply_quality(event.get('value', 75))
-                        turbo_status = None
-                        if getattr(self, "_turbo_restart_needed", False):
-                            try:
-                                turbo = getattr(self, "turbo_stream", None)
-                                if turbo is not None:
-                                    loop = asyncio.get_running_loop()
-                                    turbo_status = await loop.run_in_executor(None, turbo.ensure_started, None)
-                            except Exception as exc:
-                                turbo_status = {"success": False, "error": str(exc)}
-                            finally:
-                                self._turbo_restart_needed = False
-                        elif getattr(self, "turbo_stream", None) is not None:
-                            try:
-                                turbo_status = self.turbo_stream.status()
-                            except Exception:
-                                turbo_status = None
-                        try:
-                            await websocket.send(json.dumps({
-                                'type': 'quality_set',
-                                'quality': value,
-                                'turbo_stream': turbo_status,
-                            }))
-                        except Exception:
-                            pass
                         print(f" Quality set to: {value}%")
                     elif action == 'set_fps':
                         value = self._apply_fps(event.get('value', 30))
@@ -562,46 +531,26 @@ class MediaMixin:
                         method = event.get('method', 'auto')
                         if self.screen_capturer:
                             success = self.screen_capturer.set_capture_method(method)
-                            catalog = self.screen_capturer.get_capture_method_catalog()
                             if success:
                                 print(f" Capture method changed to: {method}")
                             else:
                                 print(f" Failed to set capture method to: {method}")
-                            await websocket.send(json.dumps({
-                                'type': 'capture_method_set',
-                                'success': success,
-                                'method': method,
-                                'current': self.screen_capturer.get_current_method(),
-                                'methods': self.screen_capturer.get_available_methods(),
-                                'method_status': catalog,
-                            }))
                         else:
                             print(" Screen capturer not available")
-                            await websocket.send(json.dumps({
-                                'type': 'capture_method_set',
-                                'success': False,
-                                'method': method,
-                                'current': 'auto',
-                                'methods': [],
-                                'method_status': unavailable_capture_method_catalog(),
-                            }))
                     elif action == 'get_available_capture_methods':
                         if self.screen_capturer:
                             methods = self.screen_capturer.get_available_methods()
                             current = self.screen_capturer.get_current_method()
-                            catalog = self.screen_capturer.get_capture_method_catalog()
                             await websocket.send(json.dumps({
                                 'type': 'available_capture_methods',
                                 'methods': methods,
-                                'current': current,
-                                'method_status': catalog,
+                                'current': current
                             }))
                         else:
                             await websocket.send(json.dumps({
                                 'type': 'available_capture_methods',
-                                'methods': [],
-                                'current': 'auto',
-                                'method_status': unavailable_capture_method_catalog(),
+                                'methods': ['auto'],
+                                'current': 'auto'
                             }))
                     elif action == 'set_performance':
                         enabled = bool(event.get('enabled'))
