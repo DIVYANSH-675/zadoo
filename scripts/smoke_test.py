@@ -122,6 +122,9 @@ def assert_imports() -> None:
             unauth_response = await server.process_request("/api/public-url", headers)
             if unauth_response.status_code != 403:
                 fail(f"unauthenticated public-url returned {unauth_response.status_code}, expected 403")
+            snapshot_prefix_response = await server.process_request("/snapshot-extra?fmt=png", headers)
+            if snapshot_prefix_response.status_code != 404:
+                fail(f"snapshot prefix route returned {snapshot_prefix_response.status_code}, expected 404")
             legacy_response = await server.process_request(f"/api/auth?code={_legacy_auth_strings()[0]}", headers)
             if legacy_response.status_code != 401:
                 fail(f"legacy hardcoded auth code returned {legacy_response.status_code}, expected 401")

@@ -623,7 +623,7 @@ class RoutesMixin:
                     headers=headers,
                     body=b"Splash image not found",
             )
-        elif path.startswith("/snapshot"):
+        elif route_path == "/snapshot":
                 try:
                     import time as _t
                     t_req0 = _t.perf_counter()
