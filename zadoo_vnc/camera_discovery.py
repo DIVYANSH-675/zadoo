@@ -131,7 +131,14 @@ def _enumerate_windows_cameras() -> list[dict[str, Any]]:
 
 
 def _pygrabber_names() -> list[str]:
+    initialized = False
     try:
+        try:
+            from comtypes import CoInitialize, CoUninitialize
+            CoInitialize()
+            initialized = True
+        except Exception:
+            initialized = False
         from pygrabber.dshow_graph import FilterGraph
 
         graph = FilterGraph()
@@ -139,6 +146,12 @@ def _pygrabber_names() -> list[str]:
     except Exception as exc:
         log.warning("pygrabber camera enumeration failed: %s", exc)
         return []
+    finally:
+        if initialized:
+            try:
+                CoUninitialize()
+            except Exception:
+                pass
 
 
 def _directshow_metadata() -> list[dict[str, Any]]:
