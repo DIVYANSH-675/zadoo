@@ -45,6 +45,8 @@ def _hidden_creationflags() -> int:
 def _detect_gpu_names() -> list[str]:
     if platform.system().lower() != "windows":
         return []
+    if not _env_enabled("ZADOO_DETECT_GPU_NAMES", "0"):
+        return []
     command = (
         "Get-CimInstance Win32_VideoController | "
         "ForEach-Object { $_.Name }"

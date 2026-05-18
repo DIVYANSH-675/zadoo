@@ -18,12 +18,13 @@ from websockets.http11 import Response as WSResponse
 from .assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
-from .dependencies import *
+from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, Image, fast_ctypes_screenshots, imagecodecs, mss, np
 from .dpi import get_primary_screen_size
 from .logging_utils import _log_except, _log_try_ok
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
+    CSRF_COOKIE_NAME = "zadoo_csrf"
     AUTH_TTL_SECONDS = 3600
     FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
     VIEW_ACTIONS = {
@@ -68,7 +69,11 @@ class RoutesMixin:
         headers["Content-Type"] = "application/json; charset=utf-8"
         headers["Cache-Control"] = "no-store"
         for key, value in (extra_headers or {}).items():
-            headers[key] = value
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    headers[key] = str(item)
+            else:
+                headers[key] = str(value)
         body = json.dumps(payload).encode("utf-8")
         return WSResponse(
             status_code=int(status),
@@ -199,8 +204,16 @@ class RoutesMixin:
             return False
 
     def _state_changing_http_allowed(self, request_headers):
-        token = self._header_get(request_headers, "X-Zadoo-CSRF", "")
-        return secrets.compare_digest(str(token or ""), "1")
+        header_token = str(self._header_get(request_headers, "X-Zadoo-CSRF", "") or "")
+        if not header_token:
+            return False
+        session = self._session_for_headers(request_headers)
+        if not isinstance(session, dict):
+            return False
+        expected = str(session.get("csrf") or "")
+        if not expected:
+            return False
+        return secrets.compare_digest(header_token, expected)
 
     def _headers_for_websocket(self, websocket):
         try:
@@ -436,14 +449,19 @@ class RoutesMixin:
         if not isinstance(sessions, dict):
             self.auth_sessions = {}
             sessions = self.auth_sessions
-        sessions[token] = {"role": role, "expires_at": expires_at}
-        cookie = (
+        csrf_token = secrets.token_urlsafe(32)
+        sessions[token] = {"role": role, "expires_at": expires_at, "csrf": csrf_token}
+        auth_cookie = (
             f"{self.AUTH_COOKIE_NAME}={token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
             "HttpOnly; SameSite=Lax"
         )
+        csrf_cookie = (
+            f"{self.CSRF_COOKIE_NAME}={csrf_token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
+            "SameSite=Lax"
+        )
         return self._json_response(
-            {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS},
-            extra_headers={"Set-Cookie": cookie},
+            {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS, "csrf_token": csrf_token},
+            extra_headers={"Set-Cookie": [auth_cookie, csrf_cookie]},
         )
 
     def enumerate_cameras(self):

@@ -19,7 +19,7 @@ class ScreenCapturer(threading.Thread):
         self.is_running = False
         self.quality = quality
         self.fps = fps
-        self.capture_method = "auto"  # auto, dxcam, fast_ctypes, mss, win32, pil
+        self.capture_method = "auto"  # auto, dxcam, bettercam, fast_ctypes, mss, gdi
         self.dxcam_camera = None
         self.fast_ctypes_capture = None
         self.bettercam_camera = None
@@ -27,7 +27,6 @@ class ScreenCapturer(threading.Thread):
         # Lock BetterCam to the known working pair from diagnostics
         self.bettercam_output_idx = 0
         self.bettercam_device_idx = 0
-        self.winrt_session = None
         self.active_capture_method = "unknown"  # Track which method is actually being used
         self.capture_stats = {
             'frame_count': 0,
@@ -89,12 +88,6 @@ class ScreenCapturer(threading.Thread):
             except Exception:
                 self.dxcam_camera = None
         # BetterCam lazy init; created on first use
-        # Initialize WinRT GraphicsCapture if available (lazy start later)
-        if HAS_WINRT:
-            try:
-                self.winrt_session = None
-            except Exception:
-                self.winrt_session = None
         
         # Initialize fast_ctypes_screenshots if available
         if HAS_FAST_CTYPES:
@@ -289,11 +282,11 @@ class ScreenCapturer(threading.Thread):
                 if self.capture_method != "auto":
                     return None
 
-        if self.capture_method == "winrt" and (HAS_WINRT or HAS_PIL):
+        if self.capture_method in {"gdi", "winrt"} and HAS_PIL:
             try:
-                frame = self._grab_screen_winrt()
+                frame = self._grab_screen_gdi()
                 if frame is not None:
-                    self.active_capture_method = "winrt"
+                    self.active_capture_method = "gdi"
                 return frame
             except Exception:
                 if self.capture_method != "auto":
@@ -358,8 +351,8 @@ class ScreenCapturer(threading.Thread):
             methods.append("fast_ctypes")
         if HAS_MSS and not self._backend_is_disabled("mss"):
             methods.append("mss")
-        if (HAS_WINRT or HAS_PIL) and not self._backend_is_disabled("winrt"):
-            methods.append("winrt")
+        if HAS_PIL and not self._backend_is_disabled("gdi"):
+            methods.append("gdi")
         return methods
 
     def _auto_method_order(self, roi_mode):
@@ -407,8 +400,8 @@ class ScreenCapturer(threading.Thread):
                 frame = self._grab_screen_fast_ctypes()
             elif method == "mss" and sct:
                 frame = self._grab_screen_mss(sct)
-            elif method == "winrt" and (HAS_WINRT or HAS_PIL):
-                frame = self._grab_screen_winrt()
+            elif method == "gdi" and HAS_PIL:
+                frame = self._grab_screen_gdi()
             if frame is None:
                 self._record_backend_failure(method)
             return frame
@@ -548,18 +541,20 @@ class ScreenCapturer(threading.Thread):
             self._disable_backend("bettercam", seconds=45)
             return None
 
-    def _grab_screen_winrt(self):
-        """Compatibility capture method backed by Pillow ImageGrab/GDI."""
+    def _grab_screen_gdi(self):
+        """Capture using Pillow ImageGrab's GDI-backed screenshot path."""
         try:
-            # Minimal fallback approach: if Pillow's ImageGrab is available on Windows, use it
             if HAS_PIL and hasattr(ImageGrab, 'grab'):
-                # Note: ImageGrab uses GDI; this is a placeholder for true WinRT path
                 frame = ImageGrab.grab()
                 return frame.convert('RGB') if frame else None
             return None
         except Exception:
-            logging.warning("WinRT capture failed (using ImageGrab fallback)", exc_info=True)
+            logging.warning("GDI ImageGrab capture failed", exc_info=True)
             return None
+
+    def _grab_screen_winrt(self):
+        """Backward-compatible alias for the old WinRT-labelled GDI fallback."""
+        return self._grab_screen_gdi()
 
     def _release_dxcam(self):
         cam = self.dxcam_camera
@@ -645,6 +640,8 @@ class ScreenCapturer(threading.Thread):
 
     def set_capture_method(self, method):
         """Set the screen capture method"""
+        if method == "winrt":
+            method = "gdi"
         available_methods = self.get_available_methods()
         if method in available_methods:
             with self.capture_control_lock:
@@ -689,14 +686,13 @@ class ScreenCapturer(threading.Thread):
         if HAS_BETTERCAM:
             methods.append("bettercam")
             logging.debug("Added bettercam capture method")
-        # Expose WinRT option if either winrt is available or PIL ImageGrab fallback can be used
-        if HAS_WINRT or HAS_PIL:
-            if "winrt" not in methods:
-                methods.append("winrt")
-                logging.debug("Added winrt capture method")
+        if HAS_PIL:
+            if "gdi" not in methods:
+                methods.append("gdi")
+                logging.debug("Added gdi capture method")
             
         # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "bettercam", "fast_ctypes", "mss", "winrt"]
+        pref = ["auto", "dxcam", "bettercam", "fast_ctypes", "mss", "gdi"]
         methods = [m for m in pref if m in dict.fromkeys(methods)]
         logging.debug("Available capture methods: %s", methods)
         return methods

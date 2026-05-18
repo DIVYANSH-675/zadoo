@@ -96,6 +96,9 @@ def _setup_logging_to_file():
             def seekable(self):
                 return False
 
+            def __getattr__(self, name):
+                return getattr(self._stream, name)
+
         fh = open(log_path, "a", encoding="utf-8", buffering=1)
         if _ORIGINAL_STDOUT is None:
             _ORIGINAL_STDOUT = sys.stdout

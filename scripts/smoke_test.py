@@ -51,6 +51,33 @@ def ok(message: str) -> None:
     print(f"OK: {message}")
 
 
+def set_cookie_headers(headers) -> list[str]:
+    try:
+        values = headers.get_all("Set-Cookie")
+        if values:
+            return list(values)
+    except Exception:
+        pass
+    try:
+        return [value for key, value in headers.raw_items() if key.lower() == "set-cookie"]
+    except Exception:
+        pass
+    try:
+        value = headers.get("Set-Cookie")
+        return [value] if value else []
+    except Exception:
+        return []
+
+
+def cookie_header_from_set_cookie(headers) -> str:
+    cookies = []
+    for value in set_cookie_headers(headers):
+        first = str(value).split(";", 1)[0].strip()
+        if first:
+            cookies.append(first)
+    return "; ".join(cookies)
+
+
 def assert_camera_payload(body: bytes, *, require_objects: bool = False) -> None:
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -179,10 +206,12 @@ def assert_imports() -> None:
             auth_response = await server.process_request("/api/auth", auth_request_headers)
             if auth_response.status_code != 200:
                 fail(f"auth route returned {auth_response.status_code}, expected 200")
-            cookie = auth_response.headers.get("Set-Cookie")
-            if not cookie or "zadoo_auth=" not in cookie:
+            auth_payload = json.loads(auth_response.body.decode("utf-8"))
+            csrf_token = auth_payload.get("csrf_token")
+            cookie = cookie_header_from_set_cookie(auth_response.headers)
+            if not cookie or "zadoo_auth=" not in cookie or not csrf_token:
                 fail("auth route did not set zadoo_auth cookie")
-            headers["Cookie"] = cookie.split(";", 1)[0]
+            headers["Cookie"] = cookie
             ws_bad_origin_headers = Headers()
             ws_bad_origin_headers["Host"] = "localhost:6173"
             ws_bad_origin_headers["Origin"] = "https://evil.example"
@@ -212,7 +241,7 @@ def assert_imports() -> None:
             csrf_headers = Headers()
             csrf_headers["Host"] = "localhost:6173"
             csrf_headers["Cookie"] = headers["Cookie"]
-            csrf_headers["X-Zadoo-CSRF"] = "1"
+            csrf_headers["X-Zadoo-CSRF"] = csrf_token
             checks = {
                 "/api/public-url": 200,
                 "/api/list-cameras": 200,
@@ -347,7 +376,7 @@ def assert_imports() -> None:
                 fail(f"view auth returned {view_auth_response.status_code}, expected 200")
             view_ws_headers = Headers()
             view_ws_headers["Host"] = "localhost:6173"
-            view_ws_headers["Cookie"] = view_auth_response.headers.get("Set-Cookie").split(";", 1)[0]
+            view_ws_headers["Cookie"] = cookie_header_from_set_cookie(view_auth_response.headers)
             recorded_actions = []
             original_process_event = server.process_event
             try:
@@ -463,11 +492,26 @@ def assert_live(base_url: str) -> None:
     try:
         with urllib.request.urlopen(auth_request, timeout=8) as response:
             auth_status = response.status
-            auth_cookie = response.headers.get("Set-Cookie", "")
-            response.read()
+            auth_cookies = response.headers.get_all("Set-Cookie") or []
+            auth_cookie = "; ".join(
+                cookie.split(";", 1)[0].strip()
+                for cookie in auth_cookies
+                if cookie.split(";", 1)[0].strip()
+            )
+            auth_body = response.read()
+            try:
+                live_csrf = json.loads(auth_body.decode("utf-8")).get("csrf_token")
+            except Exception:
+                live_csrf = None
     except urllib.error.HTTPError as e:
         auth_status = e.code
-        auth_cookie = e.headers.get("Set-Cookie", "")
+        auth_cookies = e.headers.get_all("Set-Cookie") or []
+        auth_cookie = "; ".join(
+            cookie.split(";", 1)[0].strip()
+            for cookie in auth_cookies
+            if cookie.split(";", 1)[0].strip()
+        )
+        live_csrf = None
     if auth_status != 200 or "zadoo_auth=" not in auth_cookie:
         fail(f"live auth failed: status={auth_status}")
     auth_headers = {"Cookie": auth_cookie.split(";", 1)[0]}

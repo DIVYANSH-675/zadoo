@@ -108,13 +108,17 @@ def install_startup_task():
     try:
         subprocess.run(create_cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
-        logging.warning("Startup task installation failed. Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.", exc_info=True)
+        logging.warning(
+            "Startup task installation failed with exit code %s. Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.",
+            exc.returncode,
+            exc_info=True,
+        )
         try:
             stderr = (exc.stderr or b"").decode("utf-8", "ignore") if isinstance(exc.stderr, (bytes, bytearray)) else str(exc.stderr or "")
             if stderr.strip():
-                print(f"Startup task installation failed: {stderr.strip()}")
+                print(f"Startup task installation failed (exit code {exc.returncode}): {stderr.strip()}")
             else:
-                print("Startup task installation failed. Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.")
+                print(f"Startup task installation failed (exit code {exc.returncode}). Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.")
         except Exception:
             pass
 

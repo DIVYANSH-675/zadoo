@@ -849,21 +849,21 @@ class InputControlMixin:
 
             add = self._hk_ids.append
 
-            # Start/Stop custom capture (NumPad and aliases; suppress so the keys don't leak)
-            add(keyboard.add_hotkey('shift+numpad 1', lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
-            add(keyboard.add_hotkey('shift+end',      lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
-            add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
-            add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
+            # Never suppress host keys from global hooks; stale suppressing hooks can lock local input.
+            add(keyboard.add_hotkey('shift+numpad 1', lambda: self._begin_custom_alert_capture(source="hk"), suppress=False))
+            add(keyboard.add_hotkey('shift+end',      lambda: self._begin_custom_alert_capture(source="hk"), suppress=False))
+            add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
+            add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
 
             # Presets: Shift+Num5/8/2/0 (and their NumLock-off equivalents)
-            add(keyboard.add_hotkey('shift+numpad 5', lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
-            add(keyboard.add_hotkey('shift+clear',    lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
-            add(keyboard.add_hotkey('shift+numpad 8', lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
-            add(keyboard.add_hotkey('shift+up',       lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
-            add(keyboard.add_hotkey('shift+numpad 2', lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
-            add(keyboard.add_hotkey('shift+down',     lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
-            add(keyboard.add_hotkey('shift+numpad 0', lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
-            add(keyboard.add_hotkey('shift+insert',   lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
+            add(keyboard.add_hotkey('shift+numpad 5', lambda: self._broadcast_controller_alert("Custom", "A"), suppress=False))
+            add(keyboard.add_hotkey('shift+clear',    lambda: self._broadcast_controller_alert("Custom", "A"), suppress=False))
+            add(keyboard.add_hotkey('shift+numpad 8', lambda: self._broadcast_controller_alert("Custom", "B"), suppress=False))
+            add(keyboard.add_hotkey('shift+up',       lambda: self._broadcast_controller_alert("Custom", "B"), suppress=False))
+            add(keyboard.add_hotkey('shift+numpad 2', lambda: self._broadcast_controller_alert("Custom", "C"), suppress=False))
+            add(keyboard.add_hotkey('shift+down',     lambda: self._broadcast_controller_alert("Custom", "C"), suppress=False))
+            add(keyboard.add_hotkey('shift+numpad 0', lambda: self._broadcast_controller_alert("Custom", "D"), suppress=False))
+            add(keyboard.add_hotkey('shift+insert',   lambda: self._broadcast_controller_alert("Custom", "D"), suppress=False))
 
     def _watch_numlock_and_update_hotkeys(self):
         """Background watcher: re-register hotkeys when NumLock state changes."""
@@ -879,7 +879,7 @@ class InputControlMixin:
             time.sleep(0.25)
 
     def _install_custom_capture_hotkeys(self):
-        """Install per-key hotkeys that both suppress typing on System A and append to buffer."""
+        """Install per-key capture hotkeys without suppressing host keyboard input."""
         with self._get_hotkey_lock():
             if not HAS_KEYBOARD:
                 print("[custom] keyboard module not available; custom capture disabled")
@@ -889,7 +889,7 @@ class InputControlMixin:
 
             def add(hk, fn):
                 try:
-                    h = keyboard.add_hotkey(hk, fn, suppress=True, trigger_on_release=False)
+                    h = keyboard.add_hotkey(hk, fn, suppress=False, trigger_on_release=False)
                     self._custom_capture_hotkeys.append(h)
                     _log_try_ok("_install_custom_capture_hotkeys.add", hk)
                 except Exception:

@@ -36,6 +36,7 @@ Copy `.env.example` to `.env` and fill only the values you need.
 - `ZADOO_DISABLE_STARTUP_TASK=1` prevents frozen builds from creating the Windows logon task.
 - `ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT` and `ZADOO_SKIP_CLOUDFLARED_SIGNATURE_CHECK` control cloudflared download and signature verification behavior.
 - `ZADOO_CLIPBOARD_TEXT_MAX_BYTES` and `ZADOO_CLIPBOARD_IMAGE_MAX_BYTES` cap remote clipboard payload sizes.
+- `ZADOO_DETECT_GPU_NAMES=1` enables optional PowerShell GPU-name detection; it is off by default to keep startup responsive.
 - `ALERT_A`, `ALERT_B`, `ALERT_C`, and `ALERT_D` customize host alert presets.
 
 No API keys or access codes are intentionally bundled. If a previous key or code was exposed in source or logs, rotate it before using public links.

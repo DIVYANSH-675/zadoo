@@ -28,13 +28,21 @@
     </div>
     <script>
       const ok = document.getElementById('ok');
+      function csrfToken(){
+        try {
+          const found = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith('zadoo_csrf='));
+          return found ? decodeURIComponent(found.split('=').slice(1).join('=')) : '';
+        } catch (_) {
+          return '';
+        }
+      }
       document.querySelectorAll('button[data-code]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
           const code = btn.getAttribute('data-code');
           try{
             const res = await fetch('/api/alert?code='+encodeURIComponent(code), {
               cache: 'no-store',
-              headers: { 'X-Zadoo-CSRF': '1' }
+              headers: { 'X-Zadoo-CSRF': csrfToken() }
             });
             ok.textContent = res.ok ? ' Sent '+code : ' Failed ('+res.status+')';
           }catch(e){ ok.textContent = ' Network error'; }
