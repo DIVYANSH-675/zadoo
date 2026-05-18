@@ -19,6 +19,7 @@ from .assets import load_benchmark_html, load_host_controls_html, load_index_htm
 from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import *
+from .dpi import get_primary_screen_size
 from .logging_utils import _log_except, _log_try_ok
 
 class RoutesMixin:
@@ -1013,11 +1014,7 @@ class RoutesMixin:
                 return None
             try:
                 try:
-                    import ctypes as _ct
-                    u32 = _ct.windll.user32
-                    u32.SetProcessDPIAware()
-                    sw = u32.GetSystemMetrics(0)
-                    sh = u32.GetSystemMetrics(1)
+                    sw, sh = get_primary_screen_size()
                 except Exception:
                     import pyautogui as _pg
                     sw, sh = _pg.size()
@@ -1039,11 +1036,7 @@ class RoutesMixin:
             try:
                 # Get desktop size for ratio
                 try:
-                    import ctypes as _ct2
-                    u322 = _ct2.windll.user32
-                    u322.SetProcessDPIAware()
-                    sw2 = u322.GetSystemMetrics(0)
-                    sh2 = u322.GetSystemMetrics(1)
+                    sw2, sh2 = get_primary_screen_size()
                 except Exception:
                     try:
                         import pyautogui as _pg2

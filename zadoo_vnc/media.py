@@ -22,6 +22,40 @@ from .win32_input import *
 
 class MediaMixin:
 
+    def _put_realtime_frame(self, frame_queue, frame):
+        """Offer a realtime media frame without ever blocking the capture thread."""
+        try:
+            frame_queue.put_nowait(frame)
+            return True
+        except queue.Full:
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                frame_queue.put_nowait(frame)
+                return True
+            except queue.Full:
+                return False
+
+    def _clear_media_queue(self, frame_queue):
+        try:
+            with frame_queue.mutex:
+                frame_queue.queue.clear()
+                frame_queue.unfinished_tasks = 0
+                frame_queue.all_tasks_done.notify_all()
+        except Exception:
+            pass
+
+    def _wake_media_queue_readers(self, frame_queue, count=1):
+        try:
+            wake_count = max(1, int(count or 1))
+        except Exception:
+            wake_count = 1
+        for _ in range(wake_count):
+            if not self._put_realtime_frame(frame_queue, None):
+                break
+
     def _apply_stream_profile(self, reason="adaptive"):
         controller = getattr(self, "adaptive_stream", None)
         if controller is None or not getattr(controller, "enabled", False):
@@ -122,6 +156,7 @@ class MediaMixin:
         """
         if getattr(self, "_audio_running", False):
             return
+        self._clear_media_queue(self.audio_queue)
         self._audio_running = True
         self.audio_running = True
         self._audio_backend = "soundcard_loopback"
@@ -161,6 +196,7 @@ class MediaMixin:
             return spk, loopback
 
         stop_evt = threading.Event()
+        self._audio_stop_evt = stop_evt
 
         def _audio_worker():
             nonlocal ring_len
@@ -226,8 +262,7 @@ class MediaMixin:
                             try:
                                 mono = out[:, 0] if out.ndim == 2 else out.reshape(-1)
                                 pcm = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-                                if not self.audio_queue.full():
-                                    self.audio_queue.put(pcm)
+                                self._put_realtime_frame(self.audio_queue, pcm)
                             except Exception as e:
                                 log.debug(f"sender err: {e}")
                     except Exception as e:
@@ -249,6 +284,8 @@ class MediaMixin:
                 self._audio_stream = None
                 self._audio_running = False
                 self.audio_running = False
+                if getattr(self, "_audio_stop_evt", None) is stop_evt:
+                    self._audio_stop_evt = None
                 log.info(" System-audio worker stopped")
 
         t = threading.Thread(target=_audio_worker, daemon=True)
@@ -259,10 +296,11 @@ class MediaMixin:
         self._audio_running = False
         self.audio_running = False
         try:
-            if getattr(self, '_audio_thread', None) and self._audio_thread.is_alive():
-                self._audio_thread.join(timeout=0.5)
+            stop_evt = getattr(self, "_audio_stop_evt", None)
+            if stop_evt is not None:
+                stop_evt.set()
         except Exception:
-                pass
+            pass
         try:
             if getattr(self, '_audio_stream', None):
                 if hasattr(self._audio_stream, 'stop'):
@@ -276,8 +314,15 @@ class MediaMixin:
                         pass
         except Exception:
             pass
+        try:
+            if getattr(self, '_audio_thread', None) and self._audio_thread.is_alive():
+                self._audio_thread.join(timeout=0.5)
+        except Exception:
+            pass
         self._audio_stream = None
         self._audio_thread = None
+        self._clear_media_queue(self.audio_queue)
+        self._wake_media_queue_readers(self.audio_queue, len(getattr(self, "audio_clients", [])) or 1)
         logging.info(" Audio capture stopped")
 
     def _start_mic_capture(self, samplerate=48000, blocksize=960, channels=1):
@@ -293,6 +338,7 @@ class MediaMixin:
             mic_log.error("Failed to start microphone capture: sounddevice is not installed")
             return False
         mic_log.info("Starting mic capture request sr=%s block=%s channels=%s", samplerate, blocksize, channels)
+        self._clear_media_queue(self.mic_queue)
         self.mic_running = True
         self.mic_samplerate = int(samplerate)
         self.mic_blocksize = int(blocksize)
@@ -300,6 +346,8 @@ class MediaMixin:
 
         def mic_callback(indata, frames, time_info, status):
             try:
+                if not self.mic_running or not self.mic_clients:
+                    return
                 if status:
                     logging.debug(f"Mic status: {status}")
                 x = indata
@@ -309,8 +357,7 @@ class MediaMixin:
                     else:
                         x = x.reshape(-1)
                 x = (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16)
-                if not self.mic_queue.full():
-                    self.mic_queue.put(x.tobytes())
+                self._put_realtime_frame(self.mic_queue, x.tobytes())
             except Exception:
                 logging.error("Mic callback error", exc_info=True)
 
@@ -390,8 +437,8 @@ class MediaMixin:
                 except Exception:
                     pass
             self.mic_stream = None
-            with self.mic_queue.mutex:
-                self.mic_queue.queue.clear()
+            self._clear_media_queue(self.mic_queue)
+            self._wake_media_queue_readers(self.mic_queue, len(getattr(self, "mic_clients", [])) or 1)
             mic_log.info("Mic capture stopped and queue cleared")
         except Exception:
             mic_log.error("Failed to stop mic capture", exc_info=True)
@@ -424,6 +471,8 @@ class MediaMixin:
                 except Exception:
                     chunk = None
                 if chunk is None:
+                    if not getattr(self, "_audio_running", False):
+                        break
                     await asyncio.sleep(0.005)
                     continue
                 try:
@@ -437,8 +486,6 @@ class MediaMixin:
             print(f" Removed audio client, {len(self.audio_clients)} clients remaining")
             if not self.audio_clients and getattr(self, "_audio_running", False):
                 self._stop_audio_capture()
-                with self.audio_queue.mutex:
-                    self.audio_queue.queue.clear()
                 print(" Audio capture stopped (no clients)")
 
     def _remove_mic_client(self, websocket):
@@ -490,7 +537,9 @@ class MediaMixin:
                     continue
                 except Exception:
                     chunk = None
-                if not chunk:
+                if chunk is None:
+                    if not self.mic_running:
+                        break
                     await asyncio.sleep(0.005)
                     continue
                 try:

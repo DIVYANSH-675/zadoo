@@ -4,12 +4,11 @@ from __future__ import annotations
 import ctypes
 from ctypes import windll, wintypes
 
+from .dpi import ensure_process_dpi_aware_once
+
 user32 = windll.user32
 
-try:
-    user32.SetProcessDPIAware()
-except Exception:
-    pass
+ensure_process_dpi_aware_once()
 
 POINT = wintypes.POINT
 LPPOINT = ctypes.POINTER(POINT)
