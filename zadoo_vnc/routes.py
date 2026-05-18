@@ -55,6 +55,13 @@ class RoutesMixin:
     }
     ADVANCED_ACTIONS = {"set_capture_method", "set_performance"}
     HOST_ACTIONS = {"refresh_tunnel", "toggle_keystroke_capture"}
+    STATE_CHANGING_HTTP_ROUTES = {
+        "/api/alert",
+        "/api/refresh-tunnel",
+        "/api/set-clipboard-image",
+        "/api/set-fps",
+        "/api/set-quality",
+    }
 
     def _json_response(self, payload, status=http.HTTPStatus.OK, extra_headers=None):
         headers = Headers()
@@ -191,6 +198,10 @@ class RoutesMixin:
         except Exception:
             return False
 
+    def _state_changing_http_allowed(self, request_headers):
+        token = self._header_get(request_headers, "X-Zadoo-CSRF", "")
+        return secrets.compare_digest(str(token or ""), "1")
+
     def _headers_for_websocket(self, websocket):
         try:
             request_headers = getattr(getattr(websocket, "request", None), "headers", None)
@@ -290,7 +301,8 @@ class RoutesMixin:
         if not submitted:
             return None
         for role, expected in self._auth_codes().items():
-            if submitted == expected:
+            expected_clean = str(expected or "").strip().upper()
+            if secrets.compare_digest(submitted, expected_clean):
                 return "full" if role == "custom" else role
         return None
 
@@ -484,6 +496,7 @@ class RoutesMixin:
         """
         path = None
         request_headers = None
+        request_body = b""
 
         # Unpack arguments depending on websockets version
         try:
@@ -496,6 +509,7 @@ class RoutesMixin:
                 connection, request = args[0], args[1]
                 path = getattr(request, "path", None)
                 request_headers = getattr(request, "headers", None)
+                request_body = getattr(request, "body", b"") or b""
             elif len(args) == 1:
                 # Fallback: older style may pass a single connection-like object
                 connection = args[0]
@@ -504,6 +518,7 @@ class RoutesMixin:
                 if request is not None:
                     path = getattr(request, "path", None)
                     request_headers = getattr(request, "headers", None)
+                    request_body = getattr(request, "body", b"") or b""
                 else:
                     path = getattr(connection, "path", None)
                     request_headers = getattr(connection, "request_headers", None)
@@ -546,6 +561,8 @@ class RoutesMixin:
 
         feature = self._http_feature_for_route(route_path)
         if feature and feature != "public" and not self._is_authorized(request_headers, feature):
+            return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+        if route_path in self.STATE_CHANGING_HTTP_ROUTES and not self._state_changing_http_allowed(request_headers):
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
         # Process routes
@@ -622,7 +639,7 @@ class RoutesMixin:
                 if request_headers is None:
                     body_bytes = b""
                 else:
-                    body_bytes = getattr(args[1], "body", b"") if len(args) >= 2 else b""
+                    body_bytes = request_body
                 from urllib.parse import urlparse, parse_qs, unquote
                 parsed = urlparse(path)
                 qs = parse_qs(parsed.query or "")
@@ -685,7 +702,8 @@ class RoutesMixin:
             return None  # Let WebSocket handler take over
         elif route_path == "/api/list-cameras":
             try:
-                devices = self.enumerate_cameras()
+                loop = asyncio.get_running_loop()
+                devices = await loop.run_in_executor(None, self.enumerate_cameras)
                 payload = json.dumps({ 'success': True, 'devices': devices }).encode('utf-8')
             except Exception:
                 payload = json.dumps({ 'success': False, 'devices': [] }).encode('utf-8')
@@ -952,7 +970,7 @@ class RoutesMixin:
                 return json.dumps({"success": False, "error": "No tunnel manager available"})
 
             print(" Refreshing tunnel...")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
             if not url:
                 print(" Failed to restart tunnel")

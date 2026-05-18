@@ -456,13 +456,13 @@ class MediaMixin:
             header = json.dumps({
                 'type': 'audio_format',
                 'codec': 'pcm_s16le',
-                'samplerate': 48000,
+                'samplerate': int(getattr(self, "_audio_sr", 48000) or 48000),
                 'channels': 1,
                 'blocksize': 960
             }).encode()
             await websocket.send(header)
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     chunk = await loop.run_in_executor(None, self.audio_queue.get, True, 0.25)
@@ -529,7 +529,7 @@ class MediaMixin:
             print(f"Mic header sent: sr={hdr['samplerate']} ch={hdr['channels']} fmt={hdr['samplefmt']} block={hdr['blocksize']}")
 
             sent_chunks = 0
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     chunk = await loop.run_in_executor(None, self.mic_queue.get, True, 0.25)
@@ -719,6 +719,15 @@ class MediaMixin:
             option_sets = [None]
             selected_cv2_only = False
             is_windows = sys.platform.startswith('win')
+            loop = asyncio.get_running_loop()
+
+            async def open_dshow_device(device, opts=None):
+                def _open():
+                    if opts is None:
+                        return av.open(device, format='dshow')
+                    return av.open(device, format='dshow', options=opts)
+                return await loop.run_in_executor(None, _open)
+
             # Try common device names for Windows DirectShow
             if is_windows:
                 # Try multiple option combinations for broader compatibility
@@ -755,7 +764,7 @@ class MediaMixin:
 
                 devices = []
                 try:
-                    devices = normalize_camera_devices(self.enumerate_cameras())
+                    devices = await loop.run_in_executor(None, lambda: normalize_camera_devices(self.enumerate_cameras()))
                 except Exception as e:
                     print(f"  Camera enumeration failed while opening webcam: {e}")
 
@@ -795,10 +804,9 @@ class MediaMixin:
                             device = f"video={name}"
                             if opts is None:
                                 print(f" Trying dshow open: {device} opts=None")
-                                container = av.open(device, format='dshow')
                             else:
                                 print(f" Trying dshow open: {device} opts={opts}")
-                                container = av.open(device, format='dshow', options=opts)
+                            container = await open_dshow_device(device, opts)
                             open_ok = True
                             print(f" Opened webcam via dshow device: {device} opts={opts}")
                             break
@@ -815,10 +823,9 @@ class MediaMixin:
                             try:
                                 if opts is None:
                                     print(f" Trying dshow open: {generic} opts=None")
-                                    container = av.open(generic, format='dshow')
                                 else:
                                     print(f" Trying dshow open: {generic} opts={opts}")
-                                    container = av.open(generic, format='dshow', options=opts)
+                                container = await open_dshow_device(generic, opts)
                                 open_ok = True
                                 print(f" Opened webcam via dshow generic: {generic} opts={opts}")
                                 break
@@ -1052,7 +1059,7 @@ class MediaMixin:
             proc_reader = proc
             # Proactively show something
             try:
-                await websocket.send("Connected to local shell. Type commands and press Enter.\\r\\n")
+                await websocket.send("Connected to local shell. Type commands and press Enter.\r\n")
             except Exception:
                 pass
             # Trigger prompt output
@@ -1113,7 +1120,7 @@ class MediaMixin:
 
         async def proc_to_ws():
             nonlocal stop_flag
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             import locale
             import re
             enc = 'utf-8'
@@ -1305,6 +1312,9 @@ class MediaMixin:
     async def broadcast_cursor_position(self):
         """Broadcast cursor position and button states to subscribed clients"""
         while not self.stop_event.is_set():
+            if not (self.cursor_broadcast_enabled and self.cursor_subscribers):
+                await asyncio.sleep(0.25)
+                continue
             if self.cursor_broadcast_enabled and self.cursor_subscribers:
                 try:
                     # Get cursor position using GetCursorInfo first (avoids LP_POINT issues)
@@ -1368,5 +1378,5 @@ class MediaMixin:
                 except Exception as e:
                     print(f"Error in broadcast_cursor_position: {e}")
             
-            # Update at 60 FPS for smooth cursor tracking
+            # Update at 60 FPS for smooth cursor tracking while subscribed.
             await asyncio.sleep(1/60)

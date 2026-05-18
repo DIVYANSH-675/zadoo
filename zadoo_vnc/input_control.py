@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import ctypes
 import json
 import logging
@@ -19,6 +20,22 @@ from .logging_utils import _log_except, _log_try_ok
 from .win32_input import *
 
 class InputControlMixin:
+
+    def _get_hotkey_lock(self):
+        lock = getattr(self, "_hotkey_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._hotkey_lock = lock
+        return lock
+
+    def _register_keyboard_cleanup(self):
+        if getattr(self, "_keyboard_cleanup_registered", False):
+            return
+        try:
+            atexit.register(self.stop_global_keyboard_hook)
+            self._keyboard_cleanup_registered = True
+        except Exception:
+            pass
 
     def _load_alert_presets_from_env(self):
         """Override alert presets (A/B/C/D) from environment variables.
@@ -219,6 +236,11 @@ class InputControlMixin:
             self.block_host_input = False
             self.input_clients.discard(websocket)
             self.cursor_subscribers.discard(websocket)
+            try:
+                if hasattr(self, 'live_typing_text_by_client'):
+                    self.live_typing_text_by_client.pop(websocket, None)
+            except Exception:
+                pass
             _log_try_ok("input_event_handler.cleanup")
 
     async def handle_refresh_via_websocket(self, websocket):
@@ -231,7 +253,7 @@ class InputControlMixin:
             }))
             
             # Switch ports and get new URL
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             print(" Calling tunnel_manager.refresh_tunnel()...")
             new_url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
             print(f" refresh_tunnel() returned: {new_url}")
@@ -378,18 +400,20 @@ class InputControlMixin:
                     temp_file_path = temp_file.name
 
                 if os.name == "nt":
-                    quoted_path = temp_file_path.replace("'", "''")
                     ps_cmd = (
                         "Add-Type -AssemblyName System.Windows.Forms; "
                         "Add-Type -AssemblyName System.Drawing; "
-                        f"$img=[System.Drawing.Image]::FromFile('{quoted_path}'); "
+                        "$img=[System.Drawing.Image]::FromFile($env:ZADOO_CLIPBOARD_IMAGE_PATH); "
                         "[System.Windows.Forms.Clipboard]::SetImage($img); "
                         "$img.Dispose()"
                     )
+                    child_env = os.environ.copy()
+                    child_env["ZADOO_CLIPBOARD_IMAGE_PATH"] = temp_file_path
                     result = subprocess.run(
                         ["powershell", "-NoProfile", "-Command", ps_cmd],
                         capture_output=True,
                         text=True,
+                        env=child_env,
                         timeout=10,
                     )
                     if result.returncode != 0:
@@ -801,49 +825,50 @@ class InputControlMixin:
 
     def _install_numlock_hotkeys(self, numlock_off: bool):
         """Register/remove all global hotkeys depending on NumLock state."""
-        try:
-            import keyboard
-        except Exception:
-            return
-
-        # Remove any previously installed hotkeys
-        for _id in getattr(self, "_hk_ids", []):
+        with self._get_hotkey_lock():
             try:
-                keyboard.remove_hotkey(_id)
+                import keyboard
             except Exception:
-                pass
-        self._hk_ids = []
+                return
 
-        # Only register when NumLock is OFF (as requested)
-        if not numlock_off:
-            try:
-                print("NumLock ON  hotkeys disabled (not registered)")
-            except Exception:
-                pass
-            return
+            # Remove any previously installed hotkeys
+            for _id in getattr(self, "_hk_ids", []):
+                try:
+                    keyboard.remove_hotkey(_id)
+                except Exception:
+                    pass
+            self._hk_ids = []
 
-        add = self._hk_ids.append
+            # Only register when NumLock is OFF (as requested)
+            if not numlock_off:
+                try:
+                    print("NumLock ON  hotkeys disabled (not registered)")
+                except Exception:
+                    pass
+                return
 
-        # Start/Stop custom capture (NumPad and aliases; suppress so the keys don't leak)
-        add(keyboard.add_hotkey('shift+numpad 1', lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
-        add(keyboard.add_hotkey('shift+end',      lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
-        add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
-        add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
+            add = self._hk_ids.append
 
-        # Presets: Shift+Num5/8/2/0 (and their NumLock-off equivalents)
-        add(keyboard.add_hotkey('shift+numpad 5', lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
-        add(keyboard.add_hotkey('shift+clear',    lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
-        add(keyboard.add_hotkey('shift+numpad 8', lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
-        add(keyboard.add_hotkey('shift+up',       lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
-        add(keyboard.add_hotkey('shift+numpad 2', lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
-        add(keyboard.add_hotkey('shift+down',     lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
-        add(keyboard.add_hotkey('shift+numpad 0', lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
-        add(keyboard.add_hotkey('shift+insert',   lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
+            # Start/Stop custom capture (NumPad and aliases; suppress so the keys don't leak)
+            add(keyboard.add_hotkey('shift+numpad 1', lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
+            add(keyboard.add_hotkey('shift+end',      lambda: self._begin_custom_alert_capture(source="hk"), suppress=True))
+            add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
+            add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=True))
+
+            # Presets: Shift+Num5/8/2/0 (and their NumLock-off equivalents)
+            add(keyboard.add_hotkey('shift+numpad 5', lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
+            add(keyboard.add_hotkey('shift+clear',    lambda: self._broadcast_controller_alert("Custom", "A"), suppress=True))
+            add(keyboard.add_hotkey('shift+numpad 8', lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
+            add(keyboard.add_hotkey('shift+up',       lambda: self._broadcast_controller_alert("Custom", "B"), suppress=True))
+            add(keyboard.add_hotkey('shift+numpad 2', lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
+            add(keyboard.add_hotkey('shift+down',     lambda: self._broadcast_controller_alert("Custom", "C"), suppress=True))
+            add(keyboard.add_hotkey('shift+numpad 0', lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
+            add(keyboard.add_hotkey('shift+insert',   lambda: self._broadcast_controller_alert("Custom", "D"), suppress=True))
 
     def _watch_numlock_and_update_hotkeys(self):
         """Background watcher: re-register hotkeys when NumLock state changes."""
         last = None
-        while True:
+        while getattr(self, "_numlock_watcher_active", False):
             try:
                 state_off = self._is_numlock_off()
                 if state_off != last:
@@ -855,60 +880,62 @@ class InputControlMixin:
 
     def _install_custom_capture_hotkeys(self):
         """Install per-key hotkeys that both suppress typing on System A and append to buffer."""
-        if not HAS_KEYBOARD:
-            print("[custom] keyboard module not available; custom capture disabled")
-            return
-        if not hasattr(self, "_custom_capture_hotkeys"):
-            self._custom_capture_hotkeys = []
+        with self._get_hotkey_lock():
+            if not HAS_KEYBOARD:
+                print("[custom] keyboard module not available; custom capture disabled")
+                return
+            if not hasattr(self, "_custom_capture_hotkeys"):
+                self._custom_capture_hotkeys = []
 
-        def add(hk, fn):
-            try:
-                h = keyboard.add_hotkey(hk, fn, suppress=True, trigger_on_release=False)
-                self._custom_capture_hotkeys.append(h)
-                _log_try_ok("_install_custom_capture_hotkeys.add", hk)
-            except Exception:
-                _log_except("_install_custom_capture_hotkeys.add", sys.exc_info()[1])
+            def add(hk, fn):
+                try:
+                    h = keyboard.add_hotkey(hk, fn, suppress=True, trigger_on_release=False)
+                    self._custom_capture_hotkeys.append(h)
+                    _log_try_ok("_install_custom_capture_hotkeys.add", hk)
+                except Exception:
+                    _log_except("_install_custom_capture_hotkeys.add", sys.exc_info()[1])
 
-        # letters a..z (respect Shift for upper-case)
-        for ch in "abcdefghijklmnopqrstuvwxyz":
-            def make_cb(c=ch):
-                return lambda: self._capture_char(c.upper() if keyboard.is_pressed("shift") else c)
-            add(ch, make_cb())
+            # letters a..z (respect Shift for upper-case)
+            for ch in "abcdefghijklmnopqrstuvwxyz":
+                def make_cb(c=ch):
+                    return lambda: self._capture_char(c.upper() if keyboard.is_pressed("shift") else c)
+                add(ch, make_cb())
 
-        # digits on the top row
-        for d in "0123456789":
-            def make_cb(c=d):
-                return lambda: self._capture_char(c)
-            add(d, make_cb())
+            # digits on the top row
+            for d in "0123456789":
+                def make_cb(c=d):
+                    return lambda: self._capture_char(c)
+                add(d, make_cb())
 
-        # whitespace + edit keys
-        add("space",     lambda: self._capture_char(" "))
-        add("enter",     lambda: self._capture_char("\n"))
-        add("tab",       lambda: self._capture_char("\t"))
-        add("backspace", self._capture_backspace)
+            # whitespace + edit keys
+            add("space",     lambda: self._capture_char(" "))
+            add("enter",     lambda: self._capture_char("\n"))
+            add("tab",       lambda: self._capture_char("\t"))
+            add("backspace", self._capture_backspace)
 
-        # common punctuation (unshifted forms)
-        for sym in "-=`,./;\\[]'":
-            add(sym, (lambda s=sym: (lambda: self._capture_char(s)))())
+            # common punctuation (unshifted forms)
+            for sym in "-=`,./;\\[]'":
+                add(sym, (lambda s=sym: (lambda: self._capture_char(s)))())
 
-        print("[custom] capture hotkeys installed")
-        _log_try_ok("_install_custom_capture_hotkeys.done")
+            print("[custom] capture hotkeys installed")
+            _log_try_ok("_install_custom_capture_hotkeys.done")
 
     def _remove_custom_capture_hotkeys(self):
         """Remove the per-key capture hotkeys."""
-        if not HAS_KEYBOARD:
-            return
-        try:
-            for h in getattr(self, "_custom_capture_hotkeys", []):
-                try:
-                    keyboard.remove_hotkey(h)
-                    _log_try_ok("_remove_custom_capture_hotkeys.remove")
-                except Exception:
-                    _log_except("_remove_custom_capture_hotkeys.remove", sys.exc_info()[1])
-        finally:
-            self._custom_capture_hotkeys = []
-            print("[custom] capture hotkeys removed")
-            _log_try_ok("_remove_custom_capture_hotkeys.done")
+        with self._get_hotkey_lock():
+            if not HAS_KEYBOARD:
+                return
+            try:
+                for h in getattr(self, "_custom_capture_hotkeys", []):
+                    try:
+                        keyboard.remove_hotkey(h)
+                        _log_try_ok("_remove_custom_capture_hotkeys.remove")
+                    except Exception:
+                        _log_except("_remove_custom_capture_hotkeys.remove", sys.exc_info()[1])
+            finally:
+                self._custom_capture_hotkeys = []
+                print("[custom] capture hotkeys removed")
+                _log_try_ok("_remove_custom_capture_hotkeys.done")
 
     def _begin_custom_alert_capture(self, source: str = "poller"):
         """Enter capture mode and start buffering (idempotent)."""
@@ -1004,13 +1031,16 @@ class InputControlMixin:
     def start_global_keyboard_hook(self):
         """Start global keyboard hook to capture all keystrokes on the host system"""
         if not HAS_KEYBOARD or self.keyboard_hook_active:
-            return
+            return bool(self.keyboard_hook_active)
         
         try:
+            self._register_keyboard_cleanup()
             # NEW: register hotkeys based on current NumLock state and keep them in sync
             try:
                 self._install_numlock_hotkeys(self._is_numlock_off())
-                threading.Thread(target=self._watch_numlock_and_update_hotkeys, daemon=True).start()
+                if not getattr(self, "_numlock_watcher_active", False):
+                    self._numlock_watcher_active = True
+                    threading.Thread(target=self._watch_numlock_and_update_hotkeys, daemon=True).start()
             except Exception:
                 pass
             def on_key_event(event):
@@ -1147,26 +1177,44 @@ class InputControlMixin:
                 print(f" Global keyboard hook started (suppress=False, conditional in-callback)")
             except Exception:
                 pass
+            return True
             
         except Exception as e:
+            self.keyboard_hook_active = False
+            self.keyboard_hook = None
             print(f"Error starting keyboard hook: {e}")
+            return False
 
     def stop_global_keyboard_hook(self):
         """Stop the global keyboard hook"""
-        if not self.keyboard_hook_active:
-            return
-        
+        self._numlock_watcher_active = False
         try:
-            try:
-                if self.keyboard_hook is not None:
-                    keyboard.unhook(self.keyboard_hook)
-                else:
-                    keyboard.unhook_all()
-            finally:
-                self.keyboard_hook = None
-            self.keyboard_hook_active = False
+            with self._get_hotkey_lock():
+                try:
+                    self._remove_custom_capture_hotkeys()
+                except Exception:
+                    pass
+                try:
+                    for _id in getattr(self, "_hk_ids", []):
+                        try:
+                            keyboard.remove_hotkey(_id)
+                        except Exception:
+                            pass
+                    self._hk_ids = []
+                except Exception:
+                    pass
+                try:
+                    if self.keyboard_hook is not None:
+                        keyboard.unhook(self.keyboard_hook)
+                    elif self.keyboard_hook_active:
+                        keyboard.unhook_all()
+                finally:
+                    self.keyboard_hook = None
+                self.keyboard_hook_active = False
             print(" Global keyboard hook stopped")
         except Exception as e:
+            self.keyboard_hook_active = False
+            self.keyboard_hook = None
             print(f"Error stopping keyboard hook: {e}")
 
     def enable_keystroke_capture(self):
@@ -1178,6 +1226,34 @@ class InputControlMixin:
     def disable_keystroke_capture(self):
         """Disable keystroke capture"""
         self.keystroke_capture_enabled = False
+
+    def _type_text_chunk(self, text):
+        if not text:
+            return
+        if all(ord(ch) < 128 for ch in text):
+            pyautogui.typewrite(text, interval=0)
+            return
+        if HAS_PYPERCLIP:
+            previous = None
+            had_previous = False
+            try:
+                previous = pyperclip.paste()
+                had_previous = True
+            except Exception:
+                pass
+            pyperclip.copy(text)
+            pyautogui.hotkey('ctrl', 'v')
+            if had_previous:
+                try:
+                    pyperclip.copy(previous)
+                except Exception:
+                    pass
+            return
+        for ch in text:
+            if ord(ch) < 128:
+                pyautogui.typewrite(ch, interval=0)
+            else:
+                logging.warning("Cannot type non-ASCII character without pyperclip: %r", ch)
 
     def _handle_type_text(self, event, websocket=None):
         """Handle live typing text by calculating append-only delta and typing it."""
@@ -1206,11 +1282,11 @@ class InputControlMixin:
                     except Exception:
                         pass
                     try:
-                        pyautogui.typewrite(append_part, interval=0)
+                        self._type_text_chunk(append_part)
                     except Exception:
                         for ch in append_part:
                             try:
-                                pyautogui.typewrite(ch, interval=0)
+                                self._type_text_chunk(ch)
                             except Exception:
                                 continue
             else:
@@ -1233,11 +1309,11 @@ class InputControlMixin:
                         except Exception:
                             pass
                         try:
-                            pyautogui.typewrite(inserted, interval=0)
+                            self._type_text_chunk(inserted)
                         except Exception:
                             for ch in inserted:
                                 try:
-                                    pyautogui.typewrite(ch, interval=0)
+                                    self._type_text_chunk(ch)
                                 except Exception:
                                     # Log the error instead of silently ignoring it
                                     logging.warning(f"Failed to type character: {repr(ch)}")

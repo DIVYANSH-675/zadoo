@@ -32,7 +32,10 @@
         btn.addEventListener('click', async ()=>{
           const code = btn.getAttribute('data-code');
           try{
-            const res = await fetch('/api/alert?code='+encodeURIComponent(code));
+            const res = await fetch('/api/alert?code='+encodeURIComponent(code), {
+              cache: 'no-store',
+              headers: { 'X-Zadoo-CSRF': '1' }
+            });
             ok.textContent = res.ok ? ' Sent '+code : ' Failed ('+res.status+')';
           }catch(e){ ok.textContent = ' Network error'; }
           setTimeout(()=> ok.textContent='', 2000);

@@ -206,6 +206,13 @@ def assert_imports() -> None:
             locked_response = await throttled_server.process_request("/api/auth", locked_headers)
             if locked_response.status_code != 429:
                 fail(f"auth lockout returned {locked_response.status_code}, expected 429")
+            unsafe_quality_response = await server.process_request("/api/set-quality?value=80", headers)
+            if unsafe_quality_response.status_code != 403:
+                fail(f"state-changing route without CSRF returned {unsafe_quality_response.status_code}, expected 403")
+            csrf_headers = Headers()
+            csrf_headers["Host"] = "localhost:6173"
+            csrf_headers["Cookie"] = headers["Cookie"]
+            csrf_headers["X-Zadoo-CSRF"] = "1"
             checks = {
                 "/api/public-url": 200,
                 "/api/list-cameras": 200,
@@ -214,7 +221,12 @@ def assert_imports() -> None:
                 "/api/set-clipboard-image": 400,
             }
             for path, expected_status in checks.items():
-                response = await server.process_request(path, headers)
+                request_headers = csrf_headers if path in {
+                    "/api/set-quality?value=80",
+                    "/api/set-fps?value=20",
+                    "/api/set-clipboard-image",
+                } else headers
+                response = await server.process_request(path, request_headers)
                 if response is None:
                     fail(f"route returned websocket pass-through unexpectedly: {path}")
                 if response.status_code != expected_status:
@@ -231,13 +243,13 @@ def assert_imports() -> None:
                 fail(f"server current_quality is {server.current_quality}, expected 80")
             if server.current_fps != 20:
                 fail(f"server current_fps is {server.current_fps}, expected 20")
-            max_fps_response = await server.process_request("/api/set-fps?value=max", headers)
+            max_fps_response = await server.process_request("/api/set-fps?value=max", csrf_headers)
             if max_fps_response.status_code != 200:
                 fail(f"set-fps max returned {max_fps_response.status_code}, expected 200")
             max_fps_payload = json.loads(max_fps_response.body.decode("utf-8"))
             if max_fps_payload.get("fps") != 0 or server.current_fps != 0:
                 fail(f"set-fps max returned {max_fps_payload.get('fps')} and server current_fps={server.current_fps}, expected 0")
-            quality_100_response = await server.process_request("/api/set-quality?value=100", headers)
+            quality_100_response = await server.process_request("/api/set-quality?value=100", csrf_headers)
             if quality_100_response.status_code != 200:
                 fail(f"set-quality 100 returned {quality_100_response.status_code}, expected 200")
             quality_100_payload = json.loads(quality_100_response.body.decode("utf-8"))

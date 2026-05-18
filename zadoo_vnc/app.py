@@ -47,9 +47,9 @@ def maybe_hide_console():
 
 def configure_logging():
     _setup_logging_to_file()
+    log_level_name = os.environ.get("ZADOO_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
     try:
-        log_level_name = os.environ.get("ZADOO_LOG_LEVEL", "INFO").upper()
-        log_level = getattr(logging, log_level_name, logging.INFO)
         logging.basicConfig(
             level=log_level,
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -107,8 +107,16 @@ def install_startup_task():
     ]
     try:
         subprocess.run(create_cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError:
-        pass
+    except subprocess.CalledProcessError as exc:
+        logging.warning("Startup task installation failed. Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.", exc_info=True)
+        try:
+            stderr = (exc.stderr or b"").decode("utf-8", "ignore") if isinstance(exc.stderr, (bytes, bytearray)) else str(exc.stderr or "")
+            if stderr.strip():
+                print(f"Startup task installation failed: {stderr.strip()}")
+            else:
+                print("Startup task installation failed. Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.")
+        except Exception:
+            pass
 
 
 class ProcessProtector:
@@ -135,7 +143,8 @@ class ProcessProtector:
             if getattr(sys, "frozen", False):
                 cmd = [sys.executable]
             else:
-                cmd = [sys.executable, str(Path(__file__).resolve().parent.parent / "zadoo_vnc_single.py")]
+                script = Path(__file__).resolve().parent.parent / "zadoo_vnc_single.py"
+                cmd = [sys.executable, str(script)] if script.exists() else [sys.executable, "-m", "zadoo_vnc.app"]
             subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             pass
@@ -177,8 +186,8 @@ def main():
     configure_event_loop_policy()
     configure_stdout_encoding()
     maybe_hide_console()
-    configure_logging()
     _load_dotenv()
+    configure_logging()
 
     disable_startup_task = os.environ.get("ZADOO_DISABLE_STARTUP_TASK", "").strip().lower() in {
         "1",
@@ -225,9 +234,7 @@ def main():
     if use_tunnel:
         print(f"Selected tunnel port (single): {desired_web_port}")
         tunnel_manager = CloudflareTunnelManager(primary_port=desired_web_port)
-        public_url = None
-        if not public_url:
-            print("Continuing without tunnel...")
+        print("Tunnel will start after the local server binds successfully.")
 
     print(f"\n{'=' * 60}")
     print("VNC SERVER STARTING...")

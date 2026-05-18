@@ -85,6 +85,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._runtime_auth_generated = False
         self._video_send_tasks = {}
         self._video_skipped_sends = 0
+        self._servers = []
+        self._hotkey_lock = threading.RLock()
+        self.live_typing_text_by_client = {}
 
     async def start_server(self):
         """Start WebSocket servers."""
@@ -126,15 +129,17 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 compression=None,
             )
             servers.append(secondary_server)
+        self._servers = servers
 
         # Start host hotkey capture on server start (A/B/C/D)
         try:
-            self.start_global_keyboard_hook()
+            hook_started = bool(self.start_global_keyboard_hook())
         except Exception as e:
+            hook_started = False
             print(f" Keyboard hook failed to initialize: {e}")
         # If hook isn't active, start fallback poller
         try:
-            if not getattr(self, 'keyboard_hook_active', False):
+            if not hook_started or not getattr(self, 'keyboard_hook_active', False):
                 self.start_host_hotkey_poller()
                 print(" Fallback hotkey poller started (A/B/C/D)")
             else:
@@ -170,12 +175,27 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         print(f" VNC server running on port(s): {ports}")
         print(" Video streaming started")
         
-        # Keep servers running
-        await asyncio.gather(
-            *(server.wait_closed() for server in servers),
-            broadcast_task,
-            cursor_broadcast_task
-        )
+        # Keep servers running until stop() or task cancellation requests shutdown.
+        try:
+            await self.stop_event.wait()
+        finally:
+            self.stop_event.set()
+            try:
+                self._host_hotkey_poller_active = False
+                self.stop_global_keyboard_hook()
+            except Exception:
+                pass
+            for server in servers:
+                try:
+                    server.close()
+                except Exception:
+                    pass
+            for task in (broadcast_task, cursor_broadcast_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*(server.wait_closed() for server in servers), return_exceptions=True)
+            await asyncio.gather(broadcast_task, cursor_broadcast_task, return_exceptions=True)
+            self._servers = []
 
     def set_tunnel_manager(self, tunnel_manager):
         """Set the tunnel manager for API access"""
@@ -226,4 +246,11 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
     def stop(self):
         if self.loop:
-            self.loop.call_soon_threadsafe(self.stop_event.set)
+            def _stop():
+                self.stop_event.set()
+                for server in list(getattr(self, "_servers", []) or []):
+                    try:
+                        server.close()
+                    except Exception:
+                        pass
+            self.loop.call_soon_threadsafe(_stop)

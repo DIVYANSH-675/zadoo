@@ -15,6 +15,7 @@ class ScreenCapturer(threading.Thread):
         self.latest_frame_jpeg = None
         self.frame_lock = threading.Lock()
         self.capture_control_lock = threading.RLock()
+        self.encoder_lock = threading.Lock()
         self.is_running = False
         self.quality = quality
         self.fps = fps
@@ -119,15 +120,18 @@ class ScreenCapturer(threading.Thread):
                 if isinstance(frame, np.ndarray):
                     frame = self._apply_perf_region(frame)
                 if frame is not None:
-                    # Aggressive drop: if encoder busy, skip this frame
-                    if self.encoder_busy:
+                    # Aggressive drop: if encoder is busy, skip this frame.
+                    if not self.encoder_lock.acquire(blocking=False):
                         time.sleep(0)  # yield
                         continue
-                    self.encoder_busy = True
-                    encode_start = time.perf_counter()
-                    jpeg_bytes = self._encode_frame(frame)
-                    encode_ms = (time.perf_counter() - encode_start) * 1000.0
-                    self.encoder_busy = False
+                    try:
+                        self.encoder_busy = True
+                        encode_start = time.perf_counter()
+                        jpeg_bytes = self._encode_frame(frame)
+                        encode_ms = (time.perf_counter() - encode_start) * 1000.0
+                    finally:
+                        self.encoder_busy = False
+                        self.encoder_lock.release()
                     if jpeg_bytes is not None:
                         with self.frame_lock:
                             self.latest_frame_jpeg = jpeg_bytes
@@ -137,27 +141,35 @@ class ScreenCapturer(threading.Thread):
                             self.capture_stats['last_capture_ms'] = capture_ms
                             self.capture_stats['last_encode_ms'] = encode_ms
                             self.capture_stats['last_loop_ms'] = (time.perf_counter() - loop_start) * 1000.0
+                            self.capture_stats['frame_count'] += 1
+                            current_time = time.time()
+                            time_diff = current_time - self.capture_stats['last_fps_time']
+
+                            # Calculate FPS every second
+                            if time_diff >= 1.0:
+                                self.capture_stats['current_fps'] = self.capture_stats['frame_count'] / time_diff
+                                self.capture_stats['frame_count'] = 0
+                                self.capture_stats['last_fps_time'] = current_time
+                                log_fps = True
+                            else:
+                                log_fps = False
                         self._notify_frame_ready()
-                        
-                        # Update capture statistics
-                        self.capture_stats['frame_count'] += 1
-                        current_time = time.time()
-                        time_diff = current_time - self.capture_stats['last_fps_time']
-                        
-                        # Calculate FPS every second
-                        if time_diff >= 1.0:
-                            self.capture_stats['current_fps'] = self.capture_stats['frame_count'] / time_diff
-                            self.capture_stats['frame_count'] = 0
-                            self.capture_stats['last_fps_time'] = current_time
-                            
+
+                        if log_fps and int(current_time) % 5 == 0:
                             # Log performance info every 5 seconds
-                            if int(current_time) % 5 == 0:
+                            with self.frame_lock:
+                                current_fps = self.capture_stats["current_fps"]
+                                active_method = self.active_capture_method
+                                configured_method = self.capture_method
+                            try:
                                 logging.debug(
                                     "Capture: %s | FPS: %.1f | Method: %s",
-                                    self.active_capture_method,
-                                    self.capture_stats["current_fps"],
-                                    self.capture_method,
+                                    active_method,
+                                    current_fps,
+                                    configured_method,
                                 )
+                            except Exception:
+                                pass
                                 
             except Exception as e:
                 logging.error("Exception in ScreenCapturer run loop", exc_info=True)
@@ -367,6 +379,7 @@ class ScreenCapturer(threading.Thread):
         self._auto_probe_counter += 1
         if self._auto_probe_counter >= 120:
             self._auto_probe_counter = 0
+            self._auto_probe_index %= len(methods)
             self._auto_probe_index = (self._auto_probe_index + 1) % len(methods)
             probe = methods[self._auto_probe_index]
             if probe in ordered:
@@ -427,6 +440,8 @@ class ScreenCapturer(threading.Thread):
                 probe = self.dxcam_camera.grab()
                 if isinstance(probe, np.ndarray) and probe.ndim == 3:
                     self._dx_out_size = (probe.shape[1], probe.shape[0])  # (w, h)
+                    if not self._roi_norm_to_pixels(self._dx_out_size[0], self._dx_out_size[1]):
+                        return probe
                 else:
                     self._dx_out_size = None
             if self._dx_out_size:
@@ -534,7 +549,7 @@ class ScreenCapturer(threading.Thread):
             return None
 
     def _grab_screen_winrt(self):
-        """Capture using WinRT GraphicsCapture (basic window capture)."""
+        """Compatibility capture method backed by Pillow ImageGrab/GDI."""
         try:
             # Minimal fallback approach: if Pillow's ImageGrab is available on Windows, use it
             if HAS_PIL and hasattr(ImageGrab, 'grab'):
@@ -692,22 +707,28 @@ class ScreenCapturer(threading.Thread):
 
     def get_capture_stats(self):
         """Get capture performance statistics"""
+        with self.frame_lock:
+            stats = dict(self.capture_stats)
+            active_method = self.active_capture_method
+            capture_method = self.capture_method
+            backend_perf = {k: dict(v) for k, v in self.backend_perf.items()}
+            disabled_until = dict(self._backend_disabled_until)
         is_working = (
-            self.active_capture_method != "unknown"
-            and self.capture_stats['current_fps'] > 0
-            and (self.capture_method == "auto" or self.active_capture_method == self.capture_method)
+            active_method != "unknown"
+            and stats['current_fps'] > 0
+            and (capture_method == "auto" or active_method == capture_method)
         )
         return {
-            'current_fps': self.capture_stats['current_fps'],
-            'active_method': self.active_capture_method,
-            'set_method': self.capture_method,
-            'method_switches': self.capture_stats['method_switches'],
-            'sequence': self.capture_stats.get('sequence', 0),
-            'last_frame_ts': self.capture_stats.get('last_frame_ts', 0.0),
-            'last_frame_bytes': self.capture_stats.get('last_frame_bytes', 0),
-            'last_capture_ms': self.capture_stats.get('last_capture_ms', 0.0),
-            'last_encode_ms': self.capture_stats.get('last_encode_ms', 0.0),
-            'last_loop_ms': self.capture_stats.get('last_loop_ms', 0.0),
+            'current_fps': stats['current_fps'],
+            'active_method': active_method,
+            'set_method': capture_method,
+            'method_switches': stats['method_switches'],
+            'sequence': stats.get('sequence', 0),
+            'last_frame_ts': stats.get('last_frame_ts', 0.0),
+            'last_frame_bytes': stats.get('last_frame_bytes', 0),
+            'last_capture_ms': stats.get('last_capture_ms', 0.0),
+            'last_encode_ms': stats.get('last_encode_ms', 0.0),
+            'last_loop_ms': stats.get('last_loop_ms', 0.0),
             'target_fps': self.fps,
             'target_fps_mode': 'max' if not self.fps else 'fixed',
             'quality': self.quality,
@@ -715,29 +736,30 @@ class ScreenCapturer(threading.Thread):
             'perf_region': self.perf_region,
             'perf_scale_div': self.perf_scale_div,
             'perf_grayscale': self.perf_grayscale,
-            'backend_perf': self.backend_perf,
-            'backend_disabled_until': self._backend_disabled_until,
+            'backend_perf': backend_perf,
+            'backend_disabled_until': disabled_until,
             'is_working': is_working
         }
 
     def verify_capture_method(self):
         """Verify that the selected capture method is working"""
+        stats = self.get_capture_stats()
         verification = {
-            'method_requested': self.capture_method,
-            'method_active': self.active_capture_method,
+            'method_requested': stats['set_method'],
+            'method_active': stats['active_method'],
             'is_working': False,
-            'fps': self.capture_stats['current_fps'],
+            'fps': stats['current_fps'],
             'status': 'unknown'
         }
         
-        if self.active_capture_method == "unknown":
+        if stats['active_method'] == "unknown":
             verification['status'] = 'not_working'
-        elif self.capture_stats['current_fps'] == 0:
+        elif stats['current_fps'] == 0:
             verification['status'] = 'no_frames'
-        elif self.capture_method == "auto":
+        elif stats['set_method'] == "auto":
             verification['status'] = 'auto_selected'
             verification['is_working'] = True
-        elif self.active_capture_method == self.capture_method:
+        elif stats['active_method'] == stats['set_method']:
             verification['status'] = 'working_correctly'
             verification['is_working'] = True
         else:

@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import logging
+import threading
+
+
+_BETTERCAM_PATCH_LOCK = threading.RLock()
 
 
 try:
@@ -83,43 +87,50 @@ if HAS_BETTERCAM:
     try:
         logging.info("BetterCam detected. Version: %s", getattr(bettercam, "__version__", "unknown"))
         CamCls = getattr(bettercam, "BetterCam", None)
-        if CamCls and not hasattr(CamCls, "_zadoo_patched"):
-            orig_stop = getattr(CamCls, "stop", None)
+        with _BETTERCAM_PATCH_LOCK:
+            should_patch = bool(CamCls and not getattr(CamCls, "_zadoo_patched", False))
+            if should_patch:
+                orig_stop = getattr(CamCls, "_zadoo_original_stop", None) or getattr(CamCls, "stop", None)
+                orig_del = getattr(CamCls, "_zadoo_original_del", None) or getattr(CamCls, "__del__", None)
+                try:
+                    CamCls._zadoo_original_stop = orig_stop
+                    CamCls._zadoo_original_del = orig_del
+                except Exception:
+                    pass
 
-            def _zadoo_safe_stop(self, *args, **kwargs):
-                if not hasattr(self, "is_capturing"):
-                    try:
-                        setattr(self, "is_capturing", False)
-                    except Exception:
-                        pass
+                def _zadoo_safe_stop(self, *args, **kwargs):
+                    if not hasattr(self, "is_capturing"):
+                        try:
+                            setattr(self, "is_capturing", False)
+                        except Exception:
+                            pass
+                    if orig_stop:
+                        try:
+                            return orig_stop(self, *args, **kwargs)
+                        except Exception:
+                            return None
+
                 if orig_stop:
                     try:
-                        return orig_stop(self, *args, **kwargs)
+                        CamCls.stop = _zadoo_safe_stop
                     except Exception:
-                        return None
+                        pass
+                if orig_del:
 
-            if orig_stop:
-                try:
-                    CamCls.stop = _zadoo_safe_stop
-                except Exception:
-                    pass
-            orig_del = getattr(CamCls, "__del__", None)
-            if orig_del:
+                    def _zadoo_safe_del(self):
+                        try:
+                            return orig_del(self)
+                        except Exception:
+                            return None
 
-                def _zadoo_safe_del(self):
                     try:
-                        return orig_del(self)
+                        CamCls.__del__ = _zadoo_safe_del
                     except Exception:
-                        return None
-
+                        pass
                 try:
-                    CamCls.__del__ = _zadoo_safe_del
+                    CamCls._zadoo_patched = True
                 except Exception:
                     pass
-            try:
-                CamCls._zadoo_patched = True
-            except Exception:
-                pass
     except Exception:
         logging.debug("BetterCam patching failed", exc_info=True)
 

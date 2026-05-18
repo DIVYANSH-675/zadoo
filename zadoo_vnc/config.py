@@ -32,7 +32,7 @@ def _load_dotenv(path: str = ".env"):
                     key, val = line.split("=", 1)
                     key = key.strip()
                     val = val.strip().strip('"').strip("'")
-                    os.environ.setdefault(key, val)
+                    os.environ[key] = val
         except Exception:
             pass
 

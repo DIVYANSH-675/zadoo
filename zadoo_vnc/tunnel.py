@@ -69,6 +69,48 @@ class CloudflareTunnelManager:
             logging.error("cloudflared signature verification failed", exc_info=True)
         return False
 
+    def _cleanup_stale_cloudflared(self, port):
+        if os.name != "nt":
+            return
+        try:
+            target = f"http://localhost:{int(port)}"
+        except Exception:
+            target = f"http://localhost:{port}"
+        command = (
+            "Get-CimInstance Win32_Process -Filter \"name = 'cloudflared.exe'\" | "
+            "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0 or not (result.stdout or "").strip():
+                return
+            import json
+
+            data = json.loads(result.stdout)
+            processes = data if isinstance(data, list) else [data]
+            for item in processes:
+                command_line = str(item.get("CommandLine") or "")
+                pid = int(item.get("ProcessId") or 0)
+                if pid > 0 and target in command_line and " tunnel " in f" {command_line} ":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/PID", str(pid), "/T", "/F"],
+                            capture_output=True,
+                            timeout=5,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                        logging.info("Stopped stale cloudflared process PID %s for %s", pid, target)
+                    except Exception:
+                        logging.debug("Failed to stop stale cloudflared PID %s", pid, exc_info=True)
+        except Exception:
+            logging.debug("Stale cloudflared cleanup failed", exc_info=True)
+
     def download_cloudflared(self):
         """Download cloudflared if not present."""
         self.cloudflared_path = os.path.join(os.getcwd(), "cloudflared.exe")
@@ -102,6 +144,7 @@ class CloudflareTunnelManager:
             return None, None
 
         try:
+            self._cleanup_stale_cloudflared(port)
             cmd = [self.cloudflared_path, "tunnel", "--url", f"http://localhost:{port}"]
             process = subprocess.Popen(
                 cmd,

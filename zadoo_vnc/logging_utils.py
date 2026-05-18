@@ -10,10 +10,30 @@ import threading
 from datetime import datetime
 
 _LOG_FILE_HANDLE = None
+_ORIGINAL_STDOUT = None
+_ORIGINAL_STDERR = None
+_LOGGING_RESTORE_REGISTERED = False
+
+
+def _restore_logging_streams():
+    global _LOG_FILE_HANDLE
+    try:
+        if _ORIGINAL_STDOUT is not None:
+            sys.stdout = _ORIGINAL_STDOUT
+        if _ORIGINAL_STDERR is not None:
+            sys.stderr = _ORIGINAL_STDERR
+    except Exception:
+        pass
+    try:
+        if _LOG_FILE_HANDLE is not None and not _LOG_FILE_HANDLE.closed:
+            _LOG_FILE_HANDLE.close()
+    except Exception:
+        pass
+    _LOG_FILE_HANDLE = None
 
 
 def _setup_logging_to_file():
-    global _LOG_FILE_HANDLE
+    global _LOG_FILE_HANDLE, _ORIGINAL_STDOUT, _ORIGINAL_STDERR, _LOGGING_RESTORE_REGISTERED
     try:
         base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         log_dir = os.path.join(base_dir, "logs")
@@ -25,6 +45,14 @@ def _setup_logging_to_file():
                 self._stream = stream
                 self._file = file
                 self._lock = threading.Lock()
+
+            @property
+            def encoding(self):
+                return getattr(self._stream, "encoding", "utf-8")
+
+            @property
+            def errors(self):
+                return getattr(self._stream, "errors", "replace")
 
             def write(self, s):
                 with self._lock:
@@ -50,11 +78,40 @@ def _setup_logging_to_file():
                     except Exception:
                         pass
 
+            def fileno(self):
+                return self._stream.fileno()
+
+            def isatty(self):
+                try:
+                    return bool(self._stream.isatty())
+                except Exception:
+                    return False
+
+            def readable(self):
+                return False
+
+            def writable(self):
+                return True
+
+            def seekable(self):
+                return False
+
         fh = open(log_path, "a", encoding="utf-8", buffering=1)
-        sys.stdout = _Tee(sys.stdout, fh)
-        sys.stderr = _Tee(sys.stderr, fh)
+        if _ORIGINAL_STDOUT is None:
+            _ORIGINAL_STDOUT = sys.stdout
+        if _ORIGINAL_STDERR is None:
+            _ORIGINAL_STDERR = sys.stderr
+        if _LOG_FILE_HANDLE is not None and not _LOG_FILE_HANDLE.closed:
+            try:
+                _LOG_FILE_HANDLE.close()
+            except Exception:
+                pass
+        sys.stdout = _Tee(_ORIGINAL_STDOUT, fh)
+        sys.stderr = _Tee(_ORIGINAL_STDERR, fh)
         _LOG_FILE_HANDLE = fh
-        atexit.register(lambda: (_LOG_FILE_HANDLE and _LOG_FILE_HANDLE.close()))
+        if not _LOGGING_RESTORE_REGISTERED:
+            atexit.register(_restore_logging_streams)
+            _LOGGING_RESTORE_REGISTERED = True
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Logging to {log_path}")
     except Exception as e:
         try:
