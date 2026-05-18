@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -84,12 +85,32 @@ def source_files():
 def assert_imports() -> None:
     sys.path.insert(0, str(ROOT))
     test_auth_code = "SMOKE_" + secrets.token_hex(8).upper()
+    test_view_code = "VIEW_" + secrets.token_hex(8).upper()
     old_env = {
         key: os.environ.get(key)
-        for key in ("CODE_FULL", "CODE_LIMITED", "CODE_PARTIAL", "CODE_LOCKDOWN", "CUSTOM_PASSWORD")
+        for key in (
+            "CODE_FULL",
+            "CODE_LIMITED",
+            "CODE_PARTIAL",
+            "CODE_LOCKDOWN",
+            "CUSTOM_PASSWORD",
+            "ZADOO_ALLOW_QUERY_AUTH",
+            "ZADOO_ALLOWED_ORIGINS",
+            "ZADOO_AUTH_MAX_FAILURES",
+            "ZADOO_AUTH_WINDOW_SECONDS",
+            "ZADOO_AUTH_LOCKOUT_SECONDS",
+            "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
+            "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
+        )
     }
     os.environ["CODE_FULL"] = test_auth_code
-    for key in ("CODE_LIMITED", "CODE_PARTIAL", "CODE_LOCKDOWN", "CUSTOM_PASSWORD"):
+    os.environ["CODE_LOCKDOWN"] = test_view_code
+    os.environ["ZADOO_AUTH_MAX_FAILURES"] = "3"
+    os.environ["ZADOO_AUTH_WINDOW_SECONDS"] = "60"
+    os.environ["ZADOO_AUTH_LOCKOUT_SECONDS"] = "120"
+    os.environ["ZADOO_CLIPBOARD_IMAGE_MAX_BYTES"] = "8"
+    os.environ["ZADOO_CLIPBOARD_TEXT_MAX_BYTES"] = "8"
+    for key in ("CODE_LIMITED", "CODE_PARTIAL", "CUSTOM_PASSWORD", "ZADOO_ALLOW_QUERY_AUTH", "ZADOO_ALLOWED_ORIGINS"):
         os.environ.pop(key, None)
     import zadoo_vnc.config as config
     import zadoo_vnc.dependencies as deps
@@ -121,22 +142,70 @@ def assert_imports() -> None:
 
         async def route_checks():
             headers = Headers()
+            headers["Host"] = "localhost:6173"
             unauth_response = await server.process_request("/api/public-url", headers)
             if unauth_response.status_code != 403:
                 fail(f"unauthenticated public-url returned {unauth_response.status_code}, expected 403")
             snapshot_prefix_response = await server.process_request("/snapshot-extra?fmt=png", headers)
             if snapshot_prefix_response.status_code != 404:
                 fail(f"snapshot prefix route returned {snapshot_prefix_response.status_code}, expected 404")
-            legacy_response = await server.process_request(f"/api/auth?code={_legacy_auth_strings()[0]}", headers)
+            query_auth_response = await server.process_request(f"/api/auth?code={test_auth_code}", headers)
+            if query_auth_response.status_code != 400:
+                fail(f"query auth returned {query_auth_response.status_code}, expected 400")
+            try:
+                os.environ["ZADOO_ALLOW_QUERY_AUTH"] = "1"
+                compat_query_server = VNCServer(6176, 0)
+                compat_query_response = await compat_query_server.process_request(f"/api/auth?code={test_auth_code}", headers)
+                if compat_query_response.status_code != 200:
+                    fail(f"compat query auth returned {compat_query_response.status_code}, expected 200")
+            finally:
+                os.environ.pop("ZADOO_ALLOW_QUERY_AUTH", None)
+            legacy_headers = Headers()
+            legacy_headers["Host"] = "localhost:6173"
+            legacy_headers["X-Zadoo-Code"] = _legacy_auth_strings()[0]
+            legacy_response = await server.process_request("/api/auth", legacy_headers)
             if legacy_response.status_code != 401:
                 fail(f"legacy hardcoded auth code returned {legacy_response.status_code}, expected 401")
-            auth_response = await server.process_request(f"/api/auth?code={test_auth_code}", headers)
+            cross_origin_headers = Headers()
+            cross_origin_headers["Host"] = "localhost:6173"
+            cross_origin_headers["Origin"] = "https://evil.example"
+            cross_origin_response = await server.process_request("/", cross_origin_headers)
+            if cross_origin_response.status_code != 403:
+                fail(f"cross-origin HTTP request returned {cross_origin_response.status_code}, expected 403")
+            auth_request_headers = Headers()
+            auth_request_headers["Host"] = "localhost:6173"
+            auth_request_headers["Origin"] = "http://localhost:6173"
+            auth_request_headers["X-Zadoo-Code"] = test_auth_code
+            auth_response = await server.process_request("/api/auth", auth_request_headers)
             if auth_response.status_code != 200:
                 fail(f"auth route returned {auth_response.status_code}, expected 200")
             cookie = auth_response.headers.get("Set-Cookie")
             if not cookie or "zadoo_auth=" not in cookie:
                 fail("auth route did not set zadoo_auth cookie")
             headers["Cookie"] = cookie.split(";", 1)[0]
+            ws_bad_origin_headers = Headers()
+            ws_bad_origin_headers["Host"] = "localhost:6173"
+            ws_bad_origin_headers["Origin"] = "https://evil.example"
+            ws_bad_origin_headers["Connection"] = "Upgrade"
+            ws_bad_origin_headers["Upgrade"] = "websocket"
+            ws_bad_origin_headers["Cookie"] = headers["Cookie"]
+            ws_bad_origin = await server.process_request("/video", ws_bad_origin_headers)
+            if ws_bad_origin.status_code != 403:
+                fail(f"cross-origin websocket returned {ws_bad_origin.status_code}, expected 403")
+            throttled_server = VNCServer(6174, 0)
+            bad_headers = Headers()
+            bad_headers["Host"] = "localhost:6174"
+            bad_headers["X-Forwarded-For"] = "203.0.113.10"
+            bad_headers["X-Zadoo-Code"] = "BADCODE"
+            for _ in range(3):
+                await throttled_server.process_request("/api/auth", bad_headers)
+            locked_headers = Headers()
+            locked_headers["Host"] = "localhost:6174"
+            locked_headers["X-Forwarded-For"] = "203.0.113.10"
+            locked_headers["X-Zadoo-Code"] = test_auth_code
+            locked_response = await throttled_server.process_request("/api/auth", locked_headers)
+            if locked_response.status_code != 429:
+                fail(f"auth lockout returned {locked_response.status_code}, expected 429")
             checks = {
                 "/api/public-url": 200,
                 "/api/list-cameras": 200,
@@ -239,6 +308,82 @@ def assert_imports() -> None:
             if benchmark_response.status_code != 200 or b"Stream Benchmark" not in benchmark_response.body:
                 fail("benchmark.html route did not return the benchmark page")
 
+            class FakeRequest:
+                def __init__(self, request_headers):
+                    self.headers = request_headers
+
+            class FakeWebSocket:
+                remote_address = ("smoke", 1)
+                def __init__(self, request_headers, messages):
+                    self.request = FakeRequest(request_headers)
+                    self.sent = []
+                    self.messages = list(messages)
+                async def send(self, data):
+                    self.sent.append(data)
+                def __aiter__(self):
+                    return self
+                async def __anext__(self):
+                    if self.messages:
+                        return self.messages.pop(0)
+                    raise StopAsyncIteration
+
+            view_auth_headers = Headers()
+            view_auth_headers["Host"] = "localhost:6173"
+            view_auth_headers["X-Zadoo-Code"] = test_view_code
+            view_auth_response = await server.process_request("/api/auth", view_auth_headers)
+            if view_auth_response.status_code != 200:
+                fail(f"view auth returned {view_auth_response.status_code}, expected 200")
+            view_ws_headers = Headers()
+            view_ws_headers["Host"] = "localhost:6173"
+            view_ws_headers["Cookie"] = view_auth_response.headers.get("Set-Cookie").split(";", 1)[0]
+            recorded_actions = []
+            original_process_event = server.process_event
+            try:
+                server.process_event = lambda event, websocket=None: recorded_actions.append(event.get("action"))
+                view_ws = FakeWebSocket(view_ws_headers, [json.dumps({"action": "click", "x": 0.5, "y": 0.5})])
+                await server.video_stream_handler(view_ws)
+                if recorded_actions:
+                    fail(f"view-only /video processed control actions: {recorded_actions}")
+                if not any("Forbidden" in str(item) for item in view_ws.sent):
+                    fail("view-only /video did not report forbidden control action")
+                full_ws = FakeWebSocket(headers, [json.dumps({"action": "click", "x": 0.5, "y": 0.5})])
+                await server.video_stream_handler(full_ws)
+                if recorded_actions != ["click"]:
+                    fail(f"full /video did not process allowed control action: {recorded_actions}")
+            finally:
+                server.process_event = original_process_event
+
+            class FakeSendWebSocket:
+                def __init__(self):
+                    self.sent = []
+                async def send(self, data):
+                    self.sent.append(data)
+
+            image_ws = FakeSendWebSocket()
+            too_large_png = base64.b64encode(b"123456789").decode("ascii")
+            server._handle_set_clipboard_image({"mime": "image/png", "data_base64": too_large_png}, image_ws)
+            await asyncio.sleep(0.05)
+            if not image_ws.sent:
+                fail("clipboard image limit did not send a result")
+            image_payload = json.loads(image_ws.sent[-1])
+            if image_payload.get("success") is not False or "size limit" not in image_payload.get("error", ""):
+                fail(f"clipboard image limit returned unexpected payload: {image_payload}")
+
+            mic_a, mic_b = object(), object()
+            server.mic_clients = {mic_a, mic_b}
+            stop_calls = []
+            original_stop_mic = server._stop_mic_capture
+            try:
+                server._stop_mic_capture = lambda: stop_calls.append("stop")
+                if server._remove_mic_client(mic_a):
+                    fail("mic capture stopped while another mic client remained")
+                if stop_calls:
+                    fail("mic stop called before last client disconnected")
+                if not server._remove_mic_client(mic_b) or stop_calls != ["stop"]:
+                    fail("mic capture did not stop after last client disconnected")
+            finally:
+                server._stop_mic_capture = original_stop_mic
+
         asyncio.run(route_checks())
     finally:
         for key, value in old_env.items():
@@ -290,8 +435,8 @@ def assert_live(base_url: str) -> None:
     if not live_auth_code:
         fail("live checks require CODE_FULL or ZADOO_SMOKE_AUTH_CODE because no hardcoded auth default exists")
 
-    legacy_url = base_url.rstrip("/") + "/api/auth?code=" + urllib.parse.quote(_legacy_auth_strings()[0])
-    legacy_request = urllib.request.Request(legacy_url)
+    legacy_url = base_url.rstrip("/") + "/api/auth"
+    legacy_request = urllib.request.Request(legacy_url, headers={"X-Zadoo-Code": _legacy_auth_strings()[0]})
     try:
         with urllib.request.urlopen(legacy_request, timeout=8) as response:
             legacy_status = response.status
@@ -301,8 +446,8 @@ def assert_live(base_url: str) -> None:
     if legacy_status != 401:
         fail(f"live legacy auth returned status={legacy_status}, expected 401")
 
-    auth_url = base_url.rstrip("/") + "/api/auth?code=" + urllib.parse.quote(live_auth_code)
-    auth_request = urllib.request.Request(auth_url)
+    auth_url = base_url.rstrip("/") + "/api/auth"
+    auth_request = urllib.request.Request(auth_url, headers={"X-Zadoo-Code": live_auth_code})
     try:
         with urllib.request.urlopen(auth_request, timeout=8) as response:
             auth_status = response.status

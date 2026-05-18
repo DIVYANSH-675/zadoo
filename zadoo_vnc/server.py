@@ -35,6 +35,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             self.current_fps = startup_profile.target_fps
         self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self.mic_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.input_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_subscribers: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_broadcast_enabled = False
@@ -79,6 +80,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._blocked_keys_in_capture = set()
         self._custom_alert_cooldown_until = 0.0
         self.auth_sessions = {}
+        self._auth_failures = {}
         self._runtime_auth_codes = {}
         self._runtime_auth_generated = False
         self._video_send_tasks = {}
@@ -196,6 +198,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         except Exception:
             request_headers = None
         try:
+            if not self._request_origin_allowed(request_headers):
+                await websocket.close(code=1008, reason="Forbidden")
+                return
             if not self._is_ws_authorized(route_path, request_headers):
                 await websocket.close(code=1008, reason="Forbidden")
                 return

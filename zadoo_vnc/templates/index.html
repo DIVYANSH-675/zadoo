@@ -4649,10 +4649,11 @@
                     try { if (typeof window.connectInput === 'function') window.connectInput(); } catch(_) {}
                 }
                 async function authenticateCode(code){
-                    const res = await fetch('/api/auth?code=' + encodeURIComponent(code), {
+                    const res = await fetch('/api/auth', {
                         method: 'GET',
                         credentials: 'same-origin',
-                        cache: 'no-store'
+                        cache: 'no-store',
+                        headers: { 'X-Zadoo-Code': code }
                     });
                     let payload = {};
                     try { payload = await res.json(); } catch(_) {}

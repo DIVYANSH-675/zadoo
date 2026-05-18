@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -414,9 +415,12 @@ class MediaMixin:
             }).encode()
             await websocket.send(header)
 
+            loop = asyncio.get_event_loop()
             while True:
                 try:
-                    chunk = await asyncio.get_event_loop().run_in_executor(None, self.audio_queue.get)
+                    chunk = await loop.run_in_executor(None, self.audio_queue.get, True, 0.25)
+                except queue.Empty:
+                    continue
                 except Exception:
                     chunk = None
                 if chunk is None:
@@ -437,11 +441,22 @@ class MediaMixin:
                     self.audio_queue.queue.clear()
                 print(" Audio capture stopped (no clients)")
 
+    def _remove_mic_client(self, websocket):
+        try:
+            self.mic_clients.discard(websocket)
+        except Exception:
+            self.mic_clients = set()
+        if not self.mic_clients:
+            self._stop_mic_capture()
+            return True
+        return False
+
     async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
         mic_log = logging.getLogger("mic")
         remote = getattr(websocket, 'remote_address', None)
         mic_log.info("New mic client connected from %s", remote)
         print(f"New mic client connected from {remote}")
+        self.mic_clients.add(websocket)
         try:
             if not self.mic_running:
                 ok = self._start_mic_capture(samplerate=48000, blocksize=960, channels=1)
@@ -467,9 +482,12 @@ class MediaMixin:
             print(f"Mic header sent: sr={hdr['samplerate']} ch={hdr['channels']} fmt={hdr['samplefmt']} block={hdr['blocksize']}")
 
             sent_chunks = 0
+            loop = asyncio.get_event_loop()
             while True:
                 try:
-                    chunk = await asyncio.get_event_loop().run_in_executor(None, self.mic_queue.get)
+                    chunk = await loop.run_in_executor(None, self.mic_queue.get, True, 0.25)
+                except queue.Empty:
+                    continue
                 except Exception:
                     chunk = None
                 if not chunk:
@@ -486,10 +504,9 @@ class MediaMixin:
             mic_log.error("Error in mic_stream_handler for %s: %s", remote, e, exc_info=True)
             print(f"Error in mic_stream_handler: {e}")
         finally:
-            # Stop mic when client disconnects
-            self._stop_mic_capture()
-            mic_log.info("Mic client disconnected from %s; mic capture stopped", remote)
-            print("Mic client disconnected; mic capture stopped")
+            stopped = self._remove_mic_client(websocket)
+            mic_log.info("Mic client disconnected from %s; remaining=%s stopped=%s", remote, len(self.mic_clients), stopped)
+            print(f"Mic client disconnected; remaining={len(self.mic_clients)} stopped={stopped}")
 
     async def video_stream_handler(self, websocket):
         print(f" New video client connected from {websocket.remote_address}")
@@ -504,7 +521,10 @@ class MediaMixin:
                     # Handle any control messages for video stream
                     event = json.loads(message)
                     action = event.get('action')
-                    
+                    if not self._is_ws_action_authorized(websocket, action):
+                        await self._send_ws_forbidden(websocket, action)
+                        continue
+                     
                     if action == 'refresh_tunnel':
                         await self.handle_refresh_via_websocket(websocket)
                     elif action == 'get_public_url':
@@ -1077,8 +1097,7 @@ class MediaMixin:
         sender = asyncio.create_task(ws_to_proc())
         receiver = asyncio.create_task(proc_to_ws())
         try:
-            # Keep the session open as long as either side is active
-            await asyncio.gather(sender, receiver)
+            await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for t in (sender, receiver):
                 if not t.done():

@@ -36,6 +36,39 @@ class CloudflareTunnelManager:
         # Email port configuration (which port to include in email).
         self.email_port = None
 
+    def _env_int(self, name, default, minimum=None, maximum=None):
+        try:
+            value = int(str(os.getenv(name, default)).strip())
+        except Exception:
+            value = int(default)
+        if minimum is not None:
+            value = max(int(minimum), value)
+        if maximum is not None:
+            value = min(int(maximum), value)
+        return value
+
+    def _verify_cloudflared_signature(self):
+        if os.name != "nt" or os.getenv("ZADOO_SKIP_CLOUDFLARED_SIGNATURE_CHECK", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        if not self.cloudflared_path or not os.path.exists(self.cloudflared_path):
+            return False
+        try:
+            quoted_path = self.cloudflared_path.replace("'", "''")
+            command = f"(Get-AuthenticodeSignature -LiteralPath '{quoted_path}').Status"
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and (result.stdout or "").strip().lower() == "valid":
+                return True
+            logging.error("cloudflared signature verification failed: %s %s", result.stdout.strip(), result.stderr.strip())
+        except Exception:
+            logging.error("cloudflared signature verification failed", exc_info=True)
+        return False
+
     def download_cloudflared(self):
         """Download cloudflared if not present."""
         self.cloudflared_path = os.path.join(os.getcwd(), "cloudflared.exe")
@@ -47,8 +80,9 @@ class CloudflareTunnelManager:
         try:
             print(" Downloading cloudflared...")
             url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+            timeout = self._env_int("ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT", 30, 1, 600)
 
-            with urllib.request.urlopen(url) as response, open(self.cloudflared_path, "wb") as out_file:
+            with urllib.request.urlopen(url, timeout=timeout) as response, open(self.cloudflared_path, "wb") as out_file:
                 out_file.write(response.read())
 
             print(" Downloaded cloudflared.exe")
@@ -63,6 +97,9 @@ class CloudflareTunnelManager:
         if not self.cloudflared_path or not os.path.exists(self.cloudflared_path):
             if not self.download_cloudflared():
                 return None, None
+        if not self._verify_cloudflared_signature():
+            print(" Refusing to run cloudflared.exe because signature verification failed")
+            return None, None
 
         try:
             cmd = [self.cloudflared_path, "tunnel", "--url", f"http://localhost:{port}"]

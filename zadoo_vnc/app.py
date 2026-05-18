@@ -141,6 +141,9 @@ class ProcessProtector:
             pass
 
     def signal_handler(self, signum, frame):
+        if signum == signal.SIGINT:
+            self.cleanup()
+            raise KeyboardInterrupt
         if self.protected:
             self.restart_protection()
 
@@ -177,7 +180,13 @@ def main():
     configure_logging()
     _load_dotenv()
 
-    if getattr(sys, "frozen", False):
+    disable_startup_task = os.environ.get("ZADOO_DISABLE_STARTUP_TASK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if getattr(sys, "frozen", False) and not disable_startup_task:
         install_startup_task()
 
     use_process_protector = os.environ.get("ZADOO_DISABLE_PROCESS_PROTECTOR", "").strip().lower() not in {

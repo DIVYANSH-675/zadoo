@@ -24,6 +24,36 @@ from .logging_utils import _log_except, _log_try_ok
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
     AUTH_TTL_SECONDS = 3600
+    FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+    VIEW_ACTIONS = {
+        "client_stream_stats",
+        "cursor_broadcast",
+        "get_available_capture_methods",
+        "get_capture_stats",
+        "get_public_url",
+        "get_stream_status",
+        "mic_event",
+        "snap_event",
+        "stream_ping",
+        "verify_capture_method",
+    }
+    CONTROL_ACTIONS = {
+        "click",
+        "control",
+        "drag",
+        "get_clipboard",
+        "key",
+        "key_combo",
+        "move",
+        "scroll",
+        "set_clipboard",
+        "set_clipboard_image",
+        "set_fps",
+        "set_quality",
+        "type_text",
+    }
+    ADVANCED_ACTIONS = {"set_capture_method", "set_performance"}
+    HOST_ACTIONS = {"refresh_tunnel", "toggle_keystroke_capture"}
 
     def _json_response(self, payload, status=http.HTTPStatus.OK, extra_headers=None):
         headers = Headers()
@@ -82,6 +112,129 @@ class RoutesMixin:
                 return request_headers.get(name.lower(), default)
             except Exception:
                 return default
+
+    def _env_enabled(self, name, default="0"):
+        return str(os.getenv(name, default)).strip().lower() not in self.FALSE_VALUES
+
+    def _env_int(self, name, default, minimum=None, maximum=None):
+        try:
+            value = int(str(os.getenv(name, default)).strip())
+        except Exception:
+            value = int(default)
+        if minimum is not None:
+            value = max(int(minimum), value)
+        if maximum is not None:
+            value = min(int(maximum), value)
+        return value
+
+    def _request_identity(self, request_headers):
+        for name in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
+            raw = self._header_get(request_headers, name, "")
+            if raw:
+                return str(raw).split(",", 1)[0].strip() or "default"
+        return self._header_get(request_headers, "Host", "default") or "default"
+
+    def _auth_lockout_remaining(self, request_headers):
+        key = self._request_identity(request_headers)
+        state = getattr(self, "_auth_failures", {}).get(key)
+        if not isinstance(state, dict):
+            return 0
+        remaining = float(state.get("locked_until", 0.0) or 0.0) - time.time()
+        return max(0, int(remaining))
+
+    def _record_auth_failure(self, request_headers):
+        key = self._request_identity(request_headers)
+        failures = getattr(self, "_auth_failures", None)
+        if not isinstance(failures, dict):
+            self._auth_failures = {}
+            failures = self._auth_failures
+        now = time.time()
+        window = self._env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
+        max_failures = self._env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
+        lockout = self._env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
+        state = failures.setdefault(key, {"times": [], "locked_until": 0.0})
+        times = [float(ts) for ts in state.get("times", []) if now - float(ts) <= window]
+        times.append(now)
+        state["times"] = times
+        if len(times) >= max_failures:
+            state["locked_until"] = now + lockout
+            return lockout
+        return 0
+
+    def _record_auth_success(self, request_headers):
+        try:
+            getattr(self, "_auth_failures", {}).pop(self._request_identity(request_headers), None)
+        except Exception:
+            pass
+
+    def _request_origin_allowed(self, request_headers):
+        origin = self._header_get(request_headers, "Origin", "")
+        if not origin:
+            return True
+        allowed = [
+            item.strip().rstrip("/")
+            for item in str(os.getenv("ZADOO_ALLOWED_ORIGINS", "")).split(",")
+            if item.strip()
+        ]
+        if "*" in allowed:
+            return True
+        try:
+            parsed = urllib.parse.urlparse(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return False
+            normalized_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            if normalized_origin in {item.lower() for item in allowed}:
+                return True
+            host = str(self._header_get(request_headers, "Host", "") or "").lower()
+            return bool(host and parsed.netloc.lower() == host)
+        except Exception:
+            return False
+
+    def _headers_for_websocket(self, websocket):
+        try:
+            request_headers = getattr(getattr(websocket, "request", None), "headers", None)
+            if request_headers is None:
+                request_headers = getattr(websocket, "request_headers", None)
+            return request_headers
+        except Exception:
+            return None
+
+    def _role_for_headers(self, request_headers):
+        session = self._session_for_headers(request_headers)
+        if not isinstance(session, dict):
+            return None
+        return session.get("role")
+
+    def _feature_for_action(self, action):
+        action = str(action or "")
+        if action in self.VIEW_ACTIONS:
+            return "view"
+        if action in self.CONTROL_ACTIONS:
+            return "control"
+        if action in self.ADVANCED_ACTIONS:
+            return "advanced"
+        if action in self.HOST_ACTIONS:
+            return "host"
+        return None
+
+    def _is_ws_action_authorized_for_headers(self, request_headers, action):
+        feature = self._feature_for_action(action)
+        if feature is None:
+            return False
+        return self._role_allows(self._role_for_headers(request_headers), feature)
+
+    def _is_ws_action_authorized(self, websocket, action):
+        return self._is_ws_action_authorized_for_headers(self._headers_for_websocket(websocket), action)
+
+    async def _send_ws_forbidden(self, websocket, action):
+        try:
+            await websocket.send(json.dumps({
+                "type": "error",
+                "error": "Forbidden",
+                "action": action,
+            }))
+        except Exception:
+            pass
 
     def _cookie_value(self, request_headers, name):
         cookie_header = self._header_get(request_headers, "Cookie", "")
@@ -225,13 +378,45 @@ class RoutesMixin:
             return False
         return self._is_authorized(request_headers, feature)
 
-    async def handle_auth(self, path):
+    def _auth_code_from_request(self, path, request_headers):
+        header_code = self._header_get(request_headers, "X-Zadoo-Code", "")
+        if header_code:
+            return str(header_code), "header"
         parsed = urllib.parse.urlparse(str(path or ""))
         query = urllib.parse.parse_qs(parsed.query or "")
-        role = self._match_auth_code((query.get("code") or [""])[0])
+        query_code = (query.get("code") or [""])[0]
+        if query_code:
+            if not self._env_enabled("ZADOO_ALLOW_QUERY_AUTH", "0"):
+                return None, "query_disabled"
+            return str(query_code), "query"
+        return "", "missing"
+
+    async def handle_auth(self, path, request_headers=None):
+        lockout_remaining = self._auth_lockout_remaining(request_headers)
+        if lockout_remaining > 0:
+            return self._json_response(
+                {"success": False, "error": "Too many invalid attempts", "retry_after": lockout_remaining},
+                http.HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        parsed = urllib.parse.urlparse(str(path or ""))
+        code, source = self._auth_code_from_request(parsed.geturl(), request_headers)
+        if source == "query_disabled":
+            return self._json_response(
+                {"success": False, "error": "Query string auth is disabled"},
+                http.HTTPStatus.BAD_REQUEST,
+            )
+        role = self._match_auth_code(code)
         if not role:
+            if code:
+                retry_after = self._record_auth_failure(request_headers)
+                if retry_after:
+                    return self._json_response(
+                        {"success": False, "error": "Too many invalid attempts", "retry_after": retry_after},
+                        http.HTTPStatus.TOO_MANY_REQUESTS,
+                    )
             return self._json_response({"success": False, "error": "Invalid code"}, http.HTTPStatus.UNAUTHORIZED)
 
+        self._record_auth_success(request_headers)
         token = secrets.token_urlsafe(32)
         expires_at = time.time() + self.AUTH_TTL_SECONDS
         sessions = getattr(self, "auth_sessions", None)
@@ -330,6 +515,9 @@ class RoutesMixin:
 
         logging.debug("process_request: path=%s", path)
 
+        if not self._request_origin_allowed(request_headers):
+            return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:
             hdrs = request_headers
@@ -394,7 +582,7 @@ class RoutesMixin:
                 body=html.encode("utf-8"),
             )
         elif route_path == "/api/auth":
-            return await self.handle_auth(path)
+            return await self.handle_auth(path, request_headers)
         elif isinstance(path, str) and route_path == "/api/public-url":
             try:
                 return self._json_response(json.loads(await self.handle_get_public_url()))

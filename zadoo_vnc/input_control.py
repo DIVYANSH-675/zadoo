@@ -111,6 +111,9 @@ class InputControlMixin:
                     event = json.loads(message)
                     action = event.get('action')
                     _log_try_ok("input_event_handler.message", action or '')
+                    if not self._is_ws_action_authorized(websocket, action):
+                        await self._send_ws_forbidden(websocket, action)
+                        continue
 
                     # Control toggle: block/unblock host input and cursor broadcast
                     if action == 'control':
@@ -350,15 +353,22 @@ class InputControlMixin:
             import tempfile
 
             mime = str(event.get("mime") or "image/png").lower()
-            data_b64 = event.get("data_base64") or ""
+            if mime not in {"image/png", "image/jpeg", "image/jpg"}:
+                raise ValueError("unsupported image MIME type")
+            data_b64 = str(event.get("data_base64") or "")
             if "," in data_b64:
                 data_b64 = data_b64.split(",", 1)[1]
             if not data_b64:
                 raise ValueError("missing image data")
 
+            max_bytes = self._env_int("ZADOO_CLIPBOARD_IMAGE_MAX_BYTES", 5_000_000, 1, 100_000_000)
+            if len(data_b64.encode("ascii", errors="ignore")) > ((max_bytes + 2) // 3) * 4 + 4096:
+                raise ValueError("image clipboard payload exceeds size limit")
             image_data = base64.b64decode(data_b64, validate=True)
             if not image_data:
                 raise ValueError("empty image data")
+            if len(image_data) > max_bytes:
+                raise ValueError("image clipboard payload exceeds size limit")
 
             suffix = ".jpg" if "jpeg" in mime or "jpg" in mime else ".png"
             temp_file_path = None
@@ -454,6 +464,11 @@ class InputControlMixin:
                     content = ''
             
             # Send clipboard content with metadata for remote connections
+            error = None
+            max_bytes = self._env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
+            if len((content or '').encode("utf-8", errors="ignore")) > max_bytes:
+                error = "clipboard text exceeds size limit"
+                content = ''
             clipboard_data = {
                 'type': 'clipboard_content',
                 'data': content or '',
@@ -461,6 +476,8 @@ class InputControlMixin:
                 'source': 'server',
                 'length': len(content or '')
             }
+            if error:
+                clipboard_data['error'] = error
             
             asyncio.run_coroutine_threadsafe(
                 websocket.send(json.dumps(clipboard_data)),
@@ -489,6 +506,9 @@ class InputControlMixin:
             data = event.get('data', '')
             if not isinstance(data, str):
                 data = str(data if data is not None else '')
+            max_bytes = self._env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
+            if len(data.encode("utf-8", errors="ignore")) > max_bytes:
+                raise ValueError("clipboard text exceeds size limit")
             ok = False
             
             if HAS_PYPERCLIP:
