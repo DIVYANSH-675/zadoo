@@ -7,6 +7,7 @@ import threading
 import time
 
 from .dependencies import *
+from .logging_utils import _log_fallback
 
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
@@ -96,8 +97,10 @@ class ScreenCapturer(threading.Thread):
                 logging.info("fast_ctypes_screenshots capture backend initialized")
             except Exception as e:
                 self.fast_ctypes_capture = None
+                _log_fallback("screen_capture.fast_ctypes_init", "fallback_capture_backends", str(e), e)
                 logging.warning("fast_ctypes_screenshots initialization failed; using fallback capture backends: %s", e)
         else:
+            _log_fallback("screen_capture.fast_ctypes_init", "fallback_capture_backends", "fast_ctypes_not_installed")
             logging.debug("Optional fast_ctypes_screenshots backend is not installed; using fallback capture backends")
         
         next_deadline = time.perf_counter()
@@ -215,6 +218,7 @@ class ScreenCapturer(threading.Thread):
         # Helper: ROI mode active?
         roi_mode = bool(getattr(self, "perf_enabled", False) and getattr(self, "perf_region", "full") != "full")
         if self.capture_method != "auto" and self._backend_is_disabled(self.capture_method):
+            _log_fallback("screen_capture.capture_method", "auto", f"{self.capture_method}_cooldown")
             logging.warning("%s capture backend is cooling down; falling back to auto", self.capture_method)
             self.capture_method = "auto"
             self.capture_stats['method_switches'] += 1
@@ -233,6 +237,7 @@ class ScreenCapturer(threading.Thread):
                     self.active_capture_method = "dxcam"
                 return frame
             except Exception as e:
+                _log_fallback("screen_capture.explicit_dxcam", "auto_or_none", str(e), e)
                 logging.warning("DXCam capture failed", exc_info=True)
                 if self.capture_method != "auto":
                     return None
@@ -244,6 +249,7 @@ class ScreenCapturer(threading.Thread):
                     self.active_capture_method = "fast_ctypes"
                 return frame
             except Exception as e:
+                _log_fallback("screen_capture.explicit_fast_ctypes", "auto_or_none", str(e), e)
                 logging.warning("fast_ctypes capture failed", exc_info=True)
                 if self.capture_method != "auto":
                     return None
@@ -264,7 +270,8 @@ class ScreenCapturer(threading.Thread):
                 frame = np.ascontiguousarray(arr[..., :3][:, :, ::-1])
                 self.active_capture_method = "mss"
                 return frame
-            except mss.exception.ScreenShotError:
+            except mss.exception.ScreenShotError as exc:
+                _log_fallback("screen_capture.explicit_mss", "auto_or_none", str(exc), exc)
                 logging.warning("mss.grab failed", exc_info=True)
                 if self.capture_method != "auto":
                     return None
@@ -277,7 +284,8 @@ class ScreenCapturer(threading.Thread):
                     self.active_capture_method = "bettercam"
                     logging.debug("BetterCam capture succeeded (explicit)")
                 return frame
-            except Exception:
+            except Exception as exc:
+                _log_fallback("screen_capture.explicit_bettercam", "auto_or_none", str(exc), exc)
                 logging.exception("BetterCam explicit capture threw exception")
                 if self.capture_method != "auto":
                     return None
@@ -288,17 +296,22 @@ class ScreenCapturer(threading.Thread):
                 if frame is not None:
                     self.active_capture_method = "gdi"
                 return frame
-            except Exception:
+            except Exception as exc:
+                _log_fallback("screen_capture.explicit_gdi", "auto_or_none", str(exc), exc)
                 if self.capture_method != "auto":
                     return None
         
         # Auto mode: try methods in order of performance
         if self.capture_method == "auto":
+            failed_methods = []
             for method in self._auto_method_order(roi_mode):
                 frame = self._grab_auto_method(method, sct, roi_mode)
                 if frame is not None:
+                    if failed_methods:
+                        _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
                     self.active_capture_method = method
                     return frame
+                failed_methods.append(method)
         
         logging.error("All screen capture methods failed.")
         return None
@@ -403,9 +416,11 @@ class ScreenCapturer(threading.Thread):
             elif method == "gdi" and HAS_PIL:
                 frame = self._grab_screen_gdi()
             if frame is None:
+                _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_returned_no_frame")
                 self._record_backend_failure(method)
             return frame
-        except Exception:
+        except Exception as exc:
+            _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_exception", exc)
             self._record_backend_failure(method)
             logging.debug("Auto capture method failed: %s", method, exc_info=True)
         return None
@@ -469,7 +484,8 @@ class ScreenCapturer(threading.Thread):
                         logging.info("BetterCam: releasing DXCam before initialization")
                         try:
                             self.dxcam_camera.release()
-                        except Exception:
+                        except Exception as exc:
+                            _log_fallback("screen_capture.bettercam_init", "continue_without_dxcam_release", "dxcam_release_failed", exc)
                             pass
                         self.dxcam_camera = None
                 except Exception:
@@ -501,7 +517,8 @@ class ScreenCapturer(threading.Thread):
                         else:
                             self.bettercam_camera.start()
                         self.bettercam_started = True
-                    except Exception:
+                    except Exception as exc:
+                        _log_fallback("screen_capture.bettercam_start", "direct_grab", "start_failed", exc)
                         logging.exception("BetterCam start() failed (continuing)")
                         # Some versions auto-start; continue
                         pass
@@ -554,6 +571,7 @@ class ScreenCapturer(threading.Thread):
 
     def _grab_screen_winrt(self):
         """Backward-compatible alias for the old WinRT-labelled GDI fallback."""
+        _log_fallback("screen_capture.winrt_alias", "gdi", "winrt_is_gdi_compat_alias")
         return self._grab_screen_gdi()
 
     def _release_dxcam(self):
@@ -594,7 +612,8 @@ class ScreenCapturer(threading.Thread):
                     if getattr(self, 'perf_grayscale', False):
                         try:
                             arr = (0.299*arr[:, :, 0] + 0.587*arr[:, :, 1] + 0.114*arr[:, :, 2]).astype(np.uint8)
-                        except Exception:
+                        except Exception as exc:
+                            _log_fallback("screen_capture.grayscale", "color_frame", "grayscale_conversion_failed", exc)
                             pass
                 # Optional integer downscale (decimation)
                 if getattr(self, 'perf_enabled', False) and getattr(self, 'perf_scale_div', 1) and self.perf_scale_div > 1:
@@ -603,7 +622,8 @@ class ScreenCapturer(threading.Thread):
                             arr = arr[::self.perf_scale_div, ::self.perf_scale_div, :]
                         else:
                             arr = arr[::self.perf_scale_div, ::self.perf_scale_div]
-                    except Exception:
+                    except Exception as exc:
+                        _log_fallback("screen_capture.downscale", "undownscaled_frame", "downscale_failed", exc)
                         pass
                 if HAS_IMAGECODECS:
                     try:
@@ -611,7 +631,8 @@ class ScreenCapturer(threading.Thread):
                         if not arr.flags.c_contiguous:
                             arr = np.ascontiguousarray(arr)
                         return imagecodecs.jpeg_encode(arr, level=self.quality)
-                    except Exception:
+                    except Exception as exc:
+                        _log_fallback("screen_capture.jpeg_encoder", "pillow_jpeg", "imagecodecs_jpeg_failed", exc)
                         logging.warning("imagecodecs jpeg_encode failed  falling back", exc_info=True)
                         HAS_IMAGECODECS = False
                 if HAS_PIL:
@@ -620,7 +641,8 @@ class ScreenCapturer(threading.Thread):
                     if getattr(self, 'perf_grayscale', False) and img.mode != 'L':
                         try:
                             img = img.convert('L')
-                        except Exception:
+                        except Exception as exc:
+                            _log_fallback("screen_capture.pillow_grayscale", "pillow_original_mode", "convert_l_failed", exc)
                             pass
                     img.save(buffer, format='JPEG', quality=self.quality)
                     return buffer.getvalue()

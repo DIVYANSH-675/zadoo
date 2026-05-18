@@ -18,6 +18,7 @@ import websockets
 
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
 from .dependencies import *
+from .logging_utils import _log_fallback
 from .win32_input import *
 
 class MediaMixin:
@@ -818,6 +819,7 @@ class MediaMixin:
                         break
                 # Fallback attempts with generic device strings
                 if not open_ok and not selected_cv2_only:
+                    _log_fallback("webcam.open", "generic_dshow_devices", "named_dshow_candidates_failed")
                     for generic in ("video=0", "0", "video=1", "1"):
                         for opts in option_sets:
                             try:
@@ -840,6 +842,7 @@ class MediaMixin:
 
             if not open_ok and HAS_AIORTC and not selected_cv2_only:
                 # Fallback to aiortc MediaPlayer with dshow
+                _log_fallback("webcam.open", "aiortc_media_player", "pyav_dshow_failed")
                 try:
                     from aiortc.contrib.media import MediaPlayer
                     for name in candidates:
@@ -887,6 +890,7 @@ class MediaMixin:
                     cv2 = None
                     print(f"  OpenCV not available for webcam fallback: {e}")
                 if cv2 is not None:
+                    _log_fallback("webcam.open", "opencv_dshow", "pyav_and_aiortc_failed")
                     for index in cv2_indices:
                         try:
                             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
@@ -1042,10 +1046,13 @@ class MediaMixin:
                     proc_reader = proc
                     use_pty = True
                 except Exception:
+                    _log_fallback("terminal.shell", "subprocess_pipe", "winpty_spawn_failed")
                     proc = None
                     use_pty = False
 
             if not use_pty:
+                if not os.path.exists(ps_path):
+                    _log_fallback("terminal.shell", "cmd.exe", "powershell_not_found")
                 shell_cmd = [ps_path, '-NoLogo', '-NoExit'] if os.path.exists(ps_path) else [cmd_path, '/K', 'chcp 65001']
                 proc = subprocess.Popen(
                         shell_cmd,

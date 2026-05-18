@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sys
 
+from .logging_utils import _log_fallback
+
 _DPI_AWARENESS_ATTEMPTED = False
 
 
@@ -26,7 +28,8 @@ def get_primary_screen_size():
             ensure_process_dpi_aware_once()
             u32 = _ct.windll.user32
             return int(u32.GetSystemMetrics(0)), int(u32.GetSystemMetrics(1))
-        except Exception:
+        except Exception as exc:
+            _log_fallback("dpi.primary_screen_size", "pyautogui.size", "win32_metrics_failed", exc)
             pass
     import pyautogui as _pg
     return _pg.size()

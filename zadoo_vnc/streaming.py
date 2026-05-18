@@ -7,6 +7,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 
+from .logging_utils import _log_fallback
 
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 
@@ -46,6 +47,7 @@ def _detect_gpu_names() -> list[str]:
     if platform.system().lower() != "windows":
         return []
     if not _env_enabled("ZADOO_DETECT_GPU_NAMES", "0"):
+        _log_fallback("streaming.gpu_detection", "software_jpeg", "gpu_name_detection_disabled")
         return []
     command = (
         "Get-CimInstance Win32_VideoController | "
@@ -111,8 +113,10 @@ class AdaptiveStreamController:
         self.fallback_reason = ""
         if self.requested_transport.startswith("webrtc") and not self.webrtc_configured:
             self.fallback_reason = "WebRTC transport requested but no TURN, SFU, or signaling URL is configured."
+            _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
         elif self.requested_transport.startswith("webrtc"):
             self.fallback_reason = "WebRTC media mode is staged; adaptive JPEG WebSocket remains active until the media bridge is enabled."
+            _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
 
         start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p120")).strip().lower()
         self.profile_index = self._index_for_name(start_name, default=2)

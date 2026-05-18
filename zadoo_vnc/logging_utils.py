@@ -135,3 +135,16 @@ def _log_except(label: str, e: Exception):
         logging.warning("EXCEPT %s: %s", label, e)
     except Exception:
         pass
+
+
+def _log_fallback(source: str, fallback: str, reason: str = "", exc: Exception | None = None):
+    """Log every intentional runtime fallback with a stable searchable marker."""
+    try:
+        message = "FALLBACK_USED source=%s fallback=%s"
+        args = [source, fallback]
+        if reason:
+            message += " reason=%s"
+            args.append(reason)
+        logging.getLogger("fallback").warning(message, *args, exc_info=exc is not None)
+    except Exception:
+        pass

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 import websockets
 
 from .dependencies import *
-from .logging_utils import _log_except, _log_try_ok
+from .logging_utils import _log_except, _log_fallback, _log_try_ok
 from .win32_input import *
 
 class InputControlMixin:
@@ -468,10 +468,12 @@ class InputControlMixin:
                     print(f" Clipboard content retrieved via pyperclip: {len(content or '')} chars")
                 except Exception as e:
                     print(f" pyperclip failed: {e}")
+                    _log_fallback("clipboard.get_text", "powershell_get_clipboard", str(e), e)
                     content = None
             
             if content is None:
                 # Fallback via PowerShell (Windows)
+                _log_fallback("clipboard.get_text", "powershell_get_clipboard", "pyperclip_unavailable_or_failed")
                 try:
                     import subprocess
                     ps = subprocess.run(['powershell', '-NoProfile', '-Command', 'Get-Clipboard -Raw'], 
@@ -542,10 +544,12 @@ class InputControlMixin:
                     print(f" Clipboard set via pyperclip: {len(data)} chars")
                 except Exception as e:
                     print(f" pyperclip copy failed: {e}")
+                    _log_fallback("clipboard.set_text", "clip_exe", str(e), e)
                     ok = False
             
             if not ok:
                 # Fallback via clip.exe (Windows)
+                _log_fallback("clipboard.set_text", "clip_exe", "pyperclip_unavailable_or_failed")
                 try:
                     import subprocess
                     p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
@@ -555,11 +559,14 @@ class InputControlMixin:
                         print(f" Clipboard set via clip.exe: {len(data)} chars")
                     else:
                         print(f" clip.exe failed with returncode: {p.returncode}")
+                        _log_fallback("clipboard.set_text", "powershell_set_clipboard", f"clip_exit={p.returncode}")
                 except Exception as e:
                     print(f" clip.exe error: {e}")
+                    _log_fallback("clipboard.set_text", "powershell_set_clipboard", str(e), e)
             
             # Additional fallback via PowerShell
             if not ok:
+                _log_fallback("clipboard.set_text", "powershell_set_clipboard", "clip_exe_unavailable_or_failed")
                 try:
                     import subprocess
                     ps_command = (
@@ -613,13 +620,16 @@ class InputControlMixin:
                     ay = int(((py - vy) * 65535) / max(1, vh - 1))
                     ok = _sendinput_mouse_move_abs(ax, ay)
                     if not ok:
+                        _log_fallback("mouse.move", "SetCursorPos", "sendinput_move_failed")
                         user32.SetCursorPos(px, py)
                         try:
                             import win32api
                             win32api.SetCursorPos((px, py))
-                        except Exception:
+                        except Exception as exc:
+                            _log_fallback("mouse.move", "user32_SetCursorPos_only", "win32api_SetCursorPos_failed", exc)
                             pass
-                except Exception:
+                except Exception as exc:
+                    _log_fallback("mouse.move", "SetCursorPos", "sendinput_move_exception", exc)
                     try:
                         user32.SetCursorPos(px, py)
                     except Exception:
@@ -661,8 +671,9 @@ class InputControlMixin:
                             _sendinput_mouse_button(MOUSEEVENTF_RIGHTDOWN)
                         elif state == 'up':
                             _sendinput_mouse_button(MOUSEEVENTF_RIGHTUP)
-                except Exception:
+                except Exception as exc:
                     # Legacy fallback
+                    _log_fallback("mouse.click", "user32.mouse_event", "sendinput_button_failed", exc)
                     try:
                         if button == 'left':
                             user32.mouse_event(MOUSEEVENTF_LEFTDOWN if state == 'down' else MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
@@ -714,8 +725,9 @@ class InputControlMixin:
             if state == 'down':
                 try:
                     pyautogui.keyDown(key_name)
-                except Exception:
+                except Exception as exc:
                     # Fallback to press if keyDown unsupported
+                    _log_fallback("keyboard.key_down", "pyautogui.press", str(exc), exc)
                     try:
                         pyautogui.press(key_name)
                     except Exception:
@@ -806,8 +818,9 @@ class InputControlMixin:
         try:
             import ctypes
             return (ctypes.windll.user32.GetKeyState(0x90) & 1) == 0
-        except Exception:
+        except Exception as exc:
             # Be permissive if we can't read the state
+            _log_fallback("numlock.read_off", "assume_off", str(exc), exc)
             return True
 
     def _numlock_on(self) -> bool:
@@ -815,8 +828,9 @@ class InputControlMixin:
         try:
             import ctypes  # VK_NUMLOCK = 0x90
             return bool(ctypes.windll.user32.GetKeyState(0x90) & 1)
-        except Exception:
+        except Exception as exc:
             # Fallback to keyboard.is_toggled on Windows if available
+            _log_fallback("numlock.read_on", "keyboard.is_toggled", str(exc), exc)
             try:
                 import keyboard
                 return bool(getattr(keyboard, "is_toggled", lambda *_: False)("num lock"))
@@ -1234,21 +1248,25 @@ class InputControlMixin:
             pyautogui.typewrite(text, interval=0)
             return
         if HAS_PYPERCLIP:
+            _log_fallback("keyboard.type_text", "clipboard_paste", "non_ascii_text")
             previous = None
             had_previous = False
             try:
                 previous = pyperclip.paste()
                 had_previous = True
-            except Exception:
+            except Exception as exc:
+                _log_fallback("keyboard.type_text.restore_clipboard", "paste_without_restore", str(exc), exc)
                 pass
             pyperclip.copy(text)
             pyautogui.hotkey('ctrl', 'v')
             if had_previous:
                 try:
                     pyperclip.copy(previous)
-                except Exception:
+                except Exception as exc:
+                    _log_fallback("keyboard.type_text.restore_clipboard", "leave_new_clipboard", str(exc), exc)
                     pass
             return
+        _log_fallback("keyboard.type_text", "ascii_char_loop", "pyperclip_unavailable_for_non_ascii")
         for ch in text:
             if ord(ch) < 128:
                 pyautogui.typewrite(ch, interval=0)

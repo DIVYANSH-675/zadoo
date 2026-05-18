@@ -13,6 +13,7 @@ from .network import get_local_ip
 from .tunnel import CloudflareTunnelManager
 
 from .input_control import InputControlMixin
+from .logging_utils import _log_fallback
 from .media import MediaMixin
 from .routes import RoutesMixin
 from .streaming import AdaptiveStreamController, detect_encoder_capabilities
@@ -136,10 +137,12 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             hook_started = bool(self.start_global_keyboard_hook())
         except Exception as e:
             hook_started = False
+            _log_fallback("host_hotkeys", "poller", str(e), e)
             print(f" Keyboard hook failed to initialize: {e}")
         # If hook isn't active, start fallback poller
         try:
             if not hook_started or not getattr(self, 'keyboard_hook_active', False):
+                _log_fallback("host_hotkeys", "poller", "keyboard_hook_inactive")
                 self.start_host_hotkey_poller()
                 print(" Fallback hotkey poller started (A/B/C/D)")
             else:

@@ -10,6 +10,7 @@ import time
 import urllib.request
 
 from .dependencies import resend
+from .logging_utils import _log_fallback
 from .network import get_local_ip
 
 
@@ -227,6 +228,7 @@ class CloudflareTunnelManager:
                 return self.primary_public_url
 
             try:
+                _log_fallback("tunnel.start_primary", "private_ip_notification", "public_url_unavailable")
                 self.notify_public_url(None, self.email_port)
             except Exception:
                 logging.warning("Failed to send private IP notification for tunnel", exc_info=True)

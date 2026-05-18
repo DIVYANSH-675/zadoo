@@ -20,7 +20,7 @@ from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
 from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, Image, fast_ctypes_screenshots, imagecodecs, mss, np
 from .dpi import get_primary_screen_size
-from .logging_utils import _log_except, _log_try_ok
+from .logging_utils import _log_except, _log_fallback, _log_try_ok
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
@@ -1051,7 +1051,8 @@ class RoutesMixin:
             try:
                 try:
                     sw, sh = get_primary_screen_size()
-                except Exception:
+                except Exception as exc:
+                    _log_fallback("snapshot.rect_screen_size", "pyautogui.size", "primary_screen_size_failed", exc)
                     import pyautogui as _pg
                     sw, sh = _pg.size()
                 x0 = max(0, min(sw, int(float(rect_norm['x0']) * sw)))
@@ -1073,7 +1074,8 @@ class RoutesMixin:
                 # Get desktop size for ratio
                 try:
                     sw2, sh2 = get_primary_screen_size()
-                except Exception:
+                except Exception as exc:
+                    _log_fallback("snapshot.roi_area_screen_size", "pyautogui.size", "primary_screen_size_failed", exc)
                     try:
                         import pyautogui as _pg2
                         sw2, sh2 = _pg2.size()
@@ -1100,9 +1102,11 @@ class RoutesMixin:
                         # Pillow deprecation: mode parameter on fromarray will be removed in Pillow 13
                         try:
                             return Image.fromarray(rgb)
-                        except Exception:
+                        except Exception as exc:
+                            _log_fallback("snapshot.dxcam.image", "Image.frombuffer", "Image.fromarray_failed", exc)
                             return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
             except Exception:
+                _log_fallback("snapshot.capture_backend", "mss_or_other", "dxcam_failed")
                 logging.warning('Snapshot dxcam failed; falling back', exc_info=True)
             return None
 
@@ -1127,9 +1131,11 @@ class RoutesMixin:
                         pass
                     try:
                         return Image.fromarray(rgb)
-                    except Exception:
+                    except Exception as exc:
+                        _log_fallback("snapshot.mss.image", "Image.frombuffer", "Image.fromarray_failed", exc)
                         return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
                 except Exception:
+                    _log_fallback("snapshot.capture_backend", "next_backend", "mss_failed")
                     logging.warning('Snapshot MSS failed', exc_info=True)
             return None
 
@@ -1163,6 +1169,7 @@ class RoutesMixin:
                         img = img.crop(abs_rect)
                     return img
             except Exception:
+                _log_fallback("snapshot.capture_backend", "none", "fast_ctypes_failed")
                 logging.warning('Snapshot fast_ctypes failed; falling back', exc_info=True)
 
         return None
@@ -1200,7 +1207,8 @@ class RoutesMixin:
             if fmt == 'png' and HAS_IMAGECODECS:
                 try:
                     out = imagecodecs.png_encode(arr, level=0)
-                except Exception:
+                except Exception as exc:
+                    _log_fallback("snapshot.png_encoder", "pillow_png", "imagecodecs_png_failed", exc)
                     out = None
             if out is None:
                 buf = _io.BytesIO()

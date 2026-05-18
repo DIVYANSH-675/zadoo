@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from .config import _load_dotenv
-from .logging_utils import _setup_logging_to_file
+from .logging_utils import _log_fallback, _setup_logging_to_file
 from .network import get_local_ip
 
 
@@ -148,7 +148,11 @@ class ProcessProtector:
                 cmd = [sys.executable]
             else:
                 script = Path(__file__).resolve().parent.parent / "zadoo_vnc_single.py"
-                cmd = [sys.executable, str(script)] if script.exists() else [sys.executable, "-m", "zadoo_vnc.app"]
+                if script.exists():
+                    cmd = [sys.executable, str(script)]
+                else:
+                    _log_fallback("process_protector.restart", "python_module_entrypoint", f"missing={script}")
+                    cmd = [sys.executable, "-m", "zadoo_vnc.app"]
             subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             pass

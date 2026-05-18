@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+from .logging_utils import _log_fallback
 from .process_utils import _run_hidden
 
 log = logging.getLogger(__name__)
@@ -126,6 +127,7 @@ def _enumerate_windows_cameras() -> list[dict[str, Any]]:
     metadata = _directshow_metadata()
     devices = _merge_names_and_metadata(names, metadata)
     if not devices:
+        _log_fallback("camera_discovery.enumerate", "powershell_pnp_devices", "pygrabber_directshow_empty")
         devices = _powershell_pnp_devices()
     return normalize_camera_devices(devices)
 
