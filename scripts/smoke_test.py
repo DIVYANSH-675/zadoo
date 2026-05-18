@@ -36,6 +36,8 @@ FORBIDDEN_SOURCE_STRINGS = (
     "resend_api_key_default",
     "email_to_default",
     "iskssj07@gmail.com",
+    "Set-Clipboard -Value @\"\"",
+    "Popen('clip'",
 ) + _legacy_auth_strings()
 
 

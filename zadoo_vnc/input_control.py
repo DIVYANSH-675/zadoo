@@ -487,6 +487,8 @@ class InputControlMixin:
     def _handle_set_clipboard(self, event):
         try:
             data = event.get('data', '')
+            if not isinstance(data, str):
+                data = str(data if data is not None else '')
             ok = False
             
             if HAS_PYPERCLIP:
@@ -502,7 +504,7 @@ class InputControlMixin:
                 # Fallback via clip.exe (Windows)
                 try:
                     import subprocess
-                    p = subprocess.Popen('clip', stdin=subprocess.PIPE, shell=True)
+                    p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
                     _ = p.communicate(input=data.encode('utf-8'))
                     if p.returncode == 0:
                         ok = True
@@ -516,8 +518,18 @@ class InputControlMixin:
             if not ok:
                 try:
                     import subprocess
-                    ps = subprocess.run(['powershell', '-NoProfile', '-Command', f'Set-Clipboard -Value @""\n{data}\n""@'], 
-                                     capture_output=True, text=True, timeout=5)
+                    ps_command = (
+                        "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; "
+                        "Set-Clipboard -Value ([Console]::In.ReadToEnd())"
+                    )
+                    ps = subprocess.run(
+                        ['powershell', '-NoProfile', '-Command', ps_command],
+                        input=data,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        timeout=5,
+                    )
                     if ps.returncode == 0:
                         ok = True
                         print(f" Clipboard set via PowerShell: {len(data)} chars")
