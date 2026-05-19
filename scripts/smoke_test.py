@@ -145,7 +145,7 @@ def assert_imports() -> None:
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
 
-    if not (deps.HAS_PYAUTOGUI and (deps.HAS_MSS or deps.WIN32_AVAILABLE or deps.HAS_PIL)):
+    if not (deps.HAS_PYAUTOGUI and (deps.HAS_DXCAM or deps.HAS_BETTERCAM)):
         fail("core capture/input dependency flags are not usable")
 
     for name, loader in {

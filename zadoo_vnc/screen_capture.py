@@ -20,9 +20,8 @@ class ScreenCapturer(threading.Thread):
         self.is_running = False
         self.quality = quality
         self.fps = fps
-        self.capture_method = "auto"  # auto, dxcam, bettercam, fast_ctypes, mss, gdi
+        self.capture_method = "auto"  # auto, dxcam, bettercam
         self.dxcam_camera = None
-        self.fast_ctypes_capture = None
         self.bettercam_camera = None
         self.bettercam_started = False
         # Lock BetterCam to the known working pair from diagnostics
@@ -74,13 +73,7 @@ class ScreenCapturer(threading.Thread):
 
     def run(self):
         self.is_running = True
-        sct = None
-        if HAS_MSS:
-            try:
-                sct = mss.mss()
-            except Exception:
-                sct = None
-        
+
         # Initialize DXCam if available
         if HAS_DXCAM:
             try:
@@ -88,27 +81,14 @@ class ScreenCapturer(threading.Thread):
             except Exception:
                 self.dxcam_camera = None
         # BetterCam lazy init; created on first use
-        
-        # Initialize fast_ctypes_screenshots if available
-        if HAS_FAST_CTYPES:
-            try:
-                self.fast_ctypes_capture = fast_ctypes_screenshots.ScreenshotOfAllMonitors()
-                logging.info("fast_ctypes_screenshots capture backend initialized")
-            except Exception as e:
-                self.fast_ctypes_capture = None
-                _log_fallback("screen_capture.fast_ctypes_init", "fallback_capture_backends", str(e), e)
-                logging.warning("fast_ctypes_screenshots initialization failed; using fallback capture backends: %s", e)
-        else:
-            _log_fallback("screen_capture.fast_ctypes_init", "fallback_capture_backends", "fast_ctypes_not_installed")
-            logging.debug("Optional fast_ctypes_screenshots backend is not installed; using fallback capture backends")
-        
+
         next_deadline = time.perf_counter()
         while self.is_running:
             loop_start = time.perf_counter()
             try:
                 capture_start = time.perf_counter()
                 with self.capture_control_lock:
-                    frame = self._grab_screen(sct)
+                    frame = self._grab_screen()
                 capture_ms = (time.perf_counter() - capture_start) * 1000.0
                 self._record_backend_perf(self.active_capture_method, capture_ms, frame is not None)
                 # Apply perf-region cropping before encoding (ndarray only)
@@ -185,8 +165,6 @@ class ScreenCapturer(threading.Thread):
                 next_deadline = time.perf_counter()
                 time.sleep(0)
         
-        if sct:
-            sct.close()
         if self.dxcam_camera:
             try:
                 self.dxcam_camera.release()
@@ -203,17 +181,9 @@ class ScreenCapturer(threading.Thread):
                 self.bettercam_camera = None
             except:
                 pass
-        if self.fast_ctypes_capture:
-            try:
-                # fast_ctypes_screenshots uses context manager, no explicit close needed
-                pass
-            except:
-                pass
 
-    def _grab_screen(self, sct):
+    def _grab_screen(self):
         # Use specific method if set, otherwise use auto-detection
-        # Helper: ROI mode active?
-        roi_mode = bool(getattr(self, "perf_enabled", False) and getattr(self, "perf_region", "full") != "full")
         if self.capture_method != "auto" and self._backend_is_disabled(self.capture_method):
             _log_fallback("screen_capture.capture_method", "auto", f"{self.capture_method}_cooldown")
             logging.warning("%s capture backend is cooling down; falling back to auto", self.capture_method)
@@ -238,40 +208,6 @@ class ScreenCapturer(threading.Thread):
                 logging.warning("DXCam capture failed", exc_info=True)
                 if self.capture_method != "auto":
                     return None
-        
-        if self.capture_method == "fast_ctypes" and HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode:
-            try:
-                frame = self._grab_screen_fast_ctypes()
-                if frame is not None:
-                    self.active_capture_method = "fast_ctypes"
-                return frame
-            except Exception as e:
-                _log_fallback("screen_capture.explicit_fast_ctypes", "auto_or_none", str(e), e)
-                logging.warning("fast_ctypes capture failed", exc_info=True)
-                if self.capture_method != "auto":
-                    return None
-        
-        if self.capture_method == "mss" and sct:
-            try:
-                # Prefer primary monitor; sct.monitors[0] is "all monitors"
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                full_w, full_h = int(mon['width']), int(mon['height'])
-
-                # Map perf/custom region to pixels and then to absolute MSS rect
-                roi = self._roi_norm_to_pixels(full_w, full_h)
-                rect = self._roi_pixels_to_mss_rect(roi, mon) if roi else mon
-
-                sct_img = sct.grab(rect)
-                h, w = sct_img.height, sct_img.width
-                arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
-                frame = np.ascontiguousarray(arr[..., :3][:, :, ::-1])
-                self.active_capture_method = "mss"
-                return frame
-            except mss.exception.ScreenShotError as exc:
-                _log_fallback("screen_capture.explicit_mss", "auto_or_none", str(exc), exc)
-                logging.warning("mss.grab failed", exc_info=True)
-                if self.capture_method != "auto":
-                    return None
 
         if self.capture_method == "bettercam" and HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
             try:
@@ -286,23 +222,12 @@ class ScreenCapturer(threading.Thread):
                 logging.exception("BetterCam explicit capture threw exception")
                 if self.capture_method != "auto":
                     return None
-
-        if self.capture_method in {"gdi", "winrt"} and HAS_PIL:
-            try:
-                frame = self._grab_screen_gdi()
-                if frame is not None:
-                    self.active_capture_method = "gdi"
-                return frame
-            except Exception as exc:
-                _log_fallback("screen_capture.explicit_gdi", "auto_or_none", str(exc), exc)
-                if self.capture_method != "auto":
-                    return None
         
         # Auto mode: try methods in order of performance
         if self.capture_method == "auto":
             failed_methods = []
-            for method in self._auto_method_order(roi_mode):
-                frame = self._grab_auto_method(method, sct, roi_mode)
+            for method in self._auto_method_order():
+                frame = self._grab_auto_method(method)
                 if frame is not None:
                     if failed_methods:
                         _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
@@ -351,22 +276,16 @@ class ScreenCapturer(threading.Thread):
             return False
         return True
 
-    def _auto_candidates(self, roi_mode):
+    def _auto_candidates(self):
         methods = []
         if HAS_DXCAM and not self._backend_is_disabled("dxcam"):
             methods.append("dxcam")
         if HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
             methods.append("bettercam")
-        if HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode and not self._backend_is_disabled("fast_ctypes"):
-            methods.append("fast_ctypes")
-        if HAS_MSS and not self._backend_is_disabled("mss"):
-            methods.append("mss")
-        if HAS_PIL and not self._backend_is_disabled("gdi"):
-            methods.append("gdi")
         return methods
 
-    def _auto_method_order(self, roi_mode):
-        methods = self._auto_candidates(roi_mode)
+    def _auto_method_order(self):
+        methods = self._auto_candidates()
         if not methods:
             return []
         base_rank = {name: index for index, name in enumerate(methods)}
@@ -390,7 +309,7 @@ class ScreenCapturer(threading.Thread):
                 ordered.insert(0, probe)
         return ordered
 
-    def _grab_auto_method(self, method, sct, roi_mode):
+    def _grab_auto_method(self, method):
         if self._backend_is_disabled(method):
             return None
         try:
@@ -406,12 +325,6 @@ class ScreenCapturer(threading.Thread):
             elif method == "bettercam" and HAS_BETTERCAM:
                 logging.debug("Attempting BetterCam capture (auto mode)")
                 frame = self._grab_screen_bettercam()
-            elif method == "fast_ctypes" and HAS_FAST_CTYPES and self.fast_ctypes_capture and not roi_mode:
-                frame = self._grab_screen_fast_ctypes()
-            elif method == "mss" and sct:
-                frame = self._grab_screen_mss(sct)
-            elif method == "gdi" and HAS_PIL:
-                frame = self._grab_screen_gdi()
             if frame is None:
                 _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_returned_no_frame")
                 self._record_backend_failure(method)
@@ -421,20 +334,6 @@ class ScreenCapturer(threading.Thread):
             self._record_backend_failure(method)
             logging.debug("Auto capture method failed: %s", method, exc_info=True)
         return None
-
-    def _grab_screen_mss(self, sct):
-        # Prefer primary monitor; sct.monitors[0] is "all monitors"
-        mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-        full_w, full_h = int(mon['width']), int(mon['height'])
-
-        # Map perf/custom region to pixels and then to absolute MSS rect
-        roi = self._roi_norm_to_pixels(full_w, full_h)
-        rect = self._roi_pixels_to_mss_rect(roi, mon) if roi else mon
-
-        sct_img = sct.grab(rect)
-        h, w = sct_img.height, sct_img.width
-        arr = np.frombuffer(sct_img.bgra, dtype=np.uint8).reshape((h, w, 4))
-        return np.ascontiguousarray(arr[..., :3][:, :, ::-1])
 
     def _grab_screen_dxcam(self):
         """DXCam capture method - returns RGB ndarray (region-aware)."""
@@ -459,15 +358,6 @@ class ScreenCapturer(threading.Thread):
             return frame
         except Exception:
             logging.warning("DXCam grab failed", exc_info=True)
-            return None
-
-    def _grab_screen_fast_ctypes(self):
-        """Fast capture using fast_ctypes_screenshots library - RGB ndarray"""
-        try:
-            frame = self.fast_ctypes_capture.screenshot_monitors()
-            return frame
-        except Exception:
-            logging.warning("fast_ctypes capture failed", exc_info=True)
             return None
 
     def _grab_screen_bettercam(self):
@@ -553,17 +443,6 @@ class ScreenCapturer(threading.Thread):
         except Exception:
             logging.warning("BetterCam capture failed", exc_info=True)
             self._disable_backend("bettercam", seconds=45)
-            return None
-
-    def _grab_screen_gdi(self):
-        """Capture using Pillow ImageGrab's GDI-backed screenshot path."""
-        try:
-            if HAS_PIL and hasattr(ImageGrab, 'grab'):
-                frame = ImageGrab.grab()
-                return frame.convert('RGB') if frame else None
-            return None
-        except Exception:
-            logging.warning("GDI ImageGrab capture failed", exc_info=True)
             return None
 
     def _release_dxcam(self):
@@ -654,8 +533,6 @@ class ScreenCapturer(threading.Thread):
 
     def set_capture_method(self, method):
         """Set the screen capture method"""
-        if method == "winrt":
-            method = "gdi"
         available_methods = self.get_available_methods()
         if method in available_methods:
             with self.capture_control_lock:
@@ -684,29 +561,17 @@ class ScreenCapturer(threading.Thread):
         
         logging.debug("Checking available capture methods")
         logging.debug("HAS_DXCAM=%s dxcam_camera=%s", HAS_DXCAM, self.dxcam_camera is not None)
-        logging.debug("HAS_FAST_CTYPES=%s fast_ctypes_capture=%s", HAS_FAST_CTYPES, self.fast_ctypes_capture is not None)
-        logging.debug("HAS_MSS=%s", HAS_MSS)
         logging.debug("HAS_BETTERCAM=%s bettercam_camera=%s", HAS_BETTERCAM, self.bettercam_camera is not None)
         
         if HAS_DXCAM:
             methods.append("dxcam")
             logging.debug("Added dxcam capture method")
-        if HAS_FAST_CTYPES:
-            methods.append("fast_ctypes")
-            logging.debug("Added fast_ctypes capture method")
-        if HAS_MSS:
-            methods.append("mss")
-            logging.debug("Added mss capture method")
         if HAS_BETTERCAM:
             methods.append("bettercam")
             logging.debug("Added bettercam capture method")
-        if HAS_PIL:
-            if "gdi" not in methods:
-                methods.append("gdi")
-                logging.debug("Added gdi capture method")
             
         # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "bettercam", "fast_ctypes", "mss", "gdi"]
+        pref = ["auto", "dxcam", "bettercam"]
         methods = [m for m in pref if m in dict.fromkeys(methods)]
         logging.debug("Available capture methods: %s", methods)
         return methods
@@ -817,17 +682,6 @@ class ScreenCapturer(threading.Thread):
         except Exception:
             pass
         return None
-
-    def _roi_pixels_to_mss_rect(self, roi, mon):
-        """Convert (l,t,r,b) relative to a monitor to MSS dict with absolute desktop coords."""
-        if not roi: return None
-        l, t, r, b = roi
-        return {
-            'left': int(mon['left'] + l),
-            'top':  int(mon['top']  + t),
-            'width':  int(max(1, r - l)),
-            'height': int(max(1, b - t)),
-        }
 
     def _apply_perf_region(self, frame: np.ndarray) -> np.ndarray:
         if not (self.perf_enabled and isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] in (3,4)):

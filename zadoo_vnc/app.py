@@ -214,7 +214,7 @@ def main():
     }
     _protector = ProcessProtector() if use_process_protector else None
 
-    from .dependencies import HAS_MSS, HAS_PIL, HAS_PYAUTOGUI, WIN32_AVAILABLE
+    from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_PYAUTOGUI
     from .screen_capture import ScreenCapturer
     from .server import VNCServer
     from .tunnel import CloudflareTunnelManager
@@ -223,8 +223,8 @@ def main():
     print("COMPLETE VNC WITH TUNNEL")
     print("=" * 60)
 
-    if not (HAS_PYAUTOGUI and (HAS_MSS or WIN32_AVAILABLE or HAS_PIL)):
-        print("Missing critical dependencies for screen capture or input control")
+    if not (HAS_PYAUTOGUI and (HAS_DXCAM or HAS_BETTERCAM)):
+        print("Missing critical dependencies: pyautogui plus dxcam or bettercam are required")
         sys.exit(1)
 
     print(f"\nSystem: {platform.system()} {platform.release()}")
