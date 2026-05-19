@@ -9,6 +9,9 @@ import time
 from .dependencies import *
 from .logging_utils import _log_fallback
 
+_NO_FRAME = object()
+
+
 class ScreenCapturer(threading.Thread):
     # Auto-instrument all methods for detailed logging
     def __init__(self, fps=0, quality=65):
@@ -50,6 +53,9 @@ class ScreenCapturer(threading.Thread):
         self._frame_ready_event = None
         self.backend_perf = {}
         self._backend_disabled_until = {}
+        self._backend_no_frame_counts = {}
+        self._backend_no_frame_since = {}
+        self._backend_no_frame_last_log = {}
         self._auto_probe_counter = 0
         self._auto_probe_index = 0
 
@@ -201,7 +207,10 @@ class ScreenCapturer(threading.Thread):
             try:
                 frame = self._grab_screen_dxcam()
                 if frame is not None:
+                    self._reset_backend_no_frame("dxcam")
                     self.active_capture_method = "dxcam"
+                else:
+                    self._record_backend_no_frame("dxcam")
                 return frame
             except Exception as e:
                 _log_fallback("screen_capture.explicit_dxcam", "auto_or_none", str(e), e)
@@ -228,6 +237,8 @@ class ScreenCapturer(threading.Thread):
             failed_methods = []
             for method in self._auto_method_order():
                 frame = self._grab_auto_method(method)
+                if frame is _NO_FRAME:
+                    return None
                 if frame is not None:
                     if failed_methods:
                         _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
@@ -247,6 +258,7 @@ class ScreenCapturer(threading.Thread):
         stats["samples"] = samples + 1
         stats["avg_ms"] = float(capture_ms) if samples == 0 else (avg_ms * 0.85 + float(capture_ms) * 0.15)
         stats["failures"] = max(0, int(stats.get("failures") or 0) - 1)
+        self._reset_backend_no_frame(method)
 
     def _record_backend_failure(self, method):
         if method in (None, "", "unknown"):
@@ -275,6 +287,47 @@ class ScreenCapturer(threading.Thread):
             self._backend_disabled_until.pop(str(method), None)
             return False
         return True
+
+    def _record_backend_no_frame(self, method):
+        method = str(method or "")
+        if not method:
+            return 0, 0.0
+        now = time.time()
+        stats = self.backend_perf.setdefault(method, {"samples": 0, "avg_ms": 999.0, "failures": 0})
+        stats["no_frames"] = int(stats.get("no_frames") or 0) + 1
+        count = int(self._backend_no_frame_counts.get(method, 0) or 0) + 1
+        self._backend_no_frame_counts[method] = count
+        first_seen = float(self._backend_no_frame_since.setdefault(method, now) or now)
+        return count, max(0.0, now - first_seen)
+
+    def _reset_backend_no_frame(self, method):
+        method = str(method or "")
+        if not method:
+            return
+        self._backend_no_frame_counts.pop(method, None)
+        self._backend_no_frame_since.pop(method, None)
+
+    def _should_fallback_after_no_frame(self, method, count, elapsed):
+        if str(method) != "dxcam":
+            return True
+        with self.frame_lock:
+            has_frame = self.latest_frame_jpeg is not None
+        if not has_frame:
+            return count >= 12 or elapsed >= 0.5
+        return count >= 240 or elapsed >= 5.0
+
+    def _log_no_frame_fallback(self, method, count, elapsed):
+        method = str(method or "")
+        now = time.time()
+        last_log = float(self._backend_no_frame_last_log.get(method, 0.0) or 0.0)
+        if now - last_log < 2.0:
+            return
+        self._backend_no_frame_last_log[method] = now
+        _log_fallback(
+            "screen_capture.auto_backend",
+            "next_backend",
+            f"{method}_no_frame_after_{count}_misses_{elapsed:.2f}s",
+        )
 
     def _auto_candidates(self):
         methods = []
@@ -326,8 +379,12 @@ class ScreenCapturer(threading.Thread):
                 logging.debug("Attempting BetterCam capture (auto mode)")
                 frame = self._grab_screen_bettercam()
             if frame is None:
-                _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_returned_no_frame")
-                self._record_backend_failure(method)
+                count, elapsed = self._record_backend_no_frame(method)
+                if not self._should_fallback_after_no_frame(method, count, elapsed):
+                    return _NO_FRAME
+                self._log_no_frame_fallback(method, count, elapsed)
+            else:
+                self._reset_backend_no_frame(method)
             return frame
         except Exception as exc:
             _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_exception", exc)
