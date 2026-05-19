@@ -1,6 +1,7 @@
 """Adaptive streaming policy and diagnostics for screen video."""
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import subprocess
@@ -23,6 +24,8 @@ class StreamProfile:
 
 
 STREAM_LADDER = (
+    StreamProfile("1080p240", "Max FPS", 240, 52, 1),
+    StreamProfile("720p240", "Max FPS", 240, 48, 2),
     StreamProfile("1080p120", "Fast", 120, 65, 1),
     StreamProfile("900p120", "Fast", 120, 56, 1),
     StreamProfile("720p120", "Fast", 120, 54, 2),
@@ -119,7 +122,8 @@ class AdaptiveStreamController:
             _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
 
         start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p120")).strip().lower()
-        self.profile_index = self._index_for_name(start_name, default=2)
+        default_index = self._index_for_name("720p120", default=0)
+        self.profile_index = self._index_for_name(start_name, default=default_index)
         self.last_change_at = 0.0
         self.last_eval_at = 0.0
         self.good_intervals = 0
@@ -134,6 +138,7 @@ class AdaptiveStreamController:
         self.effective_target_fps = self.profile.target_fps
         self.fps_cap_reason = ""
         self.downshift_reason = "startup"
+        self._last_applied_signature = None
 
     def _index_for_name(self, name: str, default: int = 0) -> int:
         for index, profile in enumerate(STREAM_LADDER):
@@ -153,7 +158,12 @@ class AdaptiveStreamController:
         self.effective_target_fps = target_fps
         server.current_fps = target_fps
         capturer = getattr(server, "screen_capturer", None)
-        quality = int(getattr(server, "current_quality", 65) or 65)
+        quality_locked = bool(getattr(server, "_quality_locked_by_user", False))
+        if quality_locked:
+            quality = int(getattr(server, "current_quality", profile.quality) or profile.quality)
+        else:
+            quality = int(profile.quality)
+            server.current_quality = quality
         scale_div = int(profile.scale_div)
         if quality >= 85:
             scale_div = 1
@@ -166,11 +176,25 @@ class AdaptiveStreamController:
         self.effective_scale_div = scale_div
         if capturer is not None:
             capturer.fps = target_fps
+            capturer.quality = quality
             try:
                 capturer.set_performance_mode(scale_div > 1, "full", scale_div)
                 capturer.set_grayscale(bool(profile.grayscale))
             except Exception:
                 pass
+        signature = (profile.name, target_fps, quality, scale_div, bool(profile.grayscale), quality_locked)
+        if signature != self._last_applied_signature:
+            logging.getLogger("streaming").info(
+                "Stream profile applied profile=%s target_fps=%s quality=%s scale_div=%s grayscale=%s quality_locked=%s reason=%s",
+                profile.name,
+                target_fps,
+                quality,
+                scale_div,
+                bool(profile.grayscale),
+                quality_locked,
+                self.last_reason,
+            )
+            self._last_applied_signature = signature
         return profile
 
     def record_client_stats(self, payload: dict) -> None:
@@ -219,6 +243,12 @@ class AdaptiveStreamController:
             "capture_ms": float(capture_stats.get("last_capture_ms") or 0.0),
             "encode_ms": float(capture_stats.get("last_encode_ms") or 0.0),
             "capture_fps": float(capture_stats.get("current_fps") or 0.0),
+            "target_fps": int(capture_stats.get("target_fps") or 0),
+            "quality": int(capture_stats.get("quality") or 0),
+            "scale_div": int(capture_stats.get("perf_scale_div") or 1),
+            "jpeg_encoder": str(capture_stats.get("jpeg_encoder") or "unknown"),
+            "active_method": str(capture_stats.get("active_method") or "unknown"),
+            "dxcam_ring_buffer": bool(capture_stats.get("dxcam_ring_buffer")),
         }
         if not self.enabled or now - self.last_eval_at < 1.0:
             return False
@@ -277,6 +307,17 @@ class AdaptiveStreamController:
                 self.last_reason = self.fps_cap_reason
                 if self.measured_fps_cap != old_cap:
                     self.last_change_at = now
+                    logging.getLogger("streaming").info(
+                        "Stream FPS cap applied cap=%s reason=%s capture_ms=%.2f encode_ms=%.2f capture_fps=%.1f display_fps=%.1f max_buffer=%s skipped_delta=%s",
+                        self.measured_fps_cap,
+                        self.fps_cap_reason,
+                        capture_ms,
+                        encode_ms,
+                        capture_fps,
+                        display_fps,
+                        max_write_buffer,
+                        skipped_delta,
+                    )
                 return self.measured_fps_cap != old_cap
             if self.profile_index < len(STREAM_LADDER) - 1 and now - self.last_change_at >= 1.5:
                 self.profile_index += 1
@@ -292,6 +333,18 @@ class AdaptiveStreamController:
                     reasons.append("host_capture_encode")
                 self.last_reason = ",".join(reasons) or "overloaded"
                 self.downshift_reason = self.last_reason
+                logging.getLogger("streaming").info(
+                    "Stream downshift profile=%s reason=%s capture_ms=%.2f encode_ms=%.2f capture_fps=%.1f display_fps=%.1f max_buffer=%s skipped_delta=%s frame_age_ms=%.1f",
+                    self.profile.name,
+                    self.last_reason,
+                    capture_ms,
+                    encode_ms,
+                    capture_fps,
+                    display_fps,
+                    max_write_buffer,
+                    skipped_delta,
+                    frame_age_ms,
+                )
                 return True
             self.last_reason = "overloaded"
             self.downshift_reason = cap_reason or self.last_reason
@@ -317,6 +370,7 @@ class AdaptiveStreamController:
             self.last_change_at = now
             self.last_reason = "stable_headroom"
             self.downshift_reason = self.last_reason
+            logging.getLogger("streaming").info("Stream FPS cap relaxed cap=%s", self.measured_fps_cap)
             return True
 
         if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0:
@@ -325,6 +379,7 @@ class AdaptiveStreamController:
             self.last_change_at = now
             self.last_reason = "stable_headroom"
             self.downshift_reason = self.last_reason
+            logging.getLogger("streaming").info("Stream upshift profile=%s reason=stable_headroom", self.profile.name)
             return True
         self.last_reason = "stable"
         return False

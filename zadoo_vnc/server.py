@@ -27,13 +27,14 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.enable_tunnel = True
         self.screen_capturer = None
         self.current_quality = 65
-        self._quality_locked_by_user = True
+        self._quality_locked_by_user = False
         self.current_fps = 0
         self.encoder_capabilities = detect_encoder_capabilities()
         self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
         if self.adaptive_stream.enabled:
             startup_profile = self.adaptive_stream.profile
             self.current_fps = startup_profile.target_fps
+            self.current_quality = startup_profile.quality
         self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.mic_clients: Set[websockets.WebSocketServerProtocol] = set()

@@ -25,6 +25,10 @@ class ScreenCapturer(threading.Thread):
         self.fps = fps
         self.capture_method = "auto"  # auto, dxcam, bettercam
         self.dxcam_camera = None
+        self.dxcam_started = False
+        self._dxcam_active_region = None
+        self._dxcam_active_target_fps = None
+        self._dxcam_source_region_applied = False
         self.bettercam_camera = None
         self.bettercam_started = False
         # Lock BetterCam to the known working pair from diagnostics
@@ -58,6 +62,10 @@ class ScreenCapturer(threading.Thread):
         self._backend_no_frame_last_log = {}
         self._auto_probe_counter = 0
         self._auto_probe_index = 0
+        self._last_auto_fallback_key = None
+        self._last_auto_fallback_log = 0.0
+        self._last_capture_source_region_applied = False
+        self._last_jpeg_encoder = "unknown"
 
     def set_frame_event(self, loop, event):
         self._frame_event_loop = loop
@@ -95,10 +103,11 @@ class ScreenCapturer(threading.Thread):
                 capture_start = time.perf_counter()
                 with self.capture_control_lock:
                     frame = self._grab_screen()
+                    source_region_applied = self._last_capture_source_region_applied
                 capture_ms = (time.perf_counter() - capture_start) * 1000.0
                 self._record_backend_perf(self.active_capture_method, capture_ms, frame is not None)
                 # Apply perf-region cropping before encoding (ndarray only)
-                if isinstance(frame, np.ndarray):
+                if isinstance(frame, np.ndarray) and not source_region_applied:
                     frame = self._apply_perf_region(frame)
                 if frame is not None:
                     # Aggressive drop: if encoder is busy, skip this frame.
@@ -171,24 +180,11 @@ class ScreenCapturer(threading.Thread):
                 next_deadline = time.perf_counter()
                 time.sleep(0)
         
-        if self.dxcam_camera:
-            try:
-                self.dxcam_camera.release()
-            except:
-                pass
-        if self.bettercam_camera:
-            try:
-                # Stop BetterCam to avoid __del__ errors on some versions
-                if hasattr(self.bettercam_camera, 'stop') and self.bettercam_started:
-                    try:
-                        self.bettercam_camera.stop()
-                    except Exception:
-                        pass
-                self.bettercam_camera = None
-            except:
-                pass
+        self._release_dxcam()
+        self._release_bettercam()
 
     def _grab_screen(self):
+        self._last_capture_source_region_applied = False
         # Use specific method if set, otherwise use auto-detection
         if self.capture_method != "auto" and self._backend_is_disabled(self.capture_method):
             _log_fallback("screen_capture.capture_method", "auto", f"{self.capture_method}_cooldown")
@@ -241,7 +237,7 @@ class ScreenCapturer(threading.Thread):
                     return None
                 if frame is not None:
                     if failed_methods:
-                        _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
+                        self._log_auto_fallback(method, failed_methods)
                     self.active_capture_method = method
                     return frame
                 failed_methods.append(method)
@@ -329,6 +325,15 @@ class ScreenCapturer(threading.Thread):
             f"{method}_no_frame_after_{count}_misses_{elapsed:.2f}s",
         )
 
+    def _log_auto_fallback(self, method, failed_methods):
+        key = (str(method or ""), tuple(str(item) for item in failed_methods or ()))
+        now = time.time()
+        if key == self._last_auto_fallback_key and now - self._last_auto_fallback_log < 5.0:
+            return
+        self._last_auto_fallback_key = key
+        self._last_auto_fallback_log = now
+        _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
+
     def _auto_candidates(self):
         methods = []
         if HAS_DXCAM and not self._backend_is_disabled("dxcam"):
@@ -392,29 +397,88 @@ class ScreenCapturer(threading.Thread):
             logging.debug("Auto capture method failed: %s", method, exc_info=True)
         return None
 
-    def _grab_screen_dxcam(self):
-        """DXCam capture method - returns RGB ndarray (region-aware)."""
+    def _dxcam_target_fps(self):
         try:
-            roi = None
-            # Probe output size once to map normalized perf region  pixels
-            if not hasattr(self, '_dx_out_size') or self._dx_out_size is None:
-                probe = self.dxcam_camera.grab()
-                if isinstance(probe, np.ndarray) and probe.ndim == 3:
-                    self._dx_out_size = (probe.shape[1], probe.shape[0])  # (w, h)
-                    if not self._roi_norm_to_pixels(self._dx_out_size[0], self._dx_out_size[1]):
-                        return probe
-                else:
-                    self._dx_out_size = None
-            if self._dx_out_size:
-                w, h = self._dx_out_size
-                r = self._roi_norm_to_pixels(w, h)
-                if r:
-                    roi = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+            return max(0, int(self.fps))
+        except Exception:
+            return 0
 
-            frame = self.dxcam_camera.grab(region=roi) if roi else self.dxcam_camera.grab()
+    def _dxcam_full_size(self):
+        cam = self.dxcam_camera
+        if cam is None:
+            return None
+        try:
+            width = int(getattr(cam, "width", 0) or 0)
+            height = int(getattr(cam, "height", 0) or 0)
+            if width > 0 and height > 0:
+                return width, height
+        except Exception:
+            pass
+        try:
+            region = getattr(cam, "region", None)
+            if region and len(region) == 4:
+                width = int(region[2]) - int(region[0])
+                height = int(region[3]) - int(region[1])
+                if width > 0 and height > 0:
+                    return width, height
+        except Exception:
+            pass
+        return None
+
+    def _dxcam_desired_region(self):
+        size = self._dxcam_full_size()
+        if not size:
+            return None
+        width, height = size
+        region = self._roi_norm_to_pixels(width, height)
+        if not region:
+            return None
+        return tuple(int(value) for value in region)
+
+    def _ensure_dxcam_started(self):
+        if self.dxcam_camera is None:
+            self.dxcam_camera = dxcam.create()
+        cam = self.dxcam_camera
+        target_fps = self._dxcam_target_fps()
+        region = self._dxcam_desired_region()
+        needs_restart = (
+            not self.dxcam_started
+            or region != self._dxcam_active_region
+            or target_fps != self._dxcam_active_target_fps
+            or not bool(getattr(cam, "is_capturing", False))
+        )
+        if not needs_restart:
+            self._dxcam_source_region_applied = bool(region)
+            return cam
+        if self.dxcam_started and hasattr(cam, "stop"):
+            try:
+                cam.stop()
+            except Exception:
+                logging.debug("DXCam stop before restart failed", exc_info=True)
+        logging.info(
+            "DXCam: starting ring-buffer capture target_fps=%s region=%s video_mode=True",
+            target_fps,
+            region or "full",
+        )
+        try:
+            cam.start(region=region, target_fps=target_fps, video_mode=True)
+        except TypeError:
+            cam.start(region=region, target_fps=target_fps)
+        self.dxcam_started = True
+        self._dxcam_active_region = region
+        self._dxcam_active_target_fps = target_fps
+        self._dxcam_source_region_applied = bool(region)
+        return cam
+
+    def _grab_screen_dxcam(self):
+        """DXCam ring-buffer capture method - returns RGB ndarray."""
+        try:
+            cam = self._ensure_dxcam_started()
+            frame = cam.get_latest_frame(copy=True)
+            self._last_capture_source_region_applied = bool(self._dxcam_source_region_applied)
             return frame
         except Exception:
-            logging.warning("DXCam grab failed", exc_info=True)
+            logging.warning("DXCam ring-buffer capture failed", exc_info=True)
             return None
 
     def _grab_screen_bettercam(self):
@@ -426,12 +490,7 @@ class ScreenCapturer(threading.Thread):
                 try:
                     if self.dxcam_camera is not None:
                         logging.info("BetterCam: releasing DXCam before initialization")
-                        try:
-                            self.dxcam_camera.release()
-                        except Exception as exc:
-                            _log_fallback("screen_capture.bettercam_init", "continue_without_dxcam_release", "dxcam_release_failed", exc)
-                            pass
-                        self.dxcam_camera = None
+                        self._release_dxcam()
                 except Exception:
                     pass
                 # Use the working indices from diagnostics only; do not probe
@@ -505,9 +564,17 @@ class ScreenCapturer(threading.Thread):
     def _release_dxcam(self):
         cam = self.dxcam_camera
         self.dxcam_camera = None
-        self._dx_out_size = None
+        self.dxcam_started = False
+        self._dxcam_active_region = None
+        self._dxcam_active_target_fps = None
+        self._dxcam_source_region_applied = False
         if cam is None:
             return
+        try:
+            if hasattr(cam, "stop") and bool(getattr(cam, "is_capturing", False)):
+                cam.stop()
+        except Exception:
+            logging.debug("DXCam stop failed", exc_info=True)
         try:
             cam.release()
         except Exception:
@@ -558,6 +625,7 @@ class ScreenCapturer(threading.Thread):
                         # Ensure contiguous memory for encoder (avoid implicit copy stalls)
                         if not arr.flags.c_contiguous:
                             arr = np.ascontiguousarray(arr)
+                        self._last_jpeg_encoder = "imagecodecs"
                         return imagecodecs.jpeg_encode(arr, level=self.quality)
                     except Exception as exc:
                         _log_fallback("screen_capture.jpeg_encoder", "pillow_jpeg", "imagecodecs_jpeg_failed", exc)
@@ -573,6 +641,7 @@ class ScreenCapturer(threading.Thread):
                             _log_fallback("screen_capture.pillow_grayscale", "pillow_original_mode", "convert_l_failed", exc)
                             pass
                     img.save(buffer, format='JPEG', quality=self.quality)
+                    self._last_jpeg_encoder = "pillow"
                     return buffer.getvalue()
                 return None
 
@@ -580,6 +649,7 @@ class ScreenCapturer(threading.Thread):
             if HAS_PIL and hasattr(frame, 'save'):
                 buffer = io.BytesIO()
                 frame.save(buffer, format='JPEG', quality=self.quality)
+                self._last_jpeg_encoder = "pillow"
                 return buffer.getvalue()
             else:
                 logging.error("No JPEG encoder available - both imagecodecs and Pillow failed")
@@ -668,6 +738,11 @@ class ScreenCapturer(threading.Thread):
             'perf_region': self.perf_region,
             'perf_scale_div': self.perf_scale_div,
             'perf_grayscale': self.perf_grayscale,
+            'jpeg_encoder': self._last_jpeg_encoder,
+            'dxcam_ring_buffer': bool(self.dxcam_started),
+            'dxcam_target_fps': self._dxcam_active_target_fps,
+            'dxcam_region': list(self._dxcam_active_region) if self._dxcam_active_region else None,
+            'dxcam_source_region_applied': bool(self._dxcam_source_region_applied),
             'backend_perf': backend_perf,
             'backend_disabled_until': disabled_until,
             'is_working': is_working
@@ -786,3 +861,4 @@ class ScreenCapturer(threading.Thread):
 
     def stop(self):
         self.is_running = False
+        self._release_dxcam()

@@ -128,6 +128,8 @@ def assert_imports() -> None:
             "ZADOO_AUTH_LOCKOUT_SECONDS",
             "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
             "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
+            "ZADOO_ADAPTIVE_STREAM",
+            "ZADOO_STREAM_START_PROFILE",
         )
     }
     os.environ["CODE_FULL"] = test_auth_code
@@ -137,10 +139,13 @@ def assert_imports() -> None:
     os.environ["ZADOO_AUTH_LOCKOUT_SECONDS"] = "120"
     os.environ["ZADOO_CLIPBOARD_IMAGE_MAX_BYTES"] = "8"
     os.environ["ZADOO_CLIPBOARD_TEXT_MAX_BYTES"] = "8"
+    os.environ["ZADOO_ADAPTIVE_STREAM"] = "1"
+    os.environ["ZADOO_STREAM_START_PROFILE"] = "720p120"
     for key in ("CODE_LIMITED", "CODE_PARTIAL", "CUSTOM_PASSWORD", "ZADOO_ALLOW_QUERY_AUTH", "ZADOO_ALLOWED_ORIGINS"):
         os.environ.pop(key, None)
     import zadoo_vnc.config as config
     import zadoo_vnc.dependencies as deps
+    import zadoo_vnc.screen_capture as screen_capture
     from zadoo_vnc.assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
@@ -166,6 +171,68 @@ def assert_imports() -> None:
         server = VNCServer(6173, 0)
         if server.port != 6173 or server.secondary_port != 0:
             fail("VNCServer did not instantiate with expected ports")
+        if not getattr(server, "adaptive_stream", None) or server.adaptive_stream.profile.name != "720p120":
+            fail("adaptive stream did not select the default 720p120 startup profile")
+        if server.current_fps != 120 or server.current_quality != 54:
+            fail(f"startup profile did not apply fps/quality: fps={server.current_fps} quality={server.current_quality}")
+        if server._quality_locked_by_user:
+            fail("startup quality should be adaptive until the user changes quality")
+        methods = screen_capture.ScreenCapturer().get_available_methods()
+        expected_methods = ["auto"]
+        if screen_capture.HAS_DXCAM:
+            expected_methods.append("dxcam")
+        if screen_capture.HAS_BETTERCAM:
+            expected_methods.append("bettercam")
+        if methods != expected_methods:
+            fail(f"available capture methods changed: {methods}, expected {expected_methods}")
+
+        class FakeDXCam:
+            width = 640
+            height = 480
+            region = (0, 0, 640, 480)
+
+            def __init__(self):
+                self.is_capturing = False
+                self.start_calls = []
+                self.latest_calls = 0
+                self.grab_calls = 0
+                self.stop_calls = 0
+                self.release_calls = 0
+
+            def start(self, region=None, target_fps=60, video_mode=False):
+                self.start_calls.append((region, target_fps, video_mode))
+                self.is_capturing = True
+
+            def get_latest_frame(self, copy=True):
+                self.latest_calls += 1
+                return screen_capture.np.zeros((8, 8, 3), dtype=screen_capture.np.uint8)
+
+            def grab(self, *args, **kwargs):
+                self.grab_calls += 1
+                raise AssertionError("DXCam streaming must use the ring buffer, not grab()")
+
+            def stop(self):
+                self.stop_calls += 1
+                self.is_capturing = False
+
+            def release(self):
+                self.release_calls += 1
+
+        fake_dxcam = FakeDXCam()
+        capturer = screen_capture.ScreenCapturer(fps=240, quality=54)
+        capturer.dxcam_camera = fake_dxcam
+        frame = capturer._grab_screen_dxcam()
+        if frame is None or fake_dxcam.start_calls != [(None, 240, True)]:
+            fail(f"DXCam ring-buffer start was not used correctly: {fake_dxcam.start_calls}")
+        if fake_dxcam.latest_calls != 1 or fake_dxcam.grab_calls:
+            fail("DXCam capture did not use get_latest_frame() exclusively")
+        capturer.fps = 120
+        capturer._grab_screen_dxcam()
+        if fake_dxcam.stop_calls != 1 or fake_dxcam.start_calls[-1] != (None, 120, True):
+            fail("DXCam ring buffer did not restart when target FPS changed")
+        capturer._release_dxcam()
+        if fake_dxcam.release_calls != 1:
+            fail("DXCam release path did not release the camera")
 
         async def route_checks():
             headers = Headers()
