@@ -93,30 +93,6 @@ class RoutesMixin:
             body=str(body).encode("utf-8"),
         )
 
-    def _coerce_response(self, response):
-        if isinstance(response, WSResponse):
-            return response
-        if isinstance(response, tuple) and len(response) == 3:
-            status, raw_headers, body = response
-            try:
-                status_obj = status if isinstance(status, http.HTTPStatus) else http.HTTPStatus(int(status))
-            except Exception:
-                status_obj = http.HTTPStatus.INTERNAL_SERVER_ERROR
-            headers = Headers()
-            try:
-                iterator = raw_headers.items() if isinstance(raw_headers, dict) else raw_headers
-                for key, value in iterator:
-                    headers[str(key)] = str(value)
-            except Exception:
-                headers["Content-Type"] = "application/octet-stream"
-            return WSResponse(
-                status_code=int(status_obj),
-                reason_phrase=status_obj.phrase,
-                headers=headers,
-                body=body if isinstance(body, (bytes, bytearray)) else str(body).encode("utf-8"),
-            )
-        return self._plain_response("Internal Server Error", http.HTTPStatus.INTERNAL_SERVER_ERROR)
-
     def _header_get(self, request_headers, name, default=None):
         try:
             return request_headers.get(name, default)

@@ -212,8 +212,7 @@ def main():
         "yes",
         "on",
     }
-    protector = ProcessProtector() if use_process_protector else None
-    _ = protector
+    _protector = ProcessProtector() if use_process_protector else None
 
     from .dependencies import HAS_MSS, HAS_PIL, HAS_PYAUTOGUI, WIN32_AVAILABLE
     from .screen_capture import ScreenCapturer

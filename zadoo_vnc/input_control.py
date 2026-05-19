@@ -52,17 +52,11 @@ class InputControlMixin:
                 pass
         except Exception:
             pass
-        try:
-            import os as _os
-        except Exception:
-            _os = None
-        if _os is None:
-            return
         def _pair_for(key: str):
             base = f"ALERT_{key}"
-            title = _os.getenv(f"{base}_TITLE")
-            message = _os.getenv(f"{base}_MESSAGE")
-            combined = _os.getenv(base)
+            title = os.getenv(f"{base}_TITLE")
+            message = os.getenv(f"{base}_MESSAGE")
+            combined = os.getenv(base)
             if (not title and not message) and combined:
                 if '|' in combined:
                     parts = combined.split('|', 1)
@@ -1302,11 +1296,7 @@ class InputControlMixin:
                     try:
                         self._type_text_chunk(append_part)
                     except Exception:
-                        for ch in append_part:
-                            try:
-                                self._type_text_chunk(ch)
-                            except Exception:
-                                continue
+                        logging.warning("Failed to type appended live text", exc_info=True)
             else:
                 # Attempt to detect a pure insertion (no deletion) somewhere in the middle.
                 # Compute common suffix length after the common prefix
@@ -1329,13 +1319,7 @@ class InputControlMixin:
                         try:
                             self._type_text_chunk(inserted)
                         except Exception:
-                            for ch in inserted:
-                                try:
-                                    self._type_text_chunk(ch)
-                                except Exception:
-                                    # Log the error instead of silently ignoring it
-                                    logging.warning(f"Failed to type character: {repr(ch)}")
-                                    continue 
+                            logging.warning("Failed to type inserted live text", exc_info=True)
             # Update last seen text
             self.live_typing_text_by_client[key] = text
         except Exception as e:

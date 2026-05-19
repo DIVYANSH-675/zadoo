@@ -1,6 +1,7 @@
 """Optional dependency probes and runtime feature flags."""
 from __future__ import annotations
 
+import importlib.util
 import logging
 import threading
 
@@ -59,12 +60,9 @@ except ImportError:
 
 try:
     import win32api
-    import win32con
-    import win32gui
-    import win32ui
     WIN32_AVAILABLE = True
 except ImportError:
-    win32api = win32con = win32gui = win32ui = None
+    win32api = None
     WIN32_AVAILABLE = False
 
 try:
@@ -135,13 +133,6 @@ if HAS_BETTERCAM:
         logging.debug("BetterCam patching failed", exc_info=True)
 
 try:
-    import winrt  # type: ignore
-    HAS_WINRT = True
-except ImportError:
-    winrt = None
-    HAS_WINRT = False
-
-try:
     import fast_ctypes_screenshots
     HAS_FAST_CTYPES = True
 except ImportError:
@@ -162,13 +153,7 @@ except Exception:
     winpty = None
     HAS_WINPTY = False
 
-try:
-    from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-    from aiortc.rtcrtpsender import RTCRtpSender
-    HAS_AIORTC = True
-except Exception:
-    MediaStreamTrack = RTCPeerConnection = RTCSessionDescription = RTCRtpSender = None
-    HAS_AIORTC = False
+HAS_AIORTC = importlib.util.find_spec("aiortc") is not None
 
 try:
     import sounddevice as sd
@@ -188,17 +173,8 @@ except Exception:
 
 try:
     import soundcard as sc
-    HAS_SOUNDCARD = True
 except Exception:
     sc = None
-    HAS_SOUNDCARD = False
-
-try:
-    import paramiko
-    HAS_PARAMIKO = True
-except Exception:
-    paramiko = None
-    HAS_PARAMIKO = False
 
 try:
     import resend

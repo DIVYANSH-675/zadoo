@@ -6,12 +6,12 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any
 
 from .logging_utils import _log_fallback
-from .process_utils import _run_hidden
 
 log = logging.getLogger(__name__)
 logging.getLogger("comtypes").setLevel(logging.WARNING)
@@ -286,7 +286,17 @@ def _powershell_pnp_devices() -> list[dict[str, Any]]:
     devices: list[dict[str, Any]] = []
     for command in commands:
         try:
-            result = _run_hidden([ps, "-NoProfile", "-Command", command], timeout=8)
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 8,
+            }
+            if sys.platform.startswith("win"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                run_kwargs["startupinfo"] = startupinfo
+                run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run([ps, "-NoProfile", "-Command", command], **run_kwargs)
         except Exception as exc:
             log.debug("camera PnP command failed: %s", exc)
             continue

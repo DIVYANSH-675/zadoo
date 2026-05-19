@@ -46,7 +46,6 @@ class ScreenCapturer(threading.Thread):
         self.perf_enabled = False
         self.perf_region = 'full'
         self.perf_scale_div = 1
-        self.encoder_busy = False
         self.perf_grayscale = False
         self._frame_event_loop = None
         self._frame_ready_event = None
@@ -121,12 +120,10 @@ class ScreenCapturer(threading.Thread):
                         time.sleep(0)  # yield
                         continue
                     try:
-                        self.encoder_busy = True
                         encode_start = time.perf_counter()
                         jpeg_bytes = self._encode_frame(frame)
                         encode_ms = (time.perf_counter() - encode_start) * 1000.0
                     finally:
-                        self.encoder_busy = False
                         self.encoder_lock.release()
                     if jpeg_bytes is not None:
                         with self.frame_lock:
@@ -568,11 +565,6 @@ class ScreenCapturer(threading.Thread):
         except Exception:
             logging.warning("GDI ImageGrab capture failed", exc_info=True)
             return None
-
-    def _grab_screen_winrt(self):
-        """Backward-compatible alias for the old WinRT-labelled GDI fallback."""
-        _log_fallback("screen_capture.winrt_alias", "gdi", "winrt_is_gdi_compat_alias")
-        return self._grab_screen_gdi()
 
     def _release_dxcam(self):
         cam = self.dxcam_camera
