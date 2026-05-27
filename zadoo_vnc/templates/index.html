@@ -138,7 +138,7 @@
         .sidebar.open {
             width: 280px;
         }
-        /* Advanced SSH Terminal Panel */
+        /* Advanced Terminal Panel */
         .terminal-panel {
             position: fixed;
             top: 0;
@@ -185,44 +185,184 @@
         .notepad-body { flex:1; display:flex; flex-direction:column; height:100%; }
         .notepad-main { flex: 1 1 auto; display:flex; flex-direction:column; min-height:0; }
         #code-editor { flex:1 1 auto; height:auto; }
-        .notepad-ctrl-tab { display:flex; align-items:center; justify-content:space-between; padding:6px 12px; background:#0f1420; border-top:1px solid #1f2937; color:#cfd8dc; cursor:pointer; }
-        .ctrl-arrow { transition: transform 0.2s ease; }
-        .ctrl-arrow.open { transform: rotate(180deg); }
-        .notepad-control { flex: 0 0 0; height:0; overflow:hidden; background:#0b0f17; border-top:1px solid #1f2937; transition: flex-basis 0.25s ease, height 0.25s ease; }
-        .notepad-panel.control-open .notepad-control { flex: 0 0 20%; height:auto; }
-        .notepad-panel.control-open .notepad-main { flex: 0 0 80%; }
-        .control-buttons { display:flex; gap:8px; padding:10px 12px; align-items:center; flex-wrap:wrap; }
-        .notepad-textarea { flex:1; width:100%; resize:none; background:#0b0f17; color:#e5e7eb; border:none; padding:12px; font-family:'Fira Code', Consolas, 'Segoe UI', monospace; font-size:14px; line-height:1.45; outline:none; }
-        .notepad-actions { display:flex; gap:8px; padding:8px 12px; border-top:1px solid #1f2937; }
-        .np-btn { background:#1f2937;color:#e5e7eb;border:1px solid #334155;border-radius:10px;padding:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow: 0 6px 20px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.05); transition: all 0.2s ease; }
-        .np-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.08); background: linear-gradient(145deg, #243244, #1b2635); }
-        .np-btn:active { transform: translateY(1px); box-shadow: 0 4px 12px rgba(0,0,0,0.3), inset 0 2px 8px rgba(0,0,0,0.25); }
-        .np-btn:disabled { opacity:0.6; cursor:default; }
+        /* ===== Codex Control Panel ===== */
+        .notepad-ctrl-tab {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 14px;
+            background: linear-gradient(90deg, #0a1628 0%, #0d1f3c 50%, #0a1628 100%);
+            border-top: 1px solid rgba(0, 212, 255, 0.18);
+            color: #00d4ff;
+            cursor: pointer;
+            user-select: none;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            box-shadow: 0 -1px 0 rgba(0,212,255,0.08), inset 0 1px 0 rgba(255,255,255,0.03);
+            transition: background 0.2s ease, box-shadow 0.2s ease;
+            position: relative;
+        }
+        .notepad-ctrl-tab::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 14px; right: 14px; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(0,212,255,0.35), transparent);
+        }
+        .notepad-ctrl-tab:hover { background: linear-gradient(90deg, #0c1c35 0%, #102540 50%, #0c1c35 100%); }
+        .ctrl-tab-label { display: flex; align-items: center; gap: 7px; }
+        .ctrl-tab-label svg { width: 13px; height: 13px; stroke: #00d4ff; fill: none; stroke-width: 2.2; flex-shrink: 0; }
+        .ctrl-arrow {
+            width: 20px; height: 20px;
+            display: flex; align-items: center; justify-content: center;
+            border: 1px solid rgba(0,212,255,0.25);
+            border-radius: 6px;
+            background: rgba(0,212,255,0.06);
+            color: #00d4ff;
+            font-size: 10px;
+            transition: transform 0.22s cubic-bezier(.4,0,.2,1), background 0.18s;
+        }
+        .ctrl-arrow.open { transform: rotate(180deg); background: rgba(0,212,255,0.12); }
+        .notepad-control {
+            flex: 0 0 0;
+            height: 0;
+            overflow: hidden;
+            background: linear-gradient(180deg, #08101e 0%, #060d19 100%);
+            border-top: 1px solid rgba(0,212,255,0.10);
+            transition: flex-basis 0.28s cubic-bezier(.4,0,.2,1), height 0.28s cubic-bezier(.4,0,.2,1);
+        }
+        .notepad-panel.control-open .notepad-control { flex: 0 0 auto; height:auto; max-height:45%; overflow:auto; }
+        .notepad-panel.control-open .notepad-main { flex: 1 1 auto; }
+        .control-buttons {
+            display: grid;
+            grid-template-columns: max-content minmax(136px, 170px) minmax(140px, 1fr) max-content;
+            grid-template-areas: "transport mode wpm ide";
+            gap: 8px;
+            padding: 10px 12px;
+            align-items: center;
+        }
+        .notepad-textarea { flex:1; width:100%; resize:none; background:#070e1a; color:#dde8f5; border:none; padding:14px; font-family:'Fira Code', Consolas, 'Segoe UI', monospace; font-size:14px; line-height:1.55; outline:none; }
+        .notepad-actions { display:flex; gap:8px; padding:8px 12px; border-top:1px solid rgba(0,212,255,0.08); }
+        .np-btn {
+            background: linear-gradient(145deg, #111e30, #0c1724);
+            color: #b8d4f0;
+            border: 1px solid rgba(0,212,255,0.22);
+            border-radius: 10px;
+            padding: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04);
+            transition: all 0.18s ease;
+        }
+        .np-btn:hover {
+            transform: translateY(-1px);
+            border-color: #00d4ff;
+            box-shadow: 0 8px 22px rgba(0,212,255,0.14), inset 0 1px 0 rgba(255,255,255,0.06);
+            color: #fff;
+        }
+        .np-btn:active { transform: translateY(1px); box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+        .np-btn:disabled { opacity:0.5; cursor:default; }
+        .transport-group { grid-area:transport; display:flex; gap:6px; align-items:center; }
         /* Play / Pause Neon Button */
-        .play { width:56px; height:56px; min-width:56px; border-radius:14px; display:flex; align-items:center; justify-content:center; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); border:3px solid #00d4ff; box-shadow: 0 4px 16px rgba(0,212,255,0.05), 0 0 14px rgba(0,212,255,0.06); cursor:pointer; transition: transform .18s ease, box-shadow .18s ease; }
-        .play:active{ transform: translateY(1px) scale(.995) }
-        .play:hover{ box-shadow: 0 12px 36px rgba(0,212,255,0.09), 0 0 30px rgba(0,212,255,0.08) }
-        .play svg { width:24px; height:24px; display:block; fill:#00d4ff; filter: drop-shadow(0 2px 6px rgba(0,212,255,0.12)); }
-        /* WPM Arrow Buttons */
-        .wpm-col { display:flex; flex-direction:column; gap:8px; align-items:flex-start; margin-left:6px; }
-        .wpm-pill { display:flex; align-items:center; justify-content:center; height:36px; padding:0 16px; min-width:180px; border-radius:20px; border:2px solid #00d4ff; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); box-shadow: 0 4px 14px rgba(0,212,255,0.03); cursor:pointer; font-weight:700; letter-spacing:.2px; transition: transform .12s ease, background .12s; color:#90ee90; }
-        .wpm-pill .arrow { margin-right:10px; color:#00d4ff; font-size:16px; }
-        .wpm-pill:active { transform:translateY(1px) }
+        .play {
+            width: 44px; height: 44px; min-width: 44px;
+            border-radius: 13px;
+            display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(145deg, #081422, #060f1c);
+            border: 2px solid rgba(0,212,255,0.7);
+            box-shadow: 0 4px 18px rgba(0,212,255,0.1), 0 0 0 1px rgba(0,212,255,0.05);
+            cursor: pointer;
+            transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+        }
+        .play:active { transform: translateY(1px) scale(.97); }
+        .play:hover { border-color: #00d4ff; box-shadow: 0 8px 28px rgba(0,212,255,0.2), 0 0 16px rgba(0,212,255,0.12); }
+        .play svg { width:20px; height:20px; display:block; fill:#00d4ff; filter: drop-shadow(0 0 5px rgba(0,212,255,0.5)); }
+        /* Robo WPM Input */
+        .wpm-col { grid-area:wpm; min-width:0; }
+        .wpm-field {
+            display: grid;
+            grid-template-columns: auto minmax(78px, 1fr);
+            grid-template-rows: auto auto;
+            column-gap: 10px; row-gap: 2px;
+            align-items: center;
+            width: 100%; min-width: 0;
+            height: 44px; padding: 5px 10px;
+            border-radius: 12px;
+            border: 2px solid rgba(0,212,255,0.55);
+            background: linear-gradient(145deg, #081422, #060f1c);
+            box-shadow: 0 4px 14px rgba(0,212,255,0.06), inset 0 1px 0 rgba(255,255,255,0.03);
+            color: #90ee90;
+        }
+        .wpm-label { grid-row:1 / span 2; color:#00d4ff; font-size:12px; font-weight:800; letter-spacing:0.5px; text-shadow: 0 0 8px rgba(0,212,255,0.4); }
+        .wpm-input { width:100%; min-width:0; background:transparent; border:0; border-bottom:1px solid rgba(0,212,255,.35); color:#e5e7eb; font:700 14px Consolas, 'Segoe UI', monospace; outline:none; padding:0 0 2px; }
+        .wpm-input.invalid { color:#ff6b6b; border-bottom-color:#ff6b6b; }
+        .wpm-status { color:#6ee78b; font-size:11px; line-height:1; white-space:nowrap; }
+        .wpm-actual { color:#6b7a90; }
         /* Neon Refresh Button */
-        .refresh { width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:3px solid #00d4ff; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015)); box-shadow: 0 6px 22px rgba(0,212,255,0.05); cursor:pointer; transition: transform .2s ease, box-shadow .2s ease; }
-        .refresh:hover { transform: translateY(-3px) rotate(8deg); box-shadow: 0 12px 30px rgba(0,212,255,0.09); }
-        .refresh svg { width:24px; height:24px; stroke:#00d4ff; stroke-width:2.2; fill:none; }
-        /* Echo & Robo Toggles */
-        .toggles-col { display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
-        .toggle-pill { height:36px; min-width:180px; padding:0 16px; border-radius:20px; border:2px solid #00d4ff; display:flex; align-items:center; justify-content:space-between; gap:10px; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); box-shadow: 0 6px 16px rgba(0,212,255,0.02); cursor:pointer; transition: transform .12s, box-shadow .12s; user-select:none; color:#fff; }
-        .toggle-pill:active { transform:translateY(1px) }
-        .toggle-label { font-weight:600; color:#fff; padding-left:6px; }
-        .switch { width:38px; height:20px; background:#22272b; border-radius:999px; position:relative; display:inline-flex; align-items:center; padding:2px; transition: background .18s ease; }
-        .knob { width:14px; height:14px; border-radius:50%; background:#fff; transform:translateX(0); transition: transform .18s cubic-bezier(.2,.9,.3,1), background .18s; box-shadow:0 2px 6px rgba(2,6,10,0.6); }
-        .switch.on { background: linear-gradient(90deg, rgba(0,212,255,0.18), rgba(0,212,255,0.12)); box-shadow: 0 6px 18px rgba(0,212,255,0.08); }
-        .switch.on .knob { transform:translateX(18px); background:#06131a; }
+        .refresh {
+            width: 40px; height: 40px; min-width: 40px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            border: 2px solid rgba(0,212,255,0.55);
+            background: linear-gradient(145deg, #081422, #060f1c);
+            box-shadow: 0 4px 14px rgba(0,212,255,0.08);
+            cursor: pointer;
+            transition: transform .2s ease, box-shadow .2s ease, border-color .18s;
+        }
+        .refresh:hover { transform: translateY(-2px) rotate(10deg); border-color: #00d4ff; box-shadow: 0 10px 26px rgba(0,212,255,0.18); }
+        .refresh svg { width:20px; height:20px; stroke:#00d4ff; stroke-width:2.2; fill:none; filter: drop-shadow(0 0 4px rgba(0,212,255,0.35)); }
+        .mode-segment {
+            grid-area: mode;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            height: 44px; padding: 5px;
+            border: 2px solid rgba(0,212,255,0.55);
+            border-radius: 13px;
+            background: linear-gradient(145deg, #081422, #060f1c);
+            gap: 4px; min-width: 0;
+        }
+        .mode-btn {
+            border: 0;
+            border-radius: 9px;
+            background: transparent;
+            color: #5a7a9a;
+            font-weight: 800;
+            font-size: 12px;
+            letter-spacing: 0.3px;
+            cursor: pointer;
+            transition: background .16s, color .16s, box-shadow .16s;
+        }
+        .mode-btn.active {
+            background: linear-gradient(135deg, #00c8f5, #00a8d8);
+            color: #020e18;
+            box-shadow: 0 2px 12px rgba(0,212,255,0.25), 0 0 0 1px rgba(0,212,255,0.1);
+            text-shadow: none;
+        }
+        .mode-btn:disabled { opacity:.45; cursor:default; }
+        .ide-check {
+            grid-area: ide;
+            height: 44px; min-width: 66px;
+            padding: 0 10px;
+            border: 2px solid rgba(0,212,255,0.55);
+            border-radius: 13px;
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+            background: linear-gradient(145deg, #081422, #060f1c);
+            color: #8ab4d4;
+            font-weight: 800;
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            cursor: pointer;
+            user-select: none;
+            transition: border-color 0.18s, box-shadow 0.18s;
+        }
+        .ide-check:hover { border-color: #00d4ff; box-shadow: 0 0 14px rgba(0,212,255,0.1); color: #fff; }
+        .ide-check input { width:16px; height:16px; accent-color:#00d4ff; cursor:pointer; }
+        .play:disabled, .refresh:disabled { opacity:.4; cursor:default; transform:none; box-shadow:none; }
 
-        /* Neon controls removed - reverted to original simple controls */
         .np-icon { width:18px; height:18px; display:inline-block; }
         .notepad-resizer { position:absolute; left:-6px; top:0; width:6px; height:100%; cursor: ew-resize; }
         .CodeMirror { height: 100% !important; background: #0b0f17; color: #e5e7eb; }
@@ -409,6 +549,19 @@
         .btn-group {
             display: flex;
             gap: 4px;
+        }
+
+        .clipboard-status {
+            margin-top: 7px;
+            min-height: 14px;
+            color: #8fe7ff;
+            font-size: 10px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .clipboard-status.error {
+            color: #ff8aa0;
         }
         
         .sidebar-btn:hover {
@@ -736,6 +889,18 @@
             flex: 0 0 38px !important;
             justify-content: center;
         }
+
+        .mic-control-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 38px;
+            gap: 8px;
+            align-items: stretch;
+        }
+
+        .mic-settings-panel {
+            margin-top: -2px;
+            margin-bottom: 8px;
+        }
         .futuristic-range { 
             -webkit-appearance:none; width:100%; height: 10px; 
             --val: 50%;
@@ -979,10 +1144,8 @@
         @media (min-width: 1024px) and (max-width: 1440px) {
             .sidebar.open { width: 300px; }
             .terminal-panel { width: 55vw; right: -55vw; }
-            .notepad-panel { width: 42vw; right: -42vw; }
-            .play { width:52px; height:52px; }
-            .refresh { width:46px; height:46px; }
-            .wpm-pill, .toggle-pill { min-width:160px; height:34px; padding:0 14px; }
+            .notepad-panel { width: 48vw; right: -48vw; }
+            .control-buttons { gap:8px; }
             .section-title { font-size: 11px; }
             .url-text { font-size: 11px; }
             .CodeMirror pre { font-size: 16px; }
@@ -997,18 +1160,14 @@
             .terminal-panel { width: 54vw; right: -54vw; }
             .notepad-panel { width: 41vw; right: -41vw; }
             /* Codex control sizing */
-            .notepad-control .control-buttons { gap: 6px; }
-            .play { width:50px; height:50px; }
-            .refresh { width:44px; height:44px; }
-            .wpm-pill, .toggle-pill { min-width:150px; height:32px; padding:0 12px; }
-            .wpm-pill .wpm-text { font-size: 12px; }
-            .toggle-label { font-size: 12px; }
+            .notepad-control .control-buttons { gap: 8px; }
+            .wpm-input { font-size: 12px; }
             .CodeMirror pre { font-size: 15px; }
         }
         @media (max-width: 1024px) {
             .sidebar.open { width: 260px; }
             .terminal-panel { width: 60vw; right: -60vw; }
-            .notepad-panel { width: 45vw; right: -45vw; }
+            .notepad-panel { width: 56vw; right: -56vw; }
         }
         @media (max-width: 768px) {
             .sidebar.open { width: 240px; }
@@ -1017,9 +1176,9 @@
             .notepad-panel { width: 85vw; right: -85vw; }
             .notepad-panel.open { right: 0; }
             .sidebar-trigger { right: 12px; width: 44px; height: 44px; }
-            .wpm-pill, .toggle-pill { min-width: 140px; height: 32px; padding: 0 12px; }
-            .play { width:48px; height:48px; }
-            .refresh { width:42px; height:42px; }
+            .control-buttons { grid-template-columns:1fr 1fr; grid-template-areas:"transport ide" "mode mode" "wpm wpm"; gap:8px; }
+            .transport-group { justify-content:center; }
+            .ide-check { min-width:0; }
             .url-actions { gap: 4px; }
 
             .url-action-btn { width: 16px; height: 16px; }
@@ -1029,7 +1188,9 @@
         @media (max-width: 480px) {
             .sidebar.open { width: 100vw; }
             .trigger-icon { transform: scale(0.9); }
-            .wpm-pill, .toggle-pill { min-width: 120px; height: 30px; padding: 0 10px; }
+            .control-buttons { grid-template-columns:1fr; grid-template-areas:"transport" "mode" "wpm" "ide"; }
+            .transport-group, .mode-segment, .wpm-col, .ide-check { width:100%; }
+            .transport-group { justify-content:center; }
             .url-text { font-size: 9px; }
             #auth-form { top: 76%; left: 20%; width: 60%; height: 18%; }
             #auth-code { font-size: 16px; }
@@ -1361,7 +1522,7 @@
             <div id="snapshot-selection-box"></div>
             <!-- Hidden status element for JavaScript -->
             <div id="status" style="display: none;">Connecting...</div>
-            <div id="current-quality" style="display: none;">65</div>
+            <div id="current-quality" style="display: none;">85</div>
             <div id="current-fps" style="display: none;">60</div>
             <div id="uptime-display" style="display: none;">00:00:00</div>
         </div>
@@ -1402,16 +1563,15 @@
                 <div class="sidebar-section">
                     <div class="section-title">Graphics</div>
                     <div class="input-group">
-                        <label class="input-label">Visual Quality <span id="quality-value" style="color:#00d4ff; font-weight:700;">65</span>%</label>
+                        <label class="input-label">Visual Quality <span id="quality-value" style="color:#00d4ff; font-weight:700;">85</span>%</label>
                         <input type="range" class="futuristic-range" id="quality-slider" 
-                               min="10" max="100" value="65" oninput="updateQuality(this.value)" onchange="updateQuality(this.value, true)">
+                               min="10" max="100" value="85" oninput="updateQuality(this.value)" onchange="updateQuality(this.value, true)">
                     </div>
                     <div class="input-group">
                         <label class="input-label">Capture Method</label>
                         <select class="futuristic-select" id="capture-method-select" onchange="changeCaptureMethod(this.value)">
-                            <option value="auto">Auto (Best Performance)</option>
-                            <option value="dxcam">DXCam (100+ FPS)</option>
                             <option value="bettercam">BetterCam (100+ FPS)</option>
+                            <option value="dxcam">DXCam (100+ FPS)</option>
                         </select>
                     </div>
                     <div class="input-group">
@@ -1458,14 +1618,6 @@
                         <span class="info-value" id="server-uptime">00:00:00</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">Live FPS</span>
-                        <span class="info-value"><span id="sidebar-fps">0</span></span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">Stream</span>
-                        <span class="info-value" id="stream-profile">Fast</span>
-                    </div>
-                    <div class="info-item">
                         <span class="info-label">Audio</span>
                         <span class="info-value" id="audio-status">Idle</span>
                     </div>
@@ -1493,6 +1645,7 @@
                             <span>Push</span>
                         </button>
                     </div>
+                    <div class="clipboard-status" id="clipboard-status" aria-live="polite"></div>
                 </div>
                 
                 <!-- Quick Actions Section -->
@@ -1576,11 +1729,31 @@
                                 <span class="btn-label">Audio</span>
                             </button>
                         </div>
-                        <div class="btn-group">
+                        <div class="btn-group mic-control-row">
                             <button class="sidebar-btn" id="mic-toggle" onclick="toggleMic(event)" title="Mic">
                                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
                                 <span class="btn-label">Mic</span>
                             </button>
+                            <button class="sidebar-btn icon-only" id="mic-settings-toggle" onclick="toggleMicSettings(event)" title="Choose Mic">
+                                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                            </button>
+                        </div>
+                        <div class="input-group mic-settings-panel" id="mic-settings-panel" style="display:none;">
+                            <div class="camera-row">
+                                <div class="camera-picker" id="mic-picker">
+                                    <select id="mic-select" class="camera-native-select" aria-hidden="true" tabindex="-1">
+                                        <option>Loading...</option>
+                                    </select>
+                                    <button type="button" id="mic-select-trigger" class="camera-trigger" onclick="toggleMicMenu(event)" aria-haspopup="listbox" aria-expanded="false" title="Choose Microphone">
+                                        <span id="mic-select-label" class="camera-label">System Default</span>
+                                        <svg class="camera-chevron" viewBox="0 0 24 24" fill="none" stroke="#b8eaff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                                    </button>
+                                    <div id="mic-select-menu" class="camera-menu" role="listbox" aria-label="Microphone"></div>
+                                </div>
+                                <button class="sidebar-btn camera-refresh-btn" onclick="refreshMics()" title="Refresh Mics">
+                                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.2 6.5"/><path d="M3 12A9 9 0 0 1 18.2 5.5"/><path d="M7 18H4v3"/><path d="M17 6h3V3"/></svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="btn-group" style="display:flex; gap:6px;">
                             <button class="sidebar-btn icon-only" id="btn-disable-mouse" onclick="toggleMouseBlock()" title="Disable Mouse">
@@ -1611,13 +1784,11 @@
             </div>
         </div>
         
-        <!-- Advanced button removed -->
-
-        <!-- SSH Terminal Panel -->
+        <!-- Terminal Panel -->
         <div id="terminal-panel" class="terminal-panel">
             <div class="drag-resize" id="terminal-resizer"></div>
             <div class="terminal-header">
-                <div>SSH Terminal</div>
+                <div>Terminal</div>
                 <div>
                     <button onclick="openTerminalNewTab()" title="Open in new tab" style="background:#334155;color:#fff;border:1px solid #475569;border-radius:4px;padding:4px 8px;cursor:pointer;margin-right:6px;">Open</button>
                     <button onclick="toggleTerminal()" style="background:#334155;color:#fff;border:1px solid #475569;border-radius:4px;padding:4px 8px;cursor:pointer;">Close</button>
@@ -1661,47 +1832,46 @@
                     <div id="code-editor" style="display:none; height:100%; width:100%;"></div>
                 </div>
                 <div class="notepad-ctrl-tab" onclick="toggleControlPanel()">
-                    <div>Control Panel</div>
-                    <div class="ctrl-arrow" id="ctrl-arrow">^</div>
+                    <div class="ctrl-tab-label">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+                        Control Panel
+                    </div>
+                    <div class="ctrl-arrow" id="ctrl-arrow">&#8963;</div>
                 </div>
                 <div class="notepad-control" id="notepad-control">
                     <div class="control-buttons">
-                        <button class="play" id="np-play-pause" title="Play / Pause" aria-pressed="false">
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M5 3v18l15-9z"/>
-                          </svg>
-                        </button>
-                        <button class="refresh" id="np-refresh" title="Refresh">
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M21 12a9 9 0 1 0-2.6 6.06" stroke-linecap="round" stroke-linejoin="round"></path>
-                            <path d="M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"></path>
-                          </svg>
-                        </button>
+                        <div class="transport-group">
+                          <button class="play" id="np-play-pause" title="Play / Pause" aria-pressed="false">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                              <path d="M5 3v18l15-9z"/>
+                            </svg>
+                          </button>
+                          <button class="refresh" id="np-refresh" title="Refresh">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                              <path d="M21 12a9 9 0 1 0-2.6 6.06" stroke-linecap="round" stroke-linejoin="round"></path>
+                              <path d="M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"></path>
+                            </svg>
+                          </button>
+                        </div>
+                        <div class="mode-segment" role="radiogroup" aria-label="Typing mode">
+                          <button class="mode-btn active" id="np-mode-robo" type="button" aria-pressed="true">Robo</button>
+                          <button class="mode-btn" id="np-mode-echo" type="button" aria-pressed="false">Echo</button>
+                        </div>
                         <div class="wpm-col">
-                          <button class="wpm-pill" id="np-speed-up" title="Speed Up" aria-label="Increase WPM">
-                            <span class="arrow">Up</span>
-                            <span class="wpm-text">120 WPM</span>
-                          </button>
-                          <button class="wpm-pill" id="np-speed-down" title="Speed Down" aria-label="Decrease WPM">
-                            <span class="arrow">Down</span>
-                            <span class="wpm-text">120 WPM</span>
-                          </button>
+                          <label class="wpm-field" for="np-wpm-input">
+                            <span class="wpm-label">WPM</span>
+                            <input id="np-wpm-input" class="wpm-input" value="30,40" inputmode="text" autocomplete="off" spellcheck="false" aria-label="Robo WPM range">
+                            <span class="wpm-status" id="np-wpm-target">30-40 WPM</span>
+                            <span class="wpm-status wpm-actual" id="np-wpm-actual">Actual --</span>
+                          </label>
                         </div>
-                        <div class="toggles-col">
-                          <button class="toggle-pill" id="np-live-typing" title="Echo" aria-pressed="false">
-                            <span class="toggle-label">Echo</span>
-                            <div class="switch" id="echoSwitch"><div class="knob"></div></div>
-                          </button>
-                          <button class="toggle-pill" id="np-robo" title="Robo" aria-pressed="false">
-                            <span class="toggle-label">Robo</span>
-                            <div class="switch" id="roboSwitch"><div class="knob"></div></div>
-                          </button>
-                        </div>
+                        <label class="ide-check" title="IDE Mode">
+                          <input id="np-ide-mode" type="checkbox" aria-label="IDE Mode">
+                          <span>IDE</span>
+                        </label>
                     </div>
                 </div>
-                <div class="notepad-actions">
-                    <span id="notepad-status" style="font-size:12px;color:#9ca3af;">Autosaves locally</span>
-                </div>
+
             </div>
         </div>
         
@@ -1722,7 +1892,7 @@
     const WSS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const WSS_URL = `${WSS_PROTOCOL}://${window.location.host}`;
     let qualitySendTimer = null;
-    let pendingQualityValue = 65;
+    let pendingQualityValue = 85;
     let performanceModeEnabled = false;
     let performanceCustomRect = null;
     const videoMetrics = {
@@ -1798,23 +1968,37 @@
     let micBufferQueue = [];
     let micFirstChunkLogged = false;
     let pendingMicClientEvents = [];
+    const MIC_DEVICE_STORAGE = 'zadoo_mic_device_v1';
+    let micDeviceMap = new Map();
+    let micSettingsOpen = false;
     let emailStatus = 'Pending';
     // Robo typing state
+    let codexMode = 'robo';
     let roboEnabled = false;
     let roboPlaying = false;
-    let roboIndex = 0;
     let roboSource = '';
+    let roboOps = [];
+    let roboOpIndex = 0;
+    let roboOpOffset = 0;
     let roboTimer = null;
-    let roboWpm = 40; // words per minute
-    const ROBO_WPM_MIN = 20;
-    const ROBO_WPM_MAX = 200;
-    const ROBO_WPM_BAND = 10; // vary within [wpm-10, wpm]
-    let roboJitterFraction = 0.30;   // 30% of base delay as additional jitter
+    let roboWpmMin = 30;
+    let roboWpmMax = 40;
+    let roboLastTickAt = 0;
+    let roboCharCredit = 0;
+    let roboStartedAt = 0;
+    let roboSentUnits = 0;
+    const ROBO_WPM_MIN = 1;
+    const ROBO_WPM_MAX = 3000;
+    const ROBO_RATE_TICK_MS = 20;
+    let typingMode = 'exact';
     let liveTypingEnabled = false;
     let liveTypingDebounce = null;
     let liveTypingLastSent = 0;
+    let liveTypingLastSpecialAt = 0;
+    let liveTypingLastText = '';
     const LIVE_TYPING_MIN_INTERVAL_MS = 40; // ~25 cps
-    const LIVE_TYPING_SPECIAL_KEYS = new Set(['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown']);
+    const LIVE_TYPING_SPECIAL_GRACE_MS = 120;
+    const LIVE_TYPING_SPECIAL_KEYS = new Set(['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Tab']);
 
     // Sidebar toggle functionality
     function toggleSidebar() {
@@ -1832,6 +2016,7 @@
         main.style.display = 'none';
         adv.style.display = 'block';
         try { refreshCameras(); } catch (e) {}
+        try { refreshMics(); } catch (e) {}
         // If partial disable is active, disable Terminal and Webcam buttons
         try {
             const partial = (window.__advPartialDisabled || document.cookie.indexOf('zadoo_adv_partial=1') !== -1);
@@ -1923,8 +2108,6 @@
         
 
     })();
-    // Keyboard Configure modal removed (checkpoint 1)
-
     function toggleAnimatedInput() {
         const toggleBtn = document.getElementById('toggle-input-btn');
         const toggleSwitch = document.getElementById('toggle-switch');
@@ -2016,12 +2199,6 @@
             keystrokeBuffer = keystrokeBuffer.slice(-10);
         }
         
-        updateKeystrokeDisplay();
-    }
-    
-    function clearKeystrokes() {
-        if (!keystrokeCaptureActive) return;
-        keystrokeBuffer = [];
         updateKeystrokeDisplay();
     }
     
@@ -2174,11 +2351,183 @@
         }
     }
 
+    function closeMicMenu() {
+        const menu = document.getElementById('mic-select-menu');
+        const trigger = document.getElementById('mic-select-trigger');
+        if (menu) menu.classList.remove('open');
+        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleMicMenu(event) {
+        if (event) event.stopPropagation();
+        const menu = document.getElementById('mic-select-menu');
+        const trigger = document.getElementById('mic-select-trigger');
+        if (!menu || !trigger) return;
+        const shouldOpen = !menu.classList.contains('open');
+        menu.classList.toggle('open', shouldOpen);
+        trigger.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+    }
+
+    function normalizeMicOption(item, index) {
+        const mic = item || {};
+        const id = mic.id != null ? String(mic.id) : (mic.device_index != null ? String(mic.device_index) : `mic-${index}`);
+        const name = mic.name || mic.label || (id === 'default' ? 'System Default' : `Microphone ${index + 1}`);
+        const label = mic.label || name;
+        const deviceIndex = mic.device_index == null ? '' : String(mic.device_index);
+        return {
+            id,
+            label: String(label),
+            name: String(name),
+            deviceIndex,
+            samplerate: mic.samplerate || '',
+            channels: mic.channels || '',
+            isDefault: !!mic.default
+        };
+    }
+
+    function setMicSelectPlaceholder(text) {
+        const sel = document.getElementById('mic-select');
+        if (!sel) return;
+        sel.innerHTML = '';
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.disabled = true;
+        opt.selected = true;
+        opt.textContent = text;
+        sel.appendChild(opt);
+        updateMicPickerFromSelect();
+    }
+
+    function updateMicPickerFromSelect() {
+        const sel = document.getElementById('mic-select');
+        const menu = document.getElementById('mic-select-menu');
+        const label = document.getElementById('mic-select-label');
+        if (!sel) return;
+        const selected = sel.selectedOptions && sel.selectedOptions.length ? sel.selectedOptions[0] : sel.options[0];
+        if (label) label.textContent = selected ? selected.textContent : 'System Default';
+        if (!menu) return;
+        menu.innerHTML = '';
+        Array.from(sel.options).forEach((opt) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'camera-option' + (opt.selected ? ' active' : '');
+            btn.textContent = opt.textContent || opt.value;
+            btn.setAttribute('role', 'option');
+            btn.setAttribute('aria-selected', opt.selected ? 'true' : 'false');
+            if (!opt.value || opt.disabled) {
+                btn.disabled = true;
+            } else {
+                btn.onclick = () => selectMicOption(opt.value);
+            }
+            menu.appendChild(btn);
+        });
+    }
+
+    function selectMicOption(value) {
+        const sel = document.getElementById('mic-select');
+        if (!sel || !value) return;
+        sel.value = value;
+        closeMicMenu();
+        updateMicPickerFromSelect();
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function refreshMics() {
+        const sel = document.getElementById('mic-select');
+        if (!sel) return;
+        const saved = localStorage.getItem(MIC_DEVICE_STORAGE);
+        const previous = sel.value || saved || 'default';
+        micDeviceMap = new Map();
+        closeMicMenu();
+        setMicSelectPlaceholder('Loading microphones...');
+        try {
+            const controller = new AbortController();
+            const t = setTimeout(() => controller.abort(), 15000);
+            const res = await fetch(`${window.location.origin}/api/list-mics`, { cache: 'no-store', signal: controller.signal });
+            clearTimeout(t);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const list = Array.isArray(data) ? data : ((data && data.devices) ? data.devices : []);
+            sel.innerHTML = '';
+            if (!list.length) {
+                setMicSelectPlaceholder('No microphones found');
+                return;
+            }
+            list.forEach((item, index) => {
+                const mic = normalizeMicOption(item, index);
+                micDeviceMap.set(mic.id, mic);
+                const opt = document.createElement('option');
+                opt.value = mic.id;
+                opt.textContent = mic.label;
+                opt.dataset.deviceIndex = mic.deviceIndex;
+                opt.dataset.name = mic.name;
+                opt.dataset.samplerate = String(mic.samplerate || '');
+                opt.dataset.channels = String(mic.channels || '');
+                sel.appendChild(opt);
+            });
+            if (previous && micDeviceMap.has(previous)) {
+                sel.value = previous;
+            } else if (micDeviceMap.has('default')) {
+                sel.value = 'default';
+            }
+            localStorage.setItem(MIC_DEVICE_STORAGE, sel.value || 'default');
+            updateMicPickerFromSelect();
+        } catch (e) {
+            console.error('Failed to list microphones', e);
+            setMicSelectPlaceholder('No microphones found');
+        }
+    }
+
+    function getSelectedMicPayload() {
+        const sel = document.getElementById('mic-select');
+        if (!sel || !sel.value || sel.value === 'default') return { id: 'default', device: '', label: 'System Default' };
+        const opt = sel.selectedOptions && sel.selectedOptions.length ? sel.selectedOptions[0] : null;
+        const mic = micDeviceMap.get(sel.value) || {};
+        return {
+            id: sel.value,
+            device: (opt && opt.dataset.deviceIndex) || mic.deviceIndex || sel.value,
+            label: (opt && opt.textContent) || mic.label || sel.value
+        };
+    }
+
+    function handleMicDeviceChange() {
+        const sel = document.getElementById('mic-select');
+        if (sel && sel.value) localStorage.setItem(MIC_DEVICE_STORAGE, sel.value);
+        updateMicPickerFromSelect();
+        if (!micPlaying) return;
+        stopMic();
+        setMicButtonLabel('Starting...', false);
+        setTimeout(() => {
+            startMic().then(ok => {
+                if (ok) {
+                    setMicButtonLabel('Stop Mic', true);
+                    updateMicStatus('Playing');
+                } else {
+                    setMicButtonLabel('Mic Failed', false);
+                    setTimeout(() => setMicButtonLabel('Mic', false), 2200);
+                }
+            });
+        }, 120);
+    }
+
+    function toggleMicSettings(event) {
+        if (event) event.stopPropagation();
+        const panel = document.getElementById('mic-settings-panel');
+        const btn = document.getElementById('mic-settings-toggle');
+        if (!panel) return;
+        micSettingsOpen = !micSettingsOpen;
+        panel.style.display = micSettingsOpen ? 'block' : 'none';
+        if (btn) btn.classList.toggle('active', micSettingsOpen);
+        if (micSettingsOpen) refreshMics();
+        else closeMicMenu();
+    }
+
     // Load camera list when advanced page opens
     const advObserver = new MutationObserver(() => {
         const adv = document.getElementById('sidebar-advanced');
         if (adv && adv.style.display !== 'none') {
             refreshCameras();
+            refreshMics();
         }
     });
     window.addEventListener('DOMContentLoaded', ()=>{
@@ -2186,14 +2535,19 @@
         if (adv) advObserver.observe(adv, { attributes:true, attributeFilter:['style'] });
         const sel = document.getElementById('camera-select');
         if (sel) sel.addEventListener('change', restartWebcamForCameraChange);
+        const micSel = document.getElementById('mic-select');
+        if (micSel) micSel.addEventListener('change', handleMicDeviceChange);
         document.addEventListener('click', (event) => {
             if (!event.target.closest('#camera-picker')) closeCameraMenu();
+            if (!event.target.closest('#mic-picker')) closeMicMenu();
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') closeCameraMenu();
+            if (event.key === 'Escape') closeMicMenu();
         });
         // Preload camera list to avoid empty dropdown
         refreshCameras();
+        refreshMics();
     });
     function getSelectedCameraPayload() {
         const sel = document.getElementById('camera-select');
@@ -2358,8 +2712,6 @@
                 clearTimeout(timeoutId);
                 timeoutId = setTimeout(()=>{
                     try { localStorage.setItem('notepad_text', ta.value || ''); } catch(e) {}
-                    const s = document.getElementById('notepad-status');
-                    if (s) { s.textContent = 'Saved'; setTimeout(()=>{ s.textContent = 'Autosaves locally'; }, 1200); }
                 }, 300);
             });
         }
@@ -2399,8 +2751,6 @@
             if (!ta) return;
             ta.value = '';
             try { localStorage.setItem('notepad_text',''); } catch(e) {}
-            const s = document.getElementById('notepad-status');
-            if (s) { s.textContent = 'Cleared'; setTimeout(()=>{ s.textContent = 'Autosaves locally'; }, 1200); }
             ta.focus();
         }
         window.toggleNotepad = toggleNotepad;
@@ -2462,8 +2812,6 @@
                 ta.focus();
             }
         }
-        // Search removed per request
-
         window.openCodeEditor = function(){
             // Ensure notepad is open, then switch to code editor view
             const panel = document.getElementById('notepad-panel');
@@ -2501,35 +2849,230 @@
                 pill.style.setProperty('--y', `${e.clientY - rect.top}px`);
             }catch(_){ }
         }
-        // Live typing: simple toggle button
-        const liveBtn = document.getElementById('np-live-typing');
-        const liveStatus = document.getElementById('live-typing-status');
-        if (liveBtn) {
-            liveBtn.addEventListener('click', function(){
-                liveTypingEnabled = !liveTypingEnabled;
-                const echoSwitch = document.getElementById('echoSwitch');
-                if (echoSwitch) { if (liveTypingEnabled) echoSwitch.classList.add('on'); else echoSwitch.classList.remove('on'); }
-                this.setAttribute('aria-pressed', String(!!liveTypingEnabled));
-                this.title = 'Echo';
-                if (liveStatus) liveStatus.textContent = liveTypingEnabled ? 'On' : 'Off';
-            });
-            liveBtn.setAttribute('aria-pressed','false');
+        function activeTypingMode(){
+            return typingMode === 'ide' ? 'ide' : 'exact';
         }
+        function getCodexEditorText(){
+            const ta = document.getElementById('notepad-text');
+            if (window.__codeMirror && document.getElementById('code-editor')?.style.display !== 'none') {
+                try { return String(window.__codeMirror.getValue() || ''); } catch(_) {}
+            }
+            return String(ta?.value || '');
+        }
+        function sendInputPayload(payload){
+            try {
+                if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
+                    window.inputSocket.send(JSON.stringify(payload));
+                    return true;
+                }
+            } catch (_) {}
+            return false;
+        }
+        function sendTextDirect(text, typingModeOverride){
+            return sendInputPayload({
+                action: 'type_text',
+                text: String(text || ''),
+                direct: true,
+                typing_mode: typingModeOverride || 'exact'
+            });
+        }
+        function sendKeyPair(key){
+            sendInputPayload({ action: 'key', key: key, state: 'down' });
+            sendInputPayload({ action: 'key', key: key, state: 'up' });
+        }
+        function sendShiftTab(){
+            sendInputPayload({ action: 'key', key: 'Shift', state: 'down' });
+            sendInputPayload({ action: 'key', key: 'Tab', state: 'down' });
+            sendInputPayload({ action: 'key', key: 'Tab', state: 'up' });
+            sendInputPayload({ action: 'key', key: 'Shift', state: 'up' });
+        }
+        function dispatchTypingOp(op){
+            if (!op) return false;
+            if (op.type === 'text') return sendTextDirect(op.text, op.typing_mode || 'exact');
+            if (op.key === 'Shift+Tab') { sendShiftTab(); return true; }
+            if (op.key) { sendKeyPair(op.key); return true; }
+            return false;
+        }
+        function lineIndentInfo(line){
+            const raw = String(line || '');
+            let columns = 0;
+            let index = 0;
+            while (index < raw.length) {
+                const ch = raw[index];
+                if (ch === ' ') columns += 1;
+                else if (ch === '\t') columns += 4;
+                else break;
+                index += 1;
+            }
+            return { indentColumns: columns, content: raw.slice(index) };
+        }
+        function isAutoIndentTrigger(content){
+            const trimmed = String(content || '').trimEnd();
+            return /[:{\[(]$/.test(trimmed);
+        }
+        function buildExactTypingOps(text){
+            const raw = String(text || '');
+            return raw ? [{ type: 'text', text: raw, typing_mode: 'exact', units: raw.length }] : [];
+        }
+        function buildIdeTypingOps(text){
+            const raw = String(text || '').replace(/\r\n|\r/g, '\n');
+            if (!raw) return [];
+            const lines = raw.split('\n');
+            const infos = lines.map(lineIndentInfo);
+            let baseIndent = Infinity;
+            for (const info of infos) {
+                if (info.content.trim().length) baseIndent = Math.min(baseIndent, info.indentColumns);
+            }
+            if (!Number.isFinite(baseIndent)) baseIndent = 0;
+            const ops = [];
+            let targetIndent = 0;
+            for (let i = 0; i < infos.length; i += 1) {
+                const info = infos[i];
+                const content = info.content;
+                const hasContent = content.length > 0;
+                const desiredIndent = hasContent ? Math.max(0, info.indentColumns - baseIndent) : targetIndent;
+                if (hasContent) {
+                    const previousTriggeredIndent = i > 0 && isAutoIndentTrigger(infos[i - 1].content);
+                    const shouldDedent = !(previousTriggeredIndent && desiredIndent < targetIndent);
+                    while (shouldDedent && targetIndent - desiredIndent >= 4) {
+                        ops.push({ type: 'key', key: 'Shift+Tab', units: 1 });
+                        targetIndent -= 4;
+                    }
+                    while (desiredIndent - targetIndent >= 4 && i > 0 && !isAutoIndentTrigger(infos[i - 1].content)) {
+                        ops.push({ type: 'key', key: 'Tab', units: 1 });
+                        targetIndent += 4;
+                    }
+                    ops.push({ type: 'text', text: content, typing_mode: 'exact', units: content.length });
+                }
+                if (i < infos.length - 1) {
+                    ops.push({ type: 'key', key: 'Enter', units: 1 });
+                    targetIndent = hasContent && isAutoIndentTrigger(content) ? desiredIndent + 4 : desiredIndent;
+                }
+            }
+            return ops;
+        }
+        function buildTypingOps(text, mode){
+            return (mode || activeTypingMode()) === 'ide' ? buildIdeTypingOps(text) : buildExactTypingOps(text);
+        }
+        function diffInsertedText(prev, next){
+            const oldText = String(prev || '');
+            const newText = String(next || '');
+            if (newText.length <= oldText.length) return '';
+            let prefix = 0;
+            const maxPrefix = Math.min(oldText.length, newText.length);
+            while (prefix < maxPrefix && oldText[prefix] === newText[prefix]) prefix += 1;
+            let suffix = 0;
+            while (
+                suffix < oldText.length - prefix &&
+                suffix < newText.length - prefix &&
+                oldText[oldText.length - 1 - suffix] === newText[newText.length - 1 - suffix]
+            ) {
+                suffix += 1;
+            }
+            if ((oldText.length - prefix - suffix) !== 0) return '';
+            return newText.slice(prefix, newText.length - suffix);
+        }
+        function dispatchIdeText(text){
+            const ops = buildIdeTypingOps(text);
+            for (const op of ops) dispatchTypingOp(op);
+            return ops.length > 0;
+        }
+
+        const modeRoboBtn = document.getElementById('np-mode-robo');
+        const modeEchoBtn = document.getElementById('np-mode-echo');
+        const ideInput = document.getElementById('np-ide-mode');
+        const liveStatus = document.getElementById('live-typing-status');
+
+        function applyCodexControlState(){
+            liveTypingEnabled = codexMode === 'echo';
+            roboEnabled = codexMode === 'robo';
+            if (liveTypingEnabled) liveTypingLastText = getCodexEditorText();
+            if (modeRoboBtn) {
+                modeRoboBtn.classList.toggle('active', codexMode === 'robo');
+                modeRoboBtn.setAttribute('aria-pressed', String(codexMode === 'robo'));
+            }
+            if (modeEchoBtn) {
+                modeEchoBtn.classList.toggle('active', codexMode === 'echo');
+                modeEchoBtn.setAttribute('aria-pressed', String(codexMode === 'echo'));
+            }
+            if (liveStatus) liveStatus.textContent = liveTypingEnabled ? 'On' : 'Off';
+            if (!roboEnabled && window.__stopRoboPlayback) window.__stopRoboPlayback(true);
+            if (roboEnabled && window.__captureRoboSource) window.__captureRoboSource();
+            if (window.__updateRoboControlState) window.__updateRoboControlState();
+        }
+        function setCodexMode(mode){
+            codexMode = mode === 'echo' ? 'echo' : 'robo';
+            applyCodexControlState();
+        }
+        if (modeRoboBtn) modeRoboBtn.addEventListener('click', function(){ setCodexMode('robo'); });
+        if (modeEchoBtn) modeEchoBtn.addEventListener('click', function(){ setCodexMode('echo'); });
+        if (ideInput) {
+            ideInput.addEventListener('change', function(){
+                typingMode = ideInput.checked ? 'ide' : 'exact';
+                if (!roboPlaying) { roboSource = ''; roboOps = []; roboOpIndex = 0; roboOpOffset = 0; }
+                if (roboEnabled && window.__captureRoboSource) window.__captureRoboSource();
+            });
+        }
+
         // Wire up Codex Robo controls
         (function initRoboControls(){
             const play = document.getElementById('np-play-pause');
-            const speedDn = document.getElementById('np-speed-down');
-            const speedUp = document.getElementById('np-speed-up');
             const refresh = document.getElementById('np-refresh');
-            const robo = document.getElementById('np-robo');
-            const speedLabel = document.getElementById('np-speed-label');
+            const wpmInput = document.getElementById('np-wpm-input');
+            const wpmTarget = document.getElementById('np-wpm-target');
+            const wpmActual = document.getElementById('np-wpm-actual');
             const ta = document.getElementById('notepad-text');
 
             function currentCodexText(){
-                if (window.__codeMirror && document.getElementById('code-editor')?.style.display !== 'none') {
-                    try { return String(window.__codeMirror.getValue() || ''); } catch(_) { return String(ta?.value||''); }
+                return getCodexEditorText();
+            }
+            function clampWpm(value){
+                const n = Math.round(Number(value));
+                if (!Number.isFinite(n)) return null;
+                return Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, n));
+            }
+            function formatWpmRange(min, max){
+                return min === max ? String(min) + ' WPM' : String(min) + '-' + String(max) + ' WPM';
+            }
+            function parseWpmRange(raw){
+                const nums = String(raw || '').match(/\d+(?:\.\d+)?/g);
+                if (!nums || !nums.length) throw new Error('missing_wpm');
+                let min = clampWpm(nums[0]);
+                let max = clampWpm(nums.length > 1 ? nums[1] : nums[0]);
+                if (min === null || max === null) throw new Error('invalid_wpm');
+                if (min > max) { const tmp = min; min = max; max = tmp; }
+                return { min, max };
+            }
+            function updateWpmLabel(){
+                const text = formatWpmRange(roboWpmMin, roboWpmMax);
+                if (wpmTarget) wpmTarget.textContent = text;
+            }
+            function commitWpmInput(){
+                if (!wpmInput) return;
+                try {
+                    const parsed = parseWpmRange(wpmInput.value);
+                    roboWpmMin = parsed.min;
+                    roboWpmMax = parsed.max;
+                    wpmInput.classList.remove('invalid');
+                    wpmInput.dataset.lastValid = formatWpmRange(roboWpmMin, roboWpmMax).replace(' WPM', '').replace('-', ',');
+                    updateWpmLabel();
+                } catch (_) {
+                    wpmInput.classList.add('invalid');
                 }
-                return String(ta?.value || '');
+            }
+            function updateActualWpm(forceBlank){
+                if (!wpmActual) return;
+                if (forceBlank || !roboStartedAt || roboSentUnits < 2) {
+                    wpmActual.textContent = 'Actual --';
+                    return;
+                }
+                const elapsedMinutes = Math.max(0.0001, (performance.now() - roboStartedAt) / 60000);
+                const actual = (roboSentUnits / 5) / elapsedMinutes;
+                wpmActual.textContent = 'Actual ' + String(Math.max(1, Math.round(actual)));
+            }
+            function updateRoboControlState(){
+                if (play) play.disabled = !roboEnabled;
+                if (refresh) refresh.disabled = !roboEnabled;
             }
             function updatePlayVisual(){
                 if (!play) return;
@@ -2537,93 +3080,198 @@
                 if (!path) return;
                 if (roboPlaying){ path.setAttribute('d','M6 5h4v14H6zM14 5h4v14h-4z'); play.setAttribute('aria-pressed','true'); }
                 else { path.setAttribute('d','M5 3v18l15-9z'); play.setAttribute('aria-pressed','false'); }
+                updateActualWpm(false);
             }
             function stopTimer(){ if (roboTimer){ clearTimeout(roboTimer); roboTimer = null; } }
-            function nextDelay(){
-                const clampedWpm = Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, roboWpm));
-                const minBand = Math.max(ROBO_WPM_MIN, clampedWpm - ROBO_WPM_BAND);
-                const effWpm = minBand + Math.random() * (clampedWpm - minBand);
-                const baseMs = Math.max(1, Math.floor(12000 / effWpm)); // 5 chars/word => 60000/(wpm*5) = 12000/wpm
-                return baseMs;
+            function sampleWpm(){
+                if (roboWpmMin === roboWpmMax) return roboWpmMin;
+                return roboWpmMin + Math.random() * (roboWpmMax - roboWpmMin);
             }
-            function updateSpeedLabel(){
-                const clampedWpm = Math.max(ROBO_WPM_MIN, Math.min(ROBO_WPM_MAX, roboWpm));
-                const minBand = Math.max(ROBO_WPM_MIN, clampedWpm - ROBO_WPM_BAND);
-                const bandText = Math.floor(minBand) + '' + Math.floor(clampedWpm) + ' wpm';
-                try { document.querySelectorAll('.wpm-text').forEach(function(el){ el.textContent = bandText.toUpperCase(); }); } catch(_) { }
-                if (speedLabel) { speedLabel.textContent = 'Speed: ' + bandText; }
+            function charsPerMs(){
+                return Math.max(ROBO_WPM_MIN, sampleWpm()) / 12000;
             }
-            function sendKey(ch){
-                try{
-                    if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                        const key = (ch === ' ') ? 'Space' : ch;
-                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'down' }));
-                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'up' }));
+            function resetRoboClock(){
+                roboStartedAt = 0;
+                roboSentUnits = 0;
+                roboLastTickAt = 0;
+                roboCharCredit = 0;
+                updateActualWpm(true);
+            }
+            function captureRoboSource(){
+                roboSource = currentCodexText();
+                roboOps = buildTypingOps(roboSource, activeTypingMode());
+                roboOpIndex = 0;
+                roboOpOffset = 0;
+                resetRoboClock();
+            }
+            window.__captureRoboSource = captureRoboSource;
+            function scheduleStep(){
+                stopTimer();
+                roboTimer = setTimeout(step, ROBO_RATE_TICK_MS);
+            }
+            function finishRobo(){
+                roboPlaying = false;
+                stopTimer();
+                updatePlayVisual();
+            }
+            window.__stopRoboPlayback = function(resetClock){
+                roboPlaying = false;
+                stopTimer();
+                if (resetClock) resetRoboClock();
+                updatePlayVisual();
+            };
+            window.__updateRoboControlState = updateRoboControlState;
+            function hasPendingRoboOps(){
+                return roboOpIndex < roboOps.length;
+            }
+            function consumeRoboUnits(units){
+                let consumed = 0;
+                let remaining = Math.max(0, Math.floor(units));
+                while (remaining > 0 && hasPendingRoboOps()) {
+                    const op = roboOps[roboOpIndex];
+                    if (!op) {
+                        roboOpIndex += 1;
+                        roboOpOffset = 0;
+                        continue;
                     }
-                }catch(_){ }
+                    if (op.type === 'text') {
+                        const text = String(op.text || '');
+                        const available = text.length - roboOpOffset;
+                        if (available <= 0) {
+                            roboOpIndex += 1;
+                            roboOpOffset = 0;
+                            continue;
+                        }
+                        const count = Math.min(remaining, available);
+                        dispatchTypingOp({
+                            type: 'text',
+                            text: text.slice(roboOpOffset, roboOpOffset + count),
+                            typing_mode: op.typing_mode || 'exact'
+                        });
+                        roboOpOffset += count;
+                        consumed += count;
+                        remaining -= count;
+                        if (roboOpOffset >= text.length) {
+                            roboOpIndex += 1;
+                            roboOpOffset = 0;
+                        }
+                    } else {
+                        dispatchTypingOp(op);
+                        roboOpIndex += 1;
+                        roboOpOffset = 0;
+                        consumed += 1;
+                        remaining -= 1;
+                    }
+                }
+                return consumed;
             }
             function step(){
-                if (!roboEnabled || !roboPlaying) { stopTimer(); return; }
-                if (roboIndex >= roboSource.length) { roboPlaying = false; updatePlayVisual(); stopTimer(); return; }
-                const ch = roboSource[roboIndex++];
-                sendKey(ch);
-                roboTimer = setTimeout(step, nextDelay());
+                if (!roboEnabled || !roboPlaying) { finishRobo(); return; }
+                if (!hasPendingRoboOps()) { finishRobo(); return; }
+                const now = performance.now();
+                if (!roboStartedAt) {
+                    roboStartedAt = now;
+                    roboLastTickAt = now;
+                }
+                const elapsedMs = Math.max(0, now - roboLastTickAt);
+                roboLastTickAt = now;
+                roboCharCredit += elapsedMs * charsPerMs();
+                let count = Math.floor(roboCharCredit);
+                if (count < 1) {
+                    scheduleStep();
+                    return;
+                }
+                const consumed = consumeRoboUnits(count);
+                roboCharCredit -= consumed;
+                roboSentUnits += consumed;
+                updateActualWpm(false);
+                if (!hasPendingRoboOps()) { finishRobo(); return; }
+                scheduleStep();
             }
             if (play){ play.addEventListener('click', function(){
-                if (!roboEnabled) return; // Only acts in Robo mode
+                if (!roboEnabled) return;
                 roboPlaying = !roboPlaying;
                 updatePlayVisual();
-                if (roboPlaying) { step(); } else { stopTimer(); }
+                if (roboPlaying) {
+                    if (!roboSource || !hasPendingRoboOps()) captureRoboSource();
+                    else resetRoboClock();
+                    scheduleStep();
+                } else {
+                    stopTimer();
+                }
             }); }
-            if (speedDn){ speedDn.addEventListener('click', function(){
-                roboWpm = Math.max(ROBO_WPM_MIN, roboWpm - 5); // slower
-                updateSpeedLabel();
-            }); }
-            if (speedUp){ speedUp.addEventListener('click', function(){
-                roboWpm = Math.min(ROBO_WPM_MAX, roboWpm + 5); // faster
-                updateSpeedLabel();
-            }); }
+            if (wpmInput){
+                wpmInput.addEventListener('input', commitWpmInput);
+                wpmInput.addEventListener('blur', commitWpmInput);
+                wpmInput.addEventListener('keydown', function(ev){
+                    if (ev.key === 'Enter') {
+                        commitWpmInput();
+                        wpmInput.blur();
+                    }
+                });
+            }
             if (refresh){ refresh.addEventListener('click', function(){
+                if (!roboEnabled) return;
                 try {
                     refresh.animate([
                         { transform: 'rotate(0deg)' },
                         { transform: 'rotate(360deg)' }
                     ], { duration: 500, easing: 'ease-in-out' });
                 } catch(_) {}
-                // Capture current content and reset typing progress to start
-                roboSource = currentCodexText();
-                roboIndex = 0;
+                captureRoboSource();
             }); }
-            if (robo){ robo.addEventListener('click', function(){
-                roboEnabled = !roboEnabled;
-                const rs = document.getElementById('roboSwitch');
-                if (rs){ if (roboEnabled) rs.classList.add('on'); else rs.classList.remove('on'); }
-                this.setAttribute('aria-pressed', String(!!roboEnabled));
-                if (!roboEnabled){ roboPlaying = false; updatePlayVisual(); stopTimer(); }
-            }); }
+            updateRoboControlState();
             updatePlayVisual();
-            updateSpeedLabel();
+            commitWpmInput();
+            updateWpmLabel();
         })();
-        function sendLiveTyping(text, key){
+        applyCodexControlState();
+        function sendLiveTyping(text, key, options){
             if (!liveTypingEnabled) return;
             try {
-                if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                    if (key && LIVE_TYPING_SPECIAL_KEYS.has(key)){
-                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'down' }));
-                        window.inputSocket.send(JSON.stringify({ action: 'key', key: key, state: 'up' }));
-                        return;
-                    }
-                    window.inputSocket.send(JSON.stringify({ action: 'type_text', text: String(text || '') }));
+                if (key && LIVE_TYPING_SPECIAL_KEYS.has(key)){
+                    liveTypingLastSpecialAt = Date.now();
+                    sendInputPayload({ action: 'key', key: key, state: 'down' });
+                    sendInputPayload({ action: 'key', key: key, state: 'up' });
+                    return;
                 }
+                options = options || {};
+                if (activeTypingMode() === 'ide') {
+                    const inserted = typeof options.insertedText === 'string'
+                        ? options.insertedText
+                        : diffInsertedText(liveTypingLastText, String(text || ''));
+                    liveTypingLastText = String(text || '');
+                    if (inserted) dispatchIdeText(inserted);
+                    return;
+                }
+                sendInputPayload({
+                    action: 'type_text',
+                    text: String(text || ''),
+                    typing_mode: activeTypingMode(),
+                    allow_full_sync: !!options.allowFullSync,
+                    input_type: String(options.inputType || '')
+                });
             } catch (e) {}
         }
         // Hook notepad changes (debounced text streaming)
         (function initLiveTypingHooks(){
             const ta = document.getElementById('notepad-text');
             if (ta) {
-                const scheduleSend = function(){
+                const scheduleSend = function(ev){
                     const now = Date.now();
-                    const doSend = function(){ try { sendLiveTyping(ta.value); } catch(e){} };
+                    const inputType = ev && ev.inputType ? String(ev.inputType) : '';
+                    const specialRecently = now - liveTypingLastSpecialAt < LIVE_TYPING_SPECIAL_GRACE_MS;
+                    if (roboEnabled && !roboPlaying && window.__captureRoboSource) {
+                        try { window.__captureRoboSource(); } catch(e) {}
+                    }
+                    const doSend = function(){
+                        try {
+                            sendLiveTyping(ta.value, null, {
+                                allowFullSync: !specialRecently,
+                                inputType: inputType
+                            });
+                        } catch(e){}
+                    };
                     if (now - liveTypingLastSent > LIVE_TYPING_MIN_INTERVAL_MS) {
                         liveTypingLastSent = now;
                         doSend();
@@ -2633,7 +3281,7 @@
                     }
                 };
                 ta.addEventListener('input', scheduleSend);
-                ta.addEventListener('keyup', scheduleSend);
+                ta.addEventListener('keyup', function(){ scheduleSend(null); });
                 ta.addEventListener('keydown', function(ev){
                     if (!liveTypingEnabled) return;
                     if (LIVE_TYPING_SPECIAL_KEYS.has(ev.key)){
@@ -2645,32 +3293,21 @@
             function installCodeMirrorHooks(){
                 if (!window.__codeMirror) return;
                 const cm = window.__codeMirror;
-                // Custom bracket behavior: when '(' typed, ensure ')' added and caret moves after ')'
-                try {
-                    if (!cm.__customBracketHandlerInstalled) {
-                        cm.on('beforeChange', function(_cm, change){
-                            if (!liveTypingEnabled) return;
-                            if (change.origin === '+input' && typeof change.text === 'object' && change.text.length === 1) {
-                                const inserted = change.text[0];
-                                if (inserted === '(') {
-                                    // Insert () and place cursor after ')'
-                                    change.update(change.from, change.to, ['()']);
-                                    setTimeout(function(){
-                                        try {
-                                            const pos = cm.getCursor();
-                                            // Move one char to the right to be after ')'
-                                            cm.setCursor({ line: pos.line, ch: pos.ch + 1 });
-                                        } catch(e) {}
-                                    }, 0);
-                                }
-                            }
-                        });
-                        cm.__customBracketHandlerInstalled = true;
-                    }
-                } catch(e) {}
-                const scheduleSendCM = function(){
+                const scheduleSendCM = function(change){
                     const now = Date.now();
-                    const doSend = function(){ try { sendLiveTyping(cm.getValue()); } catch(e){} };
+                    if (roboEnabled && !roboPlaying && window.__captureRoboSource) {
+                        try { window.__captureRoboSource(); } catch(e) {}
+                    }
+                    const insertedText = change && Array.isArray(change.text) ? change.text.join('\n') : null;
+                    const doSend = function(){
+                        try {
+                            sendLiveTyping(cm.getValue(), null, {
+                                allowFullSync: true,
+                                inputType: 'codemirror-change',
+                                insertedText: insertedText
+                            });
+                        } catch(e){}
+                    };
                     if (now - liveTypingLastSent > LIVE_TYPING_MIN_INTERVAL_MS) {
                         liveTypingLastSent = now;
                         doSend();
@@ -2681,7 +3318,7 @@
                 };
                 // Rebind change handler safely to avoid duplicates
                 try { if (cm.__echoChangeHandler) cm.off('change', cm.__echoChangeHandler); } catch(e) {}
-                cm.__echoChangeHandler = function(){ scheduleSendCM(); };
+                cm.__echoChangeHandler = function(_cm, change){ scheduleSendCM(change); };
                 cm.on('change', cm.__echoChangeHandler);
                 // Bind keydown on the editor wrapper (CodeMirror doesn't emit 'keydown' via cm.on)
                 try {
@@ -2699,6 +3336,9 @@
                             else if (cm.indentSelection) cm.indentSelection('subtract');
                             else if (cm.indentLine) cm.indentLine(cm.getCursor().line, 'subtract');
                         } catch(e) {}
+                        if (liveTypingEnabled) {
+                            try { sendShiftTab(); } catch(e) {}
+                        }
                         if (ev.preventDefault) ev.preventDefault();
                         if (ev.stopPropagation) ev.stopPropagation();
                         return;
@@ -2765,38 +3405,6 @@
             // Last resort: open current frame in new tab
             try { if (img && img.src) window.open(img.src, '_blank'); } catch(_) {}
         }
-    }
-
-    function toggleAdvancedTab() {
-        const tab = document.getElementById('advanced-tab');
-        if (!tab) return;
-        tab.style.display = (tab.style.display === 'none' || tab.style.display === '') ? 'block' : 'none';
-    }
-
-    // Fallback snapshot updater when /video WebSocket isn't connected
-    let __videoConnected = false;
-    let __snapshotTimer = null;
-    async function __snapshotOnce(){
-        try{
-            const res = await fetch('/snapshot', { cache: 'no-store' });
-            if(!res.ok) return;
-            const blob = await res.blob();
-            const image = new Image();
-            image.onload = () => {
-                canvas.width = image.naturalWidth;
-                canvas.height = image.naturalHeight;
-                ctx.drawImage(image, 0, 0);
-                URL.revokeObjectURL(image.src);
-            };
-            image.src = URL.createObjectURL(blob);
-        }catch(_){ /* ignore */ }
-    }
-    function __ensureSnapshotFallback(){
-        if(__videoConnected){
-            if(__snapshotTimer){ clearInterval(__snapshotTimer); __snapshotTimer = null; }
-            return;
-        }
-        if(!__snapshotTimer){ __snapshotTimer = setInterval(__snapshotOnce, 1000); }
     }
 
     let videoDecodeBusy = false;
@@ -2954,7 +3562,7 @@
             setTimeout(connectVideo, 2000);
         };
     }
-    function connectInput_legacy_removed() {
+    function connectInputMain() {
         // Avoid multiple sockets
         if (window.inputSocket && (window.inputSocket.readyState === WebSocket.OPEN || window.inputSocket.readyState === WebSocket.CONNECTING)) {
             return;
@@ -2974,7 +3582,7 @@
             
             // If overlay was enabled before connect, subscribe now without toggling UI
             try {
-                if (window.showMouseOverlay && inputSocket.readyState === WebSocket.OPEN) {
+                if (inputSocket.readyState === WebSocket.OPEN) {
                     inputSocket.send(JSON.stringify({ action: 'cursor_broadcast', enabled: true }));
                 }
             } catch (_) {}
@@ -2992,7 +3600,7 @@
             let msg; try { msg = JSON.parse(ev.data); } catch { return; }
             if (msg && msg.type === 'cursor') {
                 if (typeof window.renderRemoteCursor === 'function') {
-                    window.renderRemoteCursor(msg.x, msg.y);
+                    window.renderRemoteCursor(msg.x, msg.y, msg.cursor_css, msg.cursor_visible);
                 }
             }
         });
@@ -3046,12 +3654,9 @@
                         linkText.textContent = data.message || 'Failed to get new URL';
                     }
                 } else if (data.type === 'clipboard_content') {
-                    // Handle clipboard content from server
-                    navigator.clipboard.writeText(data.data).then(() => {
-                        console.log(" Clipboard set successfully on client.");
-                    }).catch(err => {
-                        console.error(" Failed to set clipboard on client:", err);
-                    });
+                    handleClipboardContent(data);
+                } else if (data.type === 'clipboard_set_result') {
+                    handleClipboardSetResult(data);
                 }
             } catch (e) {
                 console.error("Error parsing input message:", e);
@@ -3069,35 +3674,18 @@
             updateStatus("Connection Error");
         };
 
-        // Subscribe helper
-        function sendSubscribe_legacy(enabled) {
-            if (!window.inputSocket) return;
-            const send = () => window.inputSocket.send(JSON.stringify({ action: 'cursor_broadcast', enabled }));
-            if (window.inputSocket.readyState === WebSocket.OPEN) send();
-            else if (window.inputSocket.readyState === WebSocket.CONNECTING) {
-                const once = () => { try { window.inputSocket.removeEventListener('open', once); } catch(_) {}; send(); };
-                window.inputSocket.addEventListener('open', once);
-            }
+        if (window.__inputControlsInitialized) {
+            return;
         }
-
-        // Render helper (single source of truth)
-        window.renderRemoteCursor_legacy = function(nx, ny){
-            const dot = document.getElementById('mouse-overlay');
-            if (!dot || !window.showMouseOverlay) return;
-            const m = getRenderMetrics(); if (!m) return;
-            const x = m.offsetX + Math.max(0, Math.min(1, +nx || 0)) * m.renderWidth;
-            const y = m.offsetY + Math.max(0, Math.min(1, +ny || 0)) * m.renderHeight;
-            dot.style.left = x + 'px';
-            dot.style.top  = y + 'px';
-            if (dot.style.display !== 'block') dot.style.display = 'block';
-        };
+        window.__inputControlsInitialized = true;
 
         function sendEvent(event) {
             if (blockMouse && (event.action === 'click' || event.action === 'drag' || event.action === 'move' || event.action === 'scroll')) {
                 return;
             }
-            if (inputSocket.readyState === WebSocket.OPEN) {
-                inputSocket.send(JSON.stringify(event));
+            const sock = window.inputSocket;
+            if (sock && sock.readyState === WebSocket.OPEN) {
+                sock.send(JSON.stringify(event));
             }
         }
 
@@ -3106,9 +3694,36 @@
           const canvas = document.getElementById('screen');
           const videoArea = document.querySelector('.video-area');
             const dot = document.getElementById('mouse-overlay');
+          const allowedCursorCss = new Set([
+            'default', 'pointer', 'text', 'wait', 'progress', 'crosshair',
+            'move', 'grab', 'grabbing', 'help', 'not-allowed',
+            'ew-resize', 'ns-resize', 'nwse-resize', 'nesw-resize'
+          ]);
+          let remoteCursorCss = 'default';
+          window.__pointerInViewer = false;
 
           // global flag
           if (typeof window.showMouseOverlay === 'undefined') window.showMouseOverlay = false;
+
+          function normalizeCursorCss(value) {
+            const css = String(value || 'default').trim().toLowerCase();
+            return allowedCursorCss.has(css) ? css : 'default';
+          }
+
+          function applyRemoteCursorCss(value) {
+            if (typeof value !== 'undefined' && value !== null && String(value).trim() !== '') {
+              remoteCursorCss = normalizeCursorCss(value);
+            }
+            try { if (canvas) canvas.style.cursor = remoteCursorCss; } catch (_) {}
+            try { if (videoArea) videoArea.style.cursor = remoteCursorCss; } catch (_) {}
+            try {
+              if (window.__pointerInViewer && !_canvasDragging) {
+                document.body.style.cursor = remoteCursorCss;
+              }
+            } catch (_) {}
+            return remoteCursorCss;
+          }
+          window.applyRemoteCursorCss = applyRemoteCursorCss;
 
           function getRenderMetrics() {
             if (!videoArea) return null;
@@ -3127,7 +3742,12 @@
             return { renderWidth, renderHeight, offsetX, offsetY };
           }
 
-          function renderRemoteCursor(nx, ny) {
+          function renderRemoteCursor(nx, ny, cursorCss, cursorVisible) {
+            applyRemoteCursorCss(cursorCss);
+            if (cursorVisible === false) {
+              if (dot) dot.style.display = 'none';
+              return;
+            }
             if (!dot || !window.showMouseOverlay) return;
             const m = getRenderMetrics();
             if (!m) return;
@@ -3159,7 +3779,7 @@
                       __cursorLastLogTime = now;
                 }
             } catch(_) {}
-                  renderRemoteCursor(msg.x, msg.y);
+                  renderRemoteCursor(msg.x, msg.y, msg.cursor_css, msg.cursor_visible);
                 }
               } catch (_) {}
             };
@@ -3179,28 +3799,6 @@
               window.inputSocket.addEventListener('open', once, { once: true });
             }
           }
-
-          // Replace your connectInput() with this (or ensure these two lines run on open)
-          window.connectInput = function connectInput() {
-            const WSS_PROTOCOL = (location.protocol === 'https:') ? 'wss' : 'ws';
-            const WS_INPUT_URL = `${WSS_PROTOCOL}://${location.host}/input`;
-            try { if (window.inputSocket) window.inputSocket.close(); } catch (_) {}
-            window.inputSocket = new WebSocket(WS_INPUT_URL);
-
-            window.inputSocket.onopen = function () {
-              console.log(' Input socket connected');
-              attachCursorHandler(window.inputSocket);     // < ensure handler is attached
-              flushMicClientEvents();
-              if (window.showMouseOverlay) sendSubscribe(true); // < resubscribe after reconnect
-            };
-            window.inputSocket.onclose = function () {
-              console.log(' Input socket disconnected; reconnecting...');
-              setTimeout(connectInput, 1000);
-            };
-            window.inputSocket.onerror = function (e) {
-              console.error(' Input socket error:', e);
-            };
-          };
 
           window.toggleMouseOverlay = function () {
             window.showMouseOverlay = !window.showMouseOverlay;
@@ -3227,8 +3825,10 @@
               window.connectInput();
             }
             attachCursorHandler(window.inputSocket);
-            sendSubscribe(window.showMouseOverlay);
+            sendSubscribe(true);
           };
+          window.renderRemoteCursor = renderRemoteCursor;
+          if (window.inputSocket) attachCursorHandler(window.inputSocket);
         })();
 
         function isOverLocalUI(ev) {
@@ -3248,7 +3848,7 @@
             return false;
         }
 
-        let isDragging = false;
+        let _canvasDragging = false;
 
         function getCanvasCoordinates(event) {
             const rect = canvas.getBoundingClientRect();
@@ -3275,7 +3875,7 @@
         document.addEventListener('mousedown', event => {
             if (isOverLocalUI(event)) return;
             if (window.__snapSelecting) return;
-            isDragging = true;
+            _canvasDragging = true;
             const coords = getCanvasCoordinates(event);
             if (coords) {
                 sendEvent({ action: 'click', x: coords.x, y: coords.y, button: event.button === 0 ? 'left' : 'right', state: 'down' });
@@ -3286,12 +3886,11 @@
         document.addEventListener('mouseup', event => {
             if (isOverLocalUI(event)) return;
             if (window.__snapSelecting) return;
-            isDragging = false;
+            _canvasDragging = false;
             const coords = getCanvasCoordinates(event);
             if (coords) {
                 sendEvent({ action: 'click', x: coords.x, y: coords.y, button: event.button === 0 ? 'left' : 'right', state: 'up' });
-                // Reset cursor to pointer
-                document.body.style.cursor = 'pointer';
+                try { document.body.style.cursor = window.applyRemoteCursorCss ? window.applyRemoteCursorCss() : 'default'; } catch (_) {}
             }
         });
         document.addEventListener('mousemove', event => {
@@ -3299,15 +3898,11 @@
             if (window.__snapSelecting) return;
             const coords = getCanvasCoordinates(event);
             if (coords) {
-                sendEvent({ action: isDragging ? 'drag' : 'move', x: coords.x, y: coords.y });
-                // Note: Mouse overlay position is now updated by server cursor broadcast
-                // No need to update overlay position here since we're showing remote cursor
-                // Change cursor to pointer when hovering (if not dragging)
-                if (!isDragging) {
-                    document.body.style.cursor = 'pointer';
-                    // Debug: log cursor style
-                    // console.log('Cursor style:', document.body.style.cursor);
-                }
+                try { window.__pointerInViewer = true; } catch (_) {}
+                sendEvent({ action: _canvasDragging ? 'drag' : 'move', x: coords.x, y: coords.y });
+                if (!_canvasDragging) try { document.body.style.cursor = window.applyRemoteCursorCss ? window.applyRemoteCursorCss() : 'default'; } catch (_) {}
+            } else {
+                try { window.__pointerInViewer = false; } catch (_) {}
             }
         });
         document.addEventListener('wheel', event => {
@@ -3317,25 +3912,64 @@
             if (coords) sendEvent({ action: 'scroll', deltaY: event.deltaY });
         });
         // Keyboard event handling - simple and reliable
+        const remoteHeldKeys = new Set();
+        function remoteKeyId(key) {
+            return String(key || '');
+        }
+        function isRemoteModifierKey(key) {
+            const k = remoteKeyId(key).toLowerCase();
+            return k === 'shift' || k === 'shiftleft' || k === 'shiftright'
+                || k === 'control' || k === 'ctrl'
+                || k === 'alt' || k === 'meta' || k === 'os' || k === 'win';
+        }
+        function sendRemoteKey(key, state, extra) {
+            const sock = window.inputSocket;
+            if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+            const payload = Object.assign({ action: 'key', key, state }, extra || {});
+            sock.send(JSON.stringify(payload));
+            return true;
+        }
+        function restoreRemoteCursor() {
+            try { document.body.style.cursor = window.applyRemoteCursorCss ? window.applyRemoteCursorCss() : 'default'; } catch (_) {}
+        }
+        function releaseRemoteKeys() {
+            if (!remoteHeldKeys.size) return;
+            for (const key of Array.from(remoteHeldKeys)) {
+                sendRemoteKey(key, 'up', { reason: 'release_all' });
+            }
+            remoteHeldKeys.clear();
+            restoreRemoteCursor();
+        }
+        window.releaseRemoteKeys = releaseRemoteKeys;
+        window.addEventListener('blur', releaseRemoteKeys);
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) releaseRemoteKeys();
+        });
         document.addEventListener('keydown', function(e) {
             if (window.__splashVisible) return;
             // When keyboard popup is open, block typing controls
             const kb = document.getElementById('kb-overlay');
             if (kb && kb.style.display === 'flex') return;
             if (isKeyBlockedByUser(e)) return;
-            if (blockKeyboard) return;
-            if (e.repeat) return; // ignore auto-repeat to prevent multiple characters
+            if (blockKeyboard) {
+                releaseRemoteKeys();
+                return;
+            }
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             try { if (e.target && typeof e.target.closest === 'function' && (e.target.closest('.CodeMirror') || e.target.closest('#code-editor'))) return; } catch(_) {}
             
             e.preventDefault();
-            
-            // Change cursor to text when typing
-            document.body.style.cursor = 'text';
-            
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({ action: 'key', key: e.key, state: 'down' }));
+
+            if (e.repeat) {
+                if (!isRemoteModifierKey(e.key)) {
+                    sendRemoteKey(e.key, 'press', { repeat: true });
+                }
+                return;
             }
+
+            const keyId = remoteKeyId(e.key);
+            remoteHeldKeys.add(keyId);
+            sendRemoteKey(e.key, 'down');
         });
 
         document.addEventListener('keyup', function(e) {
@@ -3344,23 +3978,20 @@
             const kb = document.getElementById('kb-overlay');
             if (kb && kb.style.display === 'flex') return;
             if (isKeyBlockedByUser(e)) return;
-            if (blockKeyboard) return;
+            const keyId = remoteKeyId(e.key);
+            if (blockKeyboard && !remoteHeldKeys.has(keyId)) return;
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             try { if (e.target && typeof e.target.closest === 'function' && (e.target.closest('.CodeMirror') || e.target.closest('#code-editor'))) return; } catch(_) {}
             
             e.preventDefault();
-            
-            // Reset cursor to pointer after typing
-            document.body.style.cursor = 'pointer';
-            
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({ action: 'key', key: e.key, state: 'up' }));
-            }
+            remoteHeldKeys.delete(keyId);
+            sendRemoteKey(e.key, 'up');
         });
     }
     if (typeof window.connectInput !== 'function') {
-        window.connectInput = connectInput_legacy_removed;
+        window.connectInput = connectInputMain;
     }
+
 
     // Sidebar functions
     function toggleMouseBlock() {
@@ -3374,6 +4005,9 @@
     }
     function toggleKeyboardBlock() {
         blockKeyboard = !blockKeyboard;
+        if (blockKeyboard && typeof window.releaseRemoteKeys === 'function') {
+            window.releaseRemoteKeys();
+        }
         const btn = document.getElementById('btn-disable-keyboard');
         if (btn) {
             btn.innerHTML = blockKeyboard
@@ -3453,48 +4087,121 @@
         }
     }
 
-    function legacyCopyFallback(text, btn) {
-        const ta = document.createElement('textarea');
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); } catch (_) {}
-        document.body.removeChild(ta);
-        showTempStatus(btn, 'Copied!');
+    function setClipboardStatus(text, isError) {
+        const el = document.getElementById('clipboard-status');
+        if (!el) return;
+        el.textContent = text || '';
+        el.classList.toggle('error', !!isError);
     }
 
-    function showTempStatus(btn, msg) {
-        const originalTitle = btn.title || btn.getAttribute('aria-label') || '';
-        btn.title = msg;
-        btn.setAttribute('aria-label', msg);
-        setTimeout(() => {
-            btn.title = originalTitle;
-            btn.setAttribute('aria-label', originalTitle);
-        }, 2000);
+    function sendInputSocketPayload(payload) {
+        const send = () => {
+            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
+                window.inputSocket.send(JSON.stringify(payload));
+                return true;
+            }
+            return false;
+        };
+        if (send()) return true;
+        try {
+            if (typeof window.connectInput === 'function') window.connectInput();
+            if (window.inputSocket && window.inputSocket.readyState === WebSocket.CONNECTING) {
+                const once = () => {
+                    try { window.inputSocket.removeEventListener('open', once); } catch (_) {}
+                    send();
+                };
+                window.inputSocket.addEventListener('open', once, { once: true });
+                return true;
+            }
+        } catch (_) {}
+        return false;
     }
 
-    function sendCtrlAltDel() {
-        if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-            window.inputSocket.send(JSON.stringify({type: 'key_combo', combo: 'ctrl_alt_del'}));
+    function copyTextViaHiddenTextarea(text) {
+        const area = document.createElement('textarea');
+        area.value = String(text || '');
+        area.setAttribute('readonly', 'readonly');
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        area.style.top = '0';
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+        try { document.body.removeChild(area); } catch (_) {}
+        return ok;
+    }
+
+    async function writeLocalClipboard(text) {
+        const value = String(text || '');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+                await navigator.clipboard.writeText(value);
+                return true;
+            } catch (err) {
+                console.warn('navigator.clipboard.writeText failed; trying textarea fallback', err);
+            }
+        }
+        return copyTextViaHiddenTextarea(value);
+    }
+
+    async function readLocalClipboardForPush() {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            try {
+                return await navigator.clipboard.readText();
+            } catch (err) {
+                console.warn('navigator.clipboard.readText failed; falling back to paste prompt', err);
+            }
+        }
+        const pasted = window.prompt('Paste text to push to the remote clipboard:');
+        return pasted == null ? null : String(pasted);
+    }
+
+    async function handleClipboardContent(data) {
+        const text = data && typeof data.data === 'string' ? data.data : '';
+        window.__lastPulledClipboard = text;
+        if (data && data.error) {
+            setClipboardStatus(data.error, true);
+            return;
+        }
+        const ok = await writeLocalClipboard(text);
+        if (ok) {
+            setClipboardStatus(`Pulled ${text.length} chars`, false);
+            console.log(' Clipboard copied from remote to local client.');
+        } else {
+            setClipboardStatus('Pulled text, but browser blocked clipboard write. Text is stored in window.__lastPulledClipboard.', true);
+            console.error('Failed to write pulled clipboard text to local browser clipboard.');
+        }
+    }
+
+    function handleClipboardSetResult(data) {
+        if (data && data.success) {
+            setClipboardStatus(`Pushed ${Number(data.length || 0)} chars`, false);
+        } else {
+            setClipboardStatus((data && data.error) || 'Push failed', true);
         }
     }
 
     function getRemoteClipboard() {
-        if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-            window.inputSocket.send(JSON.stringify({action: 'get_clipboard'}));
+        setClipboardStatus('Pulling...', false);
+        if (!sendInputSocketPayload({action: 'get_clipboard'})) {
+            setClipboardStatus('Input socket is not connected', true);
         }
     }
 
-    function setRemoteClipboard() {
-        navigator.clipboard.readText().then(text => {
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({action: 'set_clipboard', data: text}));
-            }
-        }).catch(err => {
-            console.error('Failed to read clipboard: ', err);
-        });
+    async function setRemoteClipboard() {
+        setClipboardStatus('Reading local clipboard...', false);
+        const text = await readLocalClipboardForPush();
+        if (text == null) {
+            setClipboardStatus('Push cancelled', true);
+            return;
+        }
+        if (!sendInputSocketPayload({action: 'set_clipboard', data: text})) {
+            setClipboardStatus('Input socket is not connected', true);
+        } else {
+            setClipboardStatus('Pushing...', false);
+        }
     }
 
     // Draggable trigger functionality
@@ -3564,16 +4271,6 @@
         });
     }
 
-    function resetTriggerPosition() {
-        const trigger = document.getElementById('sidebar-trigger');
-        if (!trigger) return;
-        
-        // Reset to original position
-        trigger.style.left = 'auto';
-        trigger.style.top = '50%';
-        trigger.style.right = '20px';
-        trigger.style.transform = 'translateY(-50%)';
-    }
     function openKeyboardPage(){
         try {
             const overlay = document.getElementById('kb-overlay');
@@ -3609,26 +4306,6 @@
                         } catch (e) {}
                     });
                 });
-
-                // Helper: find key element for a keyboard event
-                function findKeyElement(evt){
-                    const eventKey = (evt.key || '').toLowerCase();
-                    const list = Array.from(keys);
-                    return list.find(function(key){
-                        const keyText = key.textContent.replace(/\s+/g,' ').trim().toLowerCase();
-                        if (keyText === eventKey) return true;
-                        if (keyText === 'space' && (eventKey === ' ' || evt.code === 'Space')) return true;
-                        if (keyText === 'enter' && eventKey === 'enter') return true;
-                        if (keyText === 'delete' && (eventKey === 'delete' || eventKey === 'backspace')) return true;
-                        if (keyText === 'tab' && eventKey === 'tab') return true;
-                        if (keyText === 'shift' && eventKey === 'shift') return true;
-                        if (keyText === 'ctrl' && (eventKey === 'control' || eventKey === 'ctrl')) return true;
-                        if (keyText === 'alt' && eventKey === 'alt') return true;
-                        if (keyText === 'caps lock' && (eventKey === 'capslock' || eventKey === 'caps lock')) return true;
-                        if (keyText === 'esc' && (eventKey === 'escape' || eventKey === 'esc')) return true;
-                        return false;
-                    }) || null;
-                }
 
                 // Disable keyboard control inside popup; only mouse should work
                 const swallow = function(ev){ ev.preventDefault(); ev.stopPropagation(); };
@@ -3676,7 +4353,7 @@
         }
     }
 
-    // Advanced SSH Terminal controls
+    // Advanced terminal controls
     function toggleTerminal() {
         const panel = document.getElementById('terminal-panel');
         if (!panel) return;
@@ -3728,13 +4405,6 @@
         window.addEventListener('mouseup', function(){ dragging = false; });
     })();
 
-    function reconnect() {
-        updateStatus('Reconnecting...');
-        connectVideo();
-        window.connectInput();
-        if (audioPlaying) startAudio();
-        if (micPlaying) startMic();
-    }
     function getRenderedCanvasMetrics() {
         const rect = canvas.getBoundingClientRect();
         const canvasRatio = canvas.width && canvas.height ? canvas.width / canvas.height : rect.width / Math.max(1, rect.height);
@@ -4007,7 +4677,7 @@
             updateAudioStatus('Connecting');
 
             let playPtr = 0;
-            const bufferSize = 512; // smaller buffer for lower latency
+            const bufferSize = 1024;
             audioScriptNode = audioContext.createScriptProcessor(bufferSize, 0, 1);
             audioScriptNode.onaudioprocess = function(e) {
                 const out = e.outputBuffer.getChannelData(0);
@@ -4067,10 +4737,9 @@
                 const float32 = new Float32Array(int16.length);
                 for (let i = 0; i < int16.length; i++) float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
                 audioBufferQueue.push(float32);
-                // Keep jitter buffer small (~30ms target, drop if >80ms)
+                // Keep a small studio-style cushion so audio stays even instead of crackly.
                 let sampPerMs = (audioFormat && audioFormat.samplerate) ? (audioFormat.samplerate / 1000) : 48;
-                const maxQueued = Math.floor(sampPerMs * 80);
-                const targetQueued = Math.floor(sampPerMs * 30);
+                const maxQueued = Math.floor(sampPerMs * 220);
                 let total = 0;
                 for (let k = 0; k < audioBufferQueue.length; k++) total += audioBufferQueue[k].length;
                 while (total > maxQueued && audioBufferQueue.length > 0) {
@@ -4204,7 +4873,12 @@
             if (micAudioContext.state === 'suspended') {
                 await micAudioContext.resume();
             }
-            micSocket = new WebSocket(`${WSS_URL}/mic`);
+            const selectedMic = getSelectedMicPayload();
+            const micUrl = new URL(`${WSS_URL}/mic`);
+            if (selectedMic && selectedMic.device) {
+                micUrl.searchParams.set('device', selectedMic.device);
+            }
+            micSocket = new WebSocket(micUrl.toString());
             micSocket.binaryType = 'arraybuffer';
             pendingMicHeader = true;
             micFormat = null;
@@ -4213,7 +4887,7 @@
             updateMicStatus('Connecting');
 
             let playPtr = 0;
-            const bufferSize = 512;
+            const bufferSize = 1024;
             micScriptNode = micAudioContext.createScriptProcessor(bufferSize, 0, 1);
             micScriptNode.onaudioprocess = function(e) {
                 const out = e.outputBuffer.getChannelData(0);
@@ -4273,7 +4947,7 @@
                     for (let i = 0; i < int16.length; i++) float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
                     micBufferQueue.push(float32);
                     const sampPerMs = (micFormat && micFormat.samplerate) ? (micFormat.samplerate / 1000) : 48;
-                    const maxQueued = Math.floor(sampPerMs * 120);
+                    const maxQueued = Math.floor(sampPerMs * 220);
                     let total = 0;
                     for (let k = 0; k < micBufferQueue.length; k++) total += micBufferQueue[k].length;
                     while (total > maxQueued && micBufferQueue.length > 0) {
@@ -4347,9 +5021,10 @@
             if (elapsedSeconds > 0) {
                 const fps = (frameCount / elapsedSeconds).toFixed(0);
                 updateStatus(`Connected | ${fps} FPS`);
-                // Update sidebar FPS display
-                document.getElementById('sidebar-fps').textContent = fps;
-                document.getElementById('current-fps').textContent = fps;
+                const sidebarFps = document.getElementById('sidebar-fps');
+                if (sidebarFps) sidebarFps.textContent = fps;
+                const currentFps = document.getElementById('current-fps');
+                if (currentFps) currentFps.textContent = fps;
             }
             frameCount = 0;
             lastTime = performance.now();
@@ -4396,13 +5071,19 @@
         }
 
         function updateQuality(value, immediate = false) {
-            value = Math.max(10, Math.min(100, parseInt(value, 10) || 65));
+            value = Math.max(10, Math.min(100, parseInt(value, 10) || 85));
             pendingQualityValue = value;
             // Update all quality displays
             document.getElementById('current-quality').textContent = value;
             try { document.getElementById('sidebar-quality').textContent = value; } catch(e){}
             document.getElementById('quality-value').textContent = value; // Update value display
-            try { document.getElementById('quality-slider').style.setProperty('--val', `${value}%`); } catch(_) {}
+            try {
+                const slider = document.getElementById('quality-slider');
+                if (slider) {
+                    slider.value = String(value);
+                    slider.style.setProperty('--val', `${value}%`);
+                }
+            } catch(_) {}
 
             if (qualitySendTimer) {
                 clearTimeout(qualitySendTimer);
@@ -4540,9 +5221,8 @@
 
             // Method display names and descriptions
             const methodInfo = {
-                'auto': 'Auto (Best Performance)',
-                'dxcam': 'DXCam (100+ FPS)',
-                'bettercam': 'BetterCam (100+ FPS)'
+                'bettercam': 'BetterCam (100+ FPS)',
+                'dxcam': 'DXCam (100+ FPS)'
             };
 
             // Add available methods
@@ -4568,14 +5248,6 @@
                 case 'working_correctly':
                     status = 'working';
                     text = `${verification.method_active} (${verification.fps.toFixed(1)} FPS)`;
-                    break;
-                case 'auto_selected':
-                    status = 'working';
-                    text = `Auto: ${verification.method_active} (${verification.fps.toFixed(1)} FPS)`;
-                    break;
-                case 'fallback_active':
-                    status = 'warning';
-                    text = `Fallback: ${verification.method_active} (${verification.fps.toFixed(1)} FPS)`;
                     break;
                 case 'not_working':
                     status = 'error';

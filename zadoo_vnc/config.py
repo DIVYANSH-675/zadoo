@@ -16,13 +16,29 @@ TRIGGER_ICON_IMAGE_PATH = str(RUNTIME_DIR / "trigger-icon.png")
 SPLASH_IMAGE_PATH = str(RUNTIME_DIR / "splash.png")
 
 
+def env_int(name, default, minimum=None, maximum=None):
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
 def _load_dotenv(path: str = ".env"):
     """Load simple KEY=VALUE pairs from .env in CWD and project directory."""
+    loaded_paths = set()
+
     def _apply(p: str):
         try:
-            if not os.path.exists(p):
+            resolved = os.path.realpath(p)
+            if resolved in loaded_paths or not os.path.exists(resolved):
                 return
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            loaded_paths.add(resolved)
+            with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith("#"):

@@ -16,7 +16,6 @@ bettercam==1.0.0
 imagecodecs==2026.3.6
 sounddevice==0.5.2
 soundcard==0.4.6
-aiortc==1.14.0
 paramiko==4.0.0
 pywinpty==3.0.3; platform_system == "Windows"
 resend==2.30.0

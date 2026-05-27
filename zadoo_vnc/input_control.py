@@ -7,6 +7,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -15,11 +16,48 @@ from contextlib import contextmanager
 
 import websockets
 
-from .dependencies import *
+from .config import env_int
+from .dependencies import HAS_KEYBOARD, HAS_PYAUTOGUI, HAS_PYPERCLIP, keyboard, pyautogui, pyperclip
 from .logging_utils import _log_except, _log_fallback, _log_try_ok
-from .win32_input import *
+from .win32_input import (
+    INPUT,
+    MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL,
+    MOUSEINPUT,
+    SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
+    _GetAsyncKeyState,
+    _sendinput_mouse_button,
+    _sendinput_mouse_move_abs,
+    user32,
+)
 
 class InputControlMixin:
+    ALERT_PRESET_HOTKEYS = {
+        'A': ('shift+numpad 5', 'shift+clear'),
+        'B': ('shift+numpad 0', 'shift+insert'),
+        'C': ('shift+numpad 8', 'shift+up'),
+        'D': ('shift+numpad 2', 'shift+down'),
+    }
+    ALERT_PRESET_KEY_NAMES = {
+        'A': ('num 5', 'numpad 5', 'kp_5', 'num5', 'clear'),
+        'B': ('num 0', 'numpad 0', 'kp_0', 'num0', 'insert'),
+        'C': ('num 8', 'numpad 8', 'kp_8', 'num8', 'up'),
+        'D': ('num 2', 'numpad 2', 'kp_2', 'num2', 'down'),
+    }
+    ALERT_PRESET_VK_KEYS = {
+        'A': (0x65, 0x0C),  # NumPad5 / Clear
+        'B': (0x60, 0x2D),  # NumPad0 / Insert
+        'C': (0x68, 0x26),  # NumPad8 / Up
+        'D': (0x62, 0x28),  # NumPad2 / Down
+    }
 
     def _get_hotkey_lock(self):
         lock = getattr(self, "_hotkey_lock", None)
@@ -37,21 +75,48 @@ class InputControlMixin:
         except Exception:
             pass
 
+    def _get_send_loop(self, log_name=None):
+        loop = getattr(self, "loop", None)
+        if loop:
+            return loop
+        try:
+            loop = asyncio.get_running_loop()
+            self.loop = loop
+            if log_name:
+                _log_try_ok(log_name)
+            return loop
+        except Exception as exc:
+            if log_name:
+                _log_except(log_name, exc)
+            return None
+
+    def _queue_ws_send(self, websocket, payload, log_name):
+        if websocket is None:
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(websocket.send(payload))
+            return True
+        except RuntimeError:
+            loop = self._get_send_loop(f"{log_name}.get_loop")
+            if not loop:
+                return False
+            try:
+                asyncio.run_coroutine_threadsafe(websocket.send(payload), loop)
+                return True
+            except Exception as exc:
+                _log_except(f"{log_name}.queue", exc)
+                return False
+        except Exception as exc:
+            _log_except(f"{log_name}.queue", exc)
+            return False
+
     def _load_alert_presets_from_env(self):
         """Override alert presets (A/B/C/D) from environment variables.
         Supported keys per preset (e.g. for A):
           - ALERT_A_TITLE, ALERT_A_MESSAGE
           - ALERT_A="Title|Message" (or "Title::Message")
         """
-        # Optionally load .env if python-dotenv is available
-        try:
-            from dotenv import load_dotenv  # type: ignore
-            try:
-                load_dotenv()
-            except Exception:
-                pass
-        except Exception:
-            pass
         def _pair_for(key: str):
             base = f"ALERT_{key}"
             title = os.getenv(f"{base}_TITLE")
@@ -83,8 +148,6 @@ class InputControlMixin:
                 print("[alerts] Using default alert presets (no env overrides)")
         except Exception:
             pass
-        self._custom_capture_hotkeys = []
-        self._repeat_lock = threading.Lock()
 
     def _capture_char(self, ch: str):
         try:
@@ -106,12 +169,7 @@ class InputControlMixin:
         print(f" New input client connected from {websocket.remote_address}")
         self.input_clients.add(websocket)
         _log_try_ok("input_event_handler.connect", str(getattr(websocket, 'remote_address', '')))
-        try:
-            if self.loop is None:
-                self.loop = asyncio.get_running_loop()
-                _log_try_ok("input_event_handler.grab_loop")
-        except Exception:
-            _log_except("input_event_handler.grab_loop", sys.exc_info()[1])
+        self._get_send_loop("input_event_handler.grab_loop")
         
         try:
             # On connection, immediately get the URL for the client UI
@@ -245,31 +303,9 @@ class InputControlMixin:
                 'type': 'refresh_status',
                 'message': f'Refreshing tunnel on current port...'
             }))
-            
-            # Switch ports and get new URL
-            loop = asyncio.get_running_loop()
-            print(" Calling tunnel_manager.refresh_tunnel()...")
-            new_url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
-            print(f" refresh_tunnel() returned: {new_url}")
-            
-            if new_url:
-                current_port = self.tunnel_manager.primary_port
-                print(f" Sending success response with URL: {new_url}")
-                await websocket.send(json.dumps({
-                    'type': 'refresh_complete',
-                    'success': True,
-                    'url': new_url,
-                    'port': current_port,
-                    'message': f'Successfully refreshed tunnel on port {current_port}',
-                    'email_status': (self.tunnel_manager.last_email_message if self.tunnel_manager else None)
-                }))
-            else:
-                print(" No URL returned from refresh_tunnel()")
-                await websocket.send(json.dumps({
-                    'type': 'refresh_complete',
-                    'success': False,
-                    'error': 'Failed to generate new tunnel'
-                }))
+            payload = await self._refresh_tunnel_payload()
+            payload["type"] = "refresh_complete"
+            await websocket.send(json.dumps(payload))
                 
         except Exception as e:
             print(f" Error in handle_refresh_via_websocket: {e}")
@@ -282,24 +318,9 @@ class InputControlMixin:
     async def handle_get_url_via_websocket(self, websocket):
         """Handle public URL request via WebSocket"""
         try:
-            if self.tunnel_manager and self.tunnel_manager.get_current_url():
-                current_url = self.tunnel_manager.get_current_url()
-                current_port = self.tunnel_manager.current_port
-                await websocket.send(json.dumps({
-                    'type': 'public_url_response',
-                    'success': True,
-                    'url': current_url,
-                    'port': current_port,
-                    'message': f'Current public URL for port {current_port}',
-                    'email_status': (self.tunnel_manager.last_email_message if self.tunnel_manager else None)
-                }))
-                # Proactive emails disabled (single-tunnel mode) to avoid duplicates
-            else:
-                await websocket.send(json.dumps({
-                    'type': 'public_url_response',
-                    'success': False,
-                    'error': 'No public URL available'
-                }))
+            payload = self._public_url_payload()
+            payload["type"] = "public_url_response"
+            await websocket.send(json.dumps(payload))
         except Exception as e:
             await websocket.send(json.dumps({
                 'type': 'public_url_response',
@@ -317,7 +338,6 @@ class InputControlMixin:
 
     def process_event(self, event, websocket=None):
         action = event.get('action')
-        event_type = event.get('type')
         
         try:
             if action in ['click', 'move', 'drag']:
@@ -339,7 +359,7 @@ class InputControlMixin:
                 if websocket is not None:
                     self._handle_get_clipboard(websocket)
             elif action == 'set_clipboard':
-                self._handle_set_clipboard(event)
+                self._handle_set_clipboard(event, websocket)
             elif action == 'set_clipboard_image':
                 self._handle_set_clipboard_image(event, websocket)
         except Exception as e:
@@ -349,16 +369,7 @@ class InputControlMixin:
         if websocket is None:
             return
         try:
-            data = json.dumps(payload)
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(websocket.send(data))
-                return
-            except RuntimeError:
-                pass
-            loop = getattr(self, "loop", None)
-            if loop:
-                asyncio.run_coroutine_threadsafe(websocket.send(data), loop)
+            self._queue_ws_send(websocket, json.dumps(payload), "_send_clipboard_image_result")
         except Exception as e:
             logging.warning("Failed to send clipboard image result: %s", e)
 
@@ -377,7 +388,7 @@ class InputControlMixin:
             if not data_b64:
                 raise ValueError("missing image data")
 
-            max_bytes = self._env_int("ZADOO_CLIPBOARD_IMAGE_MAX_BYTES", 5_000_000, 1, 100_000_000)
+            max_bytes = env_int("ZADOO_CLIPBOARD_IMAGE_MAX_BYTES", 5_000_000, 1, 100_000_000)
             if len(data_b64.encode("ascii", errors="ignore")) > ((max_bytes + 2) // 3) * 4 + 4096:
                 raise ValueError("image clipboard payload exceeds size limit")
             image_data = base64.b64decode(data_b64, validate=True)
@@ -393,43 +404,26 @@ class InputControlMixin:
                     temp_file.write(image_data)
                     temp_file_path = temp_file.name
 
-                if os.name == "nt":
-                    ps_cmd = (
-                        "Add-Type -AssemblyName System.Windows.Forms; "
-                        "Add-Type -AssemblyName System.Drawing; "
-                        "$img=[System.Drawing.Image]::FromFile($env:ZADOO_CLIPBOARD_IMAGE_PATH); "
-                        "[System.Windows.Forms.Clipboard]::SetImage($img); "
-                        "$img.Dispose()"
-                    )
-                    child_env = os.environ.copy()
-                    child_env["ZADOO_CLIPBOARD_IMAGE_PATH"] = temp_file_path
-                    result = subprocess.run(
-                        ["powershell", "-NoProfile", "-Command", ps_cmd],
-                        capture_output=True,
-                        text=True,
-                        env=child_env,
-                        timeout=10,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "PowerShell clipboard operation failed")
-                elif os.path.exists("/usr/bin/xclip"):
-                    result = subprocess.run(
-                        ["xclip", "-selection", "clipboard", "-t", mime, "-i", temp_file_path],
-                        capture_output=True,
-                        timeout=10,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError("xclip clipboard operation failed")
-                elif os.path.exists("/usr/bin/pbcopy"):
-                    result = subprocess.run(
-                        ["pbcopy", "-t", mime, "-i", temp_file_path],
-                        capture_output=True,
-                        timeout=10,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError("pbcopy clipboard operation failed")
-                else:
+                if os.name != "nt":
                     raise RuntimeError("no image clipboard backend available")
+                ps_cmd = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    "Add-Type -AssemblyName System.Drawing; "
+                    "$img=[System.Drawing.Image]::FromFile($env:ZADOO_CLIPBOARD_IMAGE_PATH); "
+                    "[System.Windows.Forms.Clipboard]::SetImage($img); "
+                    "$img.Dispose()"
+                )
+                child_env = os.environ.copy()
+                child_env["ZADOO_CLIPBOARD_IMAGE_PATH"] = temp_file_path
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True,
+                    text=True,
+                    env=child_env,
+                    timeout=10,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip() or "PowerShell clipboard operation failed")
             finally:
                 if temp_file_path:
                     try:
@@ -469,7 +463,6 @@ class InputControlMixin:
                 # Fallback via PowerShell (Windows)
                 _log_fallback("clipboard.get_text", "powershell_get_clipboard", "pyperclip_unavailable_or_failed")
                 try:
-                    import subprocess
                     ps = subprocess.run(['powershell', '-NoProfile', '-Command', 'Get-Clipboard -Raw'], 
                                      capture_output=True, text=True, timeout=5)
                     if ps.returncode == 0 and ps.stdout:
@@ -485,7 +478,7 @@ class InputControlMixin:
             
             # Send clipboard content with metadata for remote connections
             error = None
-            max_bytes = self._env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
+            max_bytes = env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
             if len((content or '').encode("utf-8", errors="ignore")) > max_bytes:
                 error = "clipboard text exceeds size limit"
                 content = ''
@@ -499,10 +492,7 @@ class InputControlMixin:
             if error:
                 clipboard_data['error'] = error
             
-            asyncio.run_coroutine_threadsafe(
-                websocket.send(json.dumps(clipboard_data)),
-                asyncio.get_running_loop()
-            )
+            self._queue_ws_send(websocket, json.dumps(clipboard_data), "_handle_get_clipboard")
         except Exception as e:
             print(f" Error getting clipboard: {e}")
             # Send empty clipboard content on error
@@ -514,19 +504,16 @@ class InputControlMixin:
                     'timestamp': time.time(),
                     'source': 'server'
                 }
-                asyncio.run_coroutine_threadsafe(
-                    websocket.send(json.dumps(error_data)),
-                    asyncio.get_running_loop()
-                )
+                self._queue_ws_send(websocket, json.dumps(error_data), "_handle_get_clipboard")
             except Exception:
                 pass
 
-    def _handle_set_clipboard(self, event):
+    def _handle_set_clipboard(self, event, websocket=None):
         try:
             data = event.get('data', '')
             if not isinstance(data, str):
                 data = str(data if data is not None else '')
-            max_bytes = self._env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
+            max_bytes = env_int("ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000)
             if len(data.encode("utf-8", errors="ignore")) > max_bytes:
                 raise ValueError("clipboard text exceeds size limit")
             ok = False
@@ -538,31 +525,12 @@ class InputControlMixin:
                     print(f" Clipboard set via pyperclip: {len(data)} chars")
                 except Exception as e:
                     print(f" pyperclip copy failed: {e}")
-                    _log_fallback("clipboard.set_text", "clip_exe", str(e), e)
+                    _log_fallback("clipboard.set_text", "powershell_set_clipboard", str(e), e)
                     ok = False
             
             if not ok:
-                # Fallback via clip.exe (Windows)
-                _log_fallback("clipboard.set_text", "clip_exe", "pyperclip_unavailable_or_failed")
+                _log_fallback("clipboard.set_text", "powershell_set_clipboard", "pyperclip_unavailable_or_failed")
                 try:
-                    import subprocess
-                    p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
-                    _ = p.communicate(input=data.encode('utf-8'))
-                    if p.returncode == 0:
-                        ok = True
-                        print(f" Clipboard set via clip.exe: {len(data)} chars")
-                    else:
-                        print(f" clip.exe failed with returncode: {p.returncode}")
-                        _log_fallback("clipboard.set_text", "powershell_set_clipboard", f"clip_exit={p.returncode}")
-                except Exception as e:
-                    print(f" clip.exe error: {e}")
-                    _log_fallback("clipboard.set_text", "powershell_set_clipboard", str(e), e)
-            
-            # Additional fallback via PowerShell
-            if not ok:
-                _log_fallback("clipboard.set_text", "powershell_set_clipboard", "clip_exe_unavailable_or_failed")
-                try:
-                    import subprocess
                     ps_command = (
                         "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; "
                         "Set-Clipboard -Value ([Console]::In.ReadToEnd())"
@@ -584,9 +552,54 @@ class InputControlMixin:
                     print(" PowerShell clipboard set timeout")
                 except Exception as e:
                     print(f" PowerShell clipboard set error: {e}")
-                    
+
+            if not ok:
+                raise RuntimeError("failed to set clipboard")
+            if websocket is not None:
+                self._queue_ws_send(websocket, json.dumps({
+                    'type': 'clipboard_set_result',
+                    'success': True,
+                    'length': len(data),
+                    'timestamp': time.time(),
+                }), "_handle_set_clipboard")
         except Exception as e:
             print(f" Error setting clipboard: {e}")
+            if websocket is not None:
+                try:
+                    self._queue_ws_send(websocket, json.dumps({
+                        'type': 'clipboard_set_result',
+                        'success': False,
+                        'error': str(e),
+                        'timestamp': time.time(),
+                    }), "_handle_set_clipboard")
+                except Exception:
+                    pass
+
+    def _map_view_norm_to_screen_norm(self, nx, ny):
+        def clamp01(value):
+            try:
+                return max(0.0, min(1.0, float(value)))
+            except Exception:
+                return 0.0
+
+        nx = clamp01(nx)
+        ny = clamp01(ny)
+        try:
+            capturer = getattr(self, "screen_capturer", None)
+            region = capturer.get_active_region_norm() if capturer and hasattr(capturer, "get_active_region_norm") else None
+            if not region:
+                return nx, ny
+            x0 = clamp01(region.get("x0", 0.0))
+            y0 = clamp01(region.get("y0", 0.0))
+            x1 = clamp01(region.get("x1", 1.0))
+            y1 = clamp01(region.get("y1", 1.0))
+            left, right = min(x0, x1), max(x0, x1)
+            top, bottom = min(y0, y1), max(y0, y1)
+            if right <= left or bottom <= top:
+                return nx, ny
+            return left + nx * (right - left), top + ny * (bottom - top)
+        except Exception:
+            return nx, ny
 
     def _handle_mouse_event(self, event):
         """Handle mouse move/drag/click events with robust fallbacks."""
@@ -616,12 +629,6 @@ class InputControlMixin:
                     if not ok:
                         _log_fallback("mouse.move", "SetCursorPos", "sendinput_move_failed")
                         user32.SetCursorPos(px, py)
-                        try:
-                            import win32api
-                            win32api.SetCursorPos((px, py))
-                        except Exception as exc:
-                            _log_fallback("mouse.move", "user32_SetCursorPos_only", "win32api_SetCursorPos_failed", exc)
-                            pass
                 except Exception as exc:
                     _log_fallback("mouse.move", "SetCursorPos", "sendinput_move_exception", exc)
                     try:
@@ -634,6 +641,7 @@ class InputControlMixin:
             if x is not None and y is not None and vw > 0 and vh > 0:
                 nx = clamp01(x)
                 ny = clamp01(y)
+                nx, ny = self._map_view_norm_to_screen_norm(nx, ny)
                 px = int(vx + nx * vw)
                 py = int(vy + ny * vh)
 
@@ -705,6 +713,7 @@ class InputControlMixin:
                 'pageup': 'pageup', 'pagedown': 'pagedown',
                 'insert': 'insert', 'caps lock': 'capslock', 'capslock': 'capslock',
                 'control': 'ctrl', 'ctrl': 'ctrl', 'alt': 'alt',
+                'shift': 'shift', 'shiftleft': 'shift', 'shiftright': 'shift',
                 'meta': 'winleft', 'win': 'winleft', 'windows': 'winleft'
             }
 
@@ -719,13 +728,8 @@ class InputControlMixin:
             if state == 'down':
                 try:
                     pyautogui.keyDown(key_name)
-                except Exception as exc:
-                    # Fallback to press if keyDown unsupported
-                    _log_fallback("keyboard.key_down", "pyautogui.press", str(exc), exc)
-                    try:
-                        pyautogui.press(key_name)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
             elif state == 'up':
                 try:
                     pyautogui.keyUp(key_name)
@@ -746,20 +750,9 @@ class InputControlMixin:
             cnt = len(getattr(self, 'input_clients', []) or [])
             print(f" Broadcasting alert to {cnt} input client(s): '{title}'  '{message}'")
             payload = json.dumps({'type': 'controller_alert', 'title': title, 'message': message})
-            loop = getattr(self, 'loop', None)
-            if not loop:
-                try:
-                    loop = asyncio.get_running_loop()
-                    self.loop = loop
-                    print("  Captured running event loop for alert broadcast")
-                    _log_try_ok("_broadcast_controller_alert.get_loop")
-                except Exception:
-                    loop = None
-                    _log_except("_broadcast_controller_alert.get_loop", sys.exc_info()[1])
             for ws in list(self.input_clients):
                 try:
-                    if ws and loop:
-                        asyncio.run_coroutine_threadsafe(ws.send(payload), loop)
+                    if self._queue_ws_send(ws, payload, "_broadcast_controller_alert"):
                         _log_try_ok("_broadcast_controller_alert.queue", str(getattr(ws, 'remote_address', '?')))
                 except Exception as e:
                     print(f"  Failed to queue alert to a client: {e}")
@@ -767,6 +760,20 @@ class InputControlMixin:
         except Exception as e:
             print(f"Error broadcasting controller alert: {e}")
             _log_except("_broadcast_controller_alert", e)
+
+    def _broadcast_alert_preset(self, code: str, cooldown_seconds: float = 0.4):
+        code = str(code or "").upper()
+        now = time.time()
+        cooldowns = getattr(self, "_alert_preset_cooldowns", None)
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+            self._alert_preset_cooldowns = cooldowns
+        if now < float(cooldowns.get(code, 0.0) or 0.0):
+            return False
+        cooldowns[code] = now + cooldown_seconds
+        title, message = self.alert_presets.get(code, ("Alert", code))
+        self._broadcast_controller_alert(title, message)
+        return True
 
     def _broadcast_keystroke_capture(self, key: str, state: str, is_modifier: bool):
         """Broadcast a captured keystroke to all connected input clients.
@@ -785,20 +792,9 @@ class InputControlMixin:
                 'is_modifier': bool(is_modifier),
             })
 
-            loop = getattr(self, 'loop', None)
-            if not loop:
-                try:
-                    loop = asyncio.get_running_loop()
-                    self.loop = loop
-                    _log_try_ok("_broadcast_keystroke_capture.get_loop")
-                except Exception:
-                    loop = None
-                    _log_except("_broadcast_keystroke_capture.get_loop", sys.exc_info()[1])
-
             for ws in list(getattr(self, 'input_clients', []) or []):
                 try:
-                    if ws and loop:
-                        asyncio.run_coroutine_threadsafe(ws.send(payload), loop)
+                    if self._queue_ws_send(ws, payload, "_broadcast_keystroke_capture"):
                         _log_try_ok("_broadcast_keystroke_capture.queue", str(getattr(ws, 'remote_address', '?')))
                 except Exception as e:
                     print(f"  Failed to queue keystroke to a client: {e}")
@@ -816,20 +812,6 @@ class InputControlMixin:
             # Be permissive if we can't read the state
             _log_fallback("numlock.read_off", "assume_off", str(exc), exc)
             return True
-
-    def _numlock_on(self) -> bool:
-        """Return True if NumLock is ON (toggled)."""
-        try:
-            import ctypes  # VK_NUMLOCK = 0x90
-            return bool(ctypes.windll.user32.GetKeyState(0x90) & 1)
-        except Exception as exc:
-            # Fallback to keyboard.is_toggled on Windows if available
-            _log_fallback("numlock.read_on", "keyboard.is_toggled", str(exc), exc)
-            try:
-                import keyboard
-                return bool(getattr(keyboard, "is_toggled", lambda *_: False)("num lock"))
-            except Exception:
-                return False
 
     def _install_numlock_hotkeys(self, numlock_off: bool):
         """Register/remove all global hotkeys depending on NumLock state."""
@@ -863,15 +845,13 @@ class InputControlMixin:
             add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
             add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
 
-            # Presets: Shift+Num5/8/2/0 (and their NumLock-off equivalents)
-            add(keyboard.add_hotkey('shift+numpad 5', lambda: self._broadcast_controller_alert("Custom", "A"), suppress=False))
-            add(keyboard.add_hotkey('shift+clear',    lambda: self._broadcast_controller_alert("Custom", "A"), suppress=False))
-            add(keyboard.add_hotkey('shift+numpad 8', lambda: self._broadcast_controller_alert("Custom", "B"), suppress=False))
-            add(keyboard.add_hotkey('shift+up',       lambda: self._broadcast_controller_alert("Custom", "B"), suppress=False))
-            add(keyboard.add_hotkey('shift+numpad 2', lambda: self._broadcast_controller_alert("Custom", "C"), suppress=False))
-            add(keyboard.add_hotkey('shift+down',     lambda: self._broadcast_controller_alert("Custom", "C"), suppress=False))
-            add(keyboard.add_hotkey('shift+numpad 0', lambda: self._broadcast_controller_alert("Custom", "D"), suppress=False))
-            add(keyboard.add_hotkey('shift+insert',   lambda: self._broadcast_controller_alert("Custom", "D"), suppress=False))
+            for code, hotkeys in self.ALERT_PRESET_HOTKEYS.items():
+                for hotkey in hotkeys:
+                    add(keyboard.add_hotkey(
+                        hotkey,
+                        lambda code=code: self._broadcast_alert_preset(code),
+                        suppress=False,
+                    ))
 
     def _watch_numlock_and_update_hotkeys(self):
         """Background watcher: re-register hotkeys when NumLock state changes."""
@@ -923,7 +903,9 @@ class InputControlMixin:
 
             # common punctuation (unshifted forms)
             for sym in "-=`,./;\\[]'":
-                add(sym, (lambda s=sym: (lambda: self._capture_char(s)))())
+                def make_cb(s=sym):
+                    return lambda: self._capture_char(s)
+                add(sym, make_cb())
 
             print("[custom] capture hotkeys installed")
             _log_try_ok("_install_custom_capture_hotkeys.done")
@@ -1005,12 +987,7 @@ class InputControlMixin:
         def _worker():
             cooldown_until = {}
             shift_keys = (0x10, 0xA0, 0xA1)
-            preset_keys = {
-                "A": (0x65, 0x0C),  # NumPad5 / Clear
-                "B": (0x60, 0x2D),  # NumPad0 / Insert
-                "C": (0x68, 0x26),  # NumPad8 / Up
-                "D": (0x62, 0x28),  # NumPad2 / Down
-            }
+            preset_keys = self.ALERT_PRESET_VK_KEYS
             while getattr(self, "_host_hotkey_poller_active", False):
                 try:
                     is_shift = any(_pressed(vk) for vk in shift_keys)
@@ -1026,10 +1003,8 @@ class InputControlMixin:
                                 self._end_custom_alert_capture(source="poller")
                         if not getattr(self, "custom_alert_active", False):
                             for code, keys in preset_keys.items():
-                                if any(_pressed(vk) for vk in keys) and now >= cooldown_until.get(code, 0):
-                                    title, message = self.alert_presets.get(code, ("Alert", code))
-                                    self._broadcast_controller_alert(title, message)
-                                    cooldown_until[code] = now + 0.4
+                                if any(_pressed(vk) for vk in keys):
+                                    self._broadcast_alert_preset(code)
                     time.sleep(0.05)
                 except Exception:
                     time.sleep(0.1)
@@ -1043,7 +1018,7 @@ class InputControlMixin:
         
         try:
             self._register_keyboard_cleanup()
-            # NEW: register hotkeys based on current NumLock state and keep them in sync
+            # Register hotkeys based on current NumLock state and keep them in sync
             try:
                 self._install_numlock_hotkeys(self._is_numlock_off())
                 if not getattr(self, "_numlock_watcher_active", False):
@@ -1052,11 +1027,9 @@ class InputControlMixin:
             except Exception:
                 pass
             def on_key_event(event):
-                # ---- NEW: conditional suppression ----
                 try:
-                    import keyboard as _kbd
                     if getattr(self, "_global_hook_suppress", False) and not getattr(self, "_synth_injecting", False):
-                        _kbd.suppress_event()
+                        keyboard.suppress_event()
                 except Exception:
                     pass
                 # Combos (NumPad, independent of NumLock; trigger on keydown of the numpad key):
@@ -1113,37 +1086,9 @@ class InputControlMixin:
                             is_shift = False
 
                         if is_shift:
-                            # A: numpad 5 (or 'clear')
-                            if name in ('num 5','numpad 5','kp_5','num5','clear'):
-                                now = time.time()
-                                if now >= getattr(self, '_a_alert_cooldown_until', 0.0):
-                                    title, message = self.alert_presets.get('A', ('Alert','A'))
-                                    self._broadcast_controller_alert(title, message)
-                                    self._a_alert_cooldown_until = now + 0.40
-                                    return
-                            # B: numpad 0 (or 'insert')
-                            if name in ('num 0','numpad 0','kp_0','num0','insert'):
-                                now = time.time()
-                                if now >= getattr(self, '_b_alert_cooldown_until', 0.0):
-                                    title, message = self.alert_presets.get('B', ('Alert','B'))
-                                    self._broadcast_controller_alert(title, message)
-                                    self._b_alert_cooldown_until = now + 0.40
-                                    return
-                            # C: numpad 8 (or 'up')
-                            if name in ('num 8','numpad 8','kp_8','num8','up'):
-                                now = time.time()
-                                if now >= getattr(self, '_c_alert_cooldown_until', 0.0):
-                                    title, message = self.alert_presets.get('C', ('Alert','C'))
-                                    self._broadcast_controller_alert(title, message)
-                                    self._c_alert_cooldown_until = now + 0.40
-                                    return
-                            # D: numpad 2 (or 'down')
-                            if name in ('num 2','numpad 2','kp_2','num2','down'):
-                                now = time.time()
-                                if now >= getattr(self, '_d_alert_cooldown_until', 0.0):
-                                    title, message = self.alert_presets.get('D', ('Alert','D'))
-                                    self._broadcast_controller_alert(title, message)
-                                    self._d_alert_cooldown_until = now + 0.40
+                            for code, names in self.ALERT_PRESET_KEY_NAMES.items():
+                                if name in names:
+                                    self._broadcast_alert_preset(code)
                                     return
                 except Exception:
                     pass
@@ -1235,49 +1180,129 @@ class InputControlMixin:
         """Disable keystroke capture"""
         self.keystroke_capture_enabled = False
 
+    def _paste_text_chunk(self, text, reason):
+        if not HAS_PYPERCLIP:
+            return False
+        _log_fallback("keyboard.type_text", "clipboard_paste", reason)
+        previous = None
+        had_previous = False
+        try:
+            previous = pyperclip.paste()
+            had_previous = True
+        except Exception as exc:
+            _log_fallback("keyboard.type_text.restore_clipboard", "paste_without_restore", str(exc), exc)
+        try:
+            pyperclip.copy(text)
+            pyautogui.hotkey('ctrl', 'v')
+            return True
+        except Exception as exc:
+            _log_fallback("keyboard.type_text", "clipboard_paste_failed", str(exc), exc)
+            return False
+        finally:
+            if had_previous:
+                try:
+                    current = pyperclip.paste()
+                    if current == text:
+                        pyperclip.copy(previous)
+                    else:
+                        _log_fallback(
+                            "keyboard.type_text.restore_clipboard",
+                            "leave_external_clipboard",
+                            "clipboard_changed_before_restore",
+                        )
+                except Exception as exc:
+                    _log_fallback("keyboard.type_text.restore_clipboard", "leave_new_clipboard", str(exc), exc)
+
     def _type_text_chunk(self, text):
         if not text:
             return
+        text = str(text)
         if all(ord(ch) < 128 for ch in text):
-            pyautogui.typewrite(text, interval=0)
-            return
-        if HAS_PYPERCLIP:
-            _log_fallback("keyboard.type_text", "clipboard_paste", "non_ascii_text")
-            previous = None
-            had_previous = False
             try:
-                previous = pyperclip.paste()
-                had_previous = True
+                i = 0
+                while i < len(text):
+                    ch = text[i]
+                    if ch == '\r':
+                        if i + 1 < len(text) and text[i + 1] == '\n':
+                            i += 1
+                        pyautogui.press('enter')
+                    elif ch == '\n':
+                        pyautogui.press('enter')
+                    elif ch == '\t':
+                        pyautogui.press('tab')
+                    else:
+                        start = i
+                        while i < len(text) and text[i] not in '\r\n\t':
+                            i += 1
+                        if start < i:
+                            pyautogui.typewrite(text[start:i], interval=0)
+                        continue
+                    i += 1
+                return
             except Exception as exc:
-                _log_fallback("keyboard.type_text.restore_clipboard", "paste_without_restore", str(exc), exc)
-                pass
-            pyperclip.copy(text)
-            pyautogui.hotkey('ctrl', 'v')
-            if had_previous:
-                try:
-                    pyperclip.copy(previous)
-                except Exception as exc:
-                    _log_fallback("keyboard.type_text.restore_clipboard", "leave_new_clipboard", str(exc), exc)
-                    pass
+                if self._paste_text_chunk(text, f"ascii_typewrite_failed:{exc}"):
+                    return
+                raise
+        if self._paste_text_chunk(text, "non_ascii_text"):
             return
         _log_fallback("keyboard.type_text", "ascii_char_loop", "pyperclip_unavailable_for_non_ascii")
-        for ch in text:
+        i = 0
+        while i < len(text):
+            ch = text[i]
             if ord(ch) < 128:
-                pyautogui.typewrite(ch, interval=0)
+                if ch == '\r':
+                    if i + 1 < len(text) and text[i + 1] == '\n':
+                        i += 1
+                    pyautogui.press('enter')
+                elif ch == '\n':
+                    pyautogui.press('enter')
+                elif ch == '\t':
+                    pyautogui.press('tab')
+                else:
+                    pyautogui.typewrite(ch, interval=0)
             else:
                 logging.warning("Cannot type non-ASCII character without pyperclip: %r", ch)
+            i += 1
+
+    def _typing_mode_from_event(self, event):
+        mode = str(event.get('typing_mode') or event.get('mode') or 'exact').strip().lower()
+        return 'ide' if mode == 'ide' else 'exact'
+
+    def _event_flag(self, event, name):
+        value = event.get(name, False)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _normalize_text_for_typing_mode(self, text, typing_mode):
+        if typing_mode == 'ide':
+            return re.sub(r"(\r\n|\r|\n)[\t ]+", lambda match: match.group(1), text)
+        return text
+
+    def _sync_full_text(self, text, typing_mode):
+        text = self._normalize_text_for_typing_mode(text, typing_mode)
+        pyautogui.hotkey('ctrl', 'a')
+        if text:
+            self._type_text_chunk(text)
 
     def _handle_type_text(self, event, websocket=None):
-        """Handle live typing text by calculating append-only delta and typing it."""
+        """Handle text typing; direct chunks bypass live-typing diff state."""
         try:
             text = event.get('text', '')
             if not isinstance(text, str):
                 text = str(text)
+            typing_mode = self._typing_mode_from_event(event)
+            if self._event_flag(event, 'direct'):
+                text = self._normalize_text_for_typing_mode(text, typing_mode)
+                if text:
+                    self._type_text_chunk(text)
+                return
             # Initialize state map lazily
             if not hasattr(self, 'live_typing_text_by_client'):
                 self.live_typing_text_by_client = {}
             key = websocket if websocket is not None else 'global'
             prev = self.live_typing_text_by_client.get(key, '')
+            typed_delta = False
             # Compute common prefix length
             max_len = min(len(prev), len(text))
             prefix_len = 0
@@ -1287,14 +1312,10 @@ class InputControlMixin:
             if len(text) > len(prev) and prefix_len == len(prev):
                 append_part = text[len(prev):]
                 if append_part:
-                    # Strip indentation that follows a newline so remote doesn't receive auto-indented spaces/tabs
-                    try:
-                        import re
-                        append_part = re.sub(r"\n[\t ]+", "\n", append_part)
-                    except Exception:
-                        pass
+                    append_part = self._normalize_text_for_typing_mode(append_part, typing_mode)
                     try:
                         self._type_text_chunk(append_part)
+                        typed_delta = True
                     except Exception:
                         logging.warning("Failed to type appended live text", exc_info=True)
             else:
@@ -1311,15 +1332,23 @@ class InputControlMixin:
                 if len(text) > len(prev) and deleted_count == 0:
                     inserted = text[prefix_len: len(text) - suffix_len]
                     if inserted:
-                        try:
-                            import re
-                            inserted = re.sub(r"\n[\t ]+", "\n", inserted)
-                        except Exception:
-                            pass
+                        inserted = self._normalize_text_for_typing_mode(inserted, typing_mode)
                         try:
                             self._type_text_chunk(inserted)
+                            typed_delta = True
                         except Exception:
                             logging.warning("Failed to type inserted live text", exc_info=True)
+            if not typed_delta and text != prev:
+                if self._event_flag(event, 'allow_full_sync'):
+                    try:
+                        self._sync_full_text(text, typing_mode)
+                        typed_delta = True
+                    except Exception:
+                        logging.warning("Failed to full-sync live text", exc_info=True)
+                else:
+                    logging.debug(
+                        "Live typing full-text edit was not replayed by type_text diff; key events handle deletions/replacements when available."
+                    )
             # Update last seen text
             self.live_typing_text_by_client[key] = text
         except Exception as e:

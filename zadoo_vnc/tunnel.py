@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.request
 
+from .config import env_int
 from .dependencies import resend
 from .logging_utils import _log_fallback
 from .network import get_local_ip
@@ -36,17 +37,6 @@ class CloudflareTunnelManager:
 
         # Email port configuration (which port to include in email).
         self.email_port = None
-
-    def _env_int(self, name, default, minimum=None, maximum=None):
-        try:
-            value = int(str(os.getenv(name, default)).strip())
-        except Exception:
-            value = int(default)
-        if minimum is not None:
-            value = max(int(minimum), value)
-        if maximum is not None:
-            value = min(int(maximum), value)
-        return value
 
     def _verify_cloudflared_signature(self):
         if os.name != "nt" or os.getenv("ZADOO_SKIP_CLOUDFLARED_SIGNATURE_CHECK", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -123,7 +113,7 @@ class CloudflareTunnelManager:
         try:
             print(" Downloading cloudflared...")
             url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-            timeout = self._env_int("ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT", 30, 1, 600)
+            timeout = env_int("ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT", 30, 1, 600)
 
             with urllib.request.urlopen(url, timeout=timeout) as response, open(self.cloudflared_path, "wb") as out_file:
                 out_file.write(response.read())
@@ -333,19 +323,20 @@ class CloudflareTunnelManager:
         """Clean up the tunnel process owned by this manager."""
         print(" Cleaning up owned tunnel process...")
 
-        for process_name, process in [("Primary", self.primary_tunnel_process)]:
-            if process:
+        process_name = "Primary"
+        process = self.primary_tunnel_process
+        if process:
+            try:
+                print(f" Stopping {process_name} tunnel...")
+                process.terminate()
+                process.wait(timeout=5)
+                print(f" {process_name} tunnel stopped")
+            except Exception:
                 try:
-                    print(f" Stopping {process_name} tunnel...")
-                    process.terminate()
-                    process.wait(timeout=5)
-                    print(f" {process_name} tunnel stopped")
+                    process.kill()
+                    print(f" {process_name} tunnel force killed")
                 except Exception:
-                    try:
-                        process.kill()
-                        print(f" {process_name} tunnel force killed")
-                    except Exception:
-                        print(f" Could not stop {process_name} tunnel")
+                    print(f" Could not stop {process_name} tunnel")
 
         self.primary_tunnel_process = None
         self.primary_public_url = None

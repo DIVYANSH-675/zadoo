@@ -10,8 +10,6 @@ import platform
 import signal
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 
 from .config import _load_dotenv
@@ -67,22 +65,6 @@ def configure_logging():
             pass
     except Exception:
         pass
-    try:
-        from logging.handlers import RotatingFileHandler
-
-        file_handler = RotatingFileHandler(
-            "vnc_debug.log",
-            maxBytes=5_000_000,
-            backupCount=2,
-            encoding="utf-8",
-        )
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-        root = logging.getLogger()
-        if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
-            root.addHandler(file_handler)
-    except Exception:
-        pass
 
 
 def install_startup_task():
@@ -130,17 +112,9 @@ class ProcessProtector:
 
     def start_protection(self):
         atexit.register(self.cleanup)
-        signal.signal(signal.SIGTERM, self.signal_handler)
+        if sys.platform != "win32" and hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
-        self.monitor_thread = threading.Thread(target=self.monitor_processes, daemon=True)
-        self.monitor_thread.start()
-
-    def monitor_processes(self):
-        while self.protected:
-            try:
-                time.sleep(30)
-            except Exception:
-                pass
 
     def restart_protection(self):
         try:
@@ -219,48 +193,36 @@ def main():
     from .server import VNCServer
     from .tunnel import CloudflareTunnelManager
 
-    print("=" * 60)
-    print("COMPLETE VNC WITH TUNNEL")
-    print("=" * 60)
-
     if not (HAS_PYAUTOGUI and (HAS_DXCAM or HAS_BETTERCAM)):
         print("Missing critical dependencies: pyautogui plus dxcam or bettercam are required")
         sys.exit(1)
 
-    print(f"\nSystem: {platform.system()} {platform.release()}")
     local_ip = get_local_ip()
     desired_web_port = choose_web_port(6173)
     secondary_port = choose_secondary_port(desired_web_port)
-    print(f"Local network: http://{local_ip}:{desired_web_port}")
-    print(f"Selected web server port: {desired_web_port}")
-    if secondary_port:
-        print(f"Selected secondary web server port: {secondary_port}")
 
     use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
     tunnel_manager = None
     if use_tunnel:
-        print(f"Selected tunnel port (single): {desired_web_port}")
         tunnel_manager = CloudflareTunnelManager(primary_port=desired_web_port)
-        print("Tunnel will start after the local server binds successfully.")
 
     print(f"\n{'=' * 60}")
-    print("VNC SERVER STARTING...")
+    print("COMPLETE VNC WITH TUNNEL")
+    print(f"System: {platform.system()} {platform.release()}")
     print(f"Local: http://localhost:{desired_web_port}")
     print(f"Network: http://{local_ip}:{desired_web_port}")
+    if secondary_port:
+        print(f"Secondary: http://localhost:{secondary_port}")
     if use_tunnel and tunnel_manager:
-        print("Internet: Check above for public URL")
+        print(f"Tunnel port: {desired_web_port}")
     print("To stop: Press Ctrl+C")
     print("=" * 60)
 
     vnc_server = VNCServer(desired_web_port, secondary_port)
     vnc_server.enable_tunnel = use_tunnel
-    try:
-        if tunnel_manager:
-            tunnel_manager.email_port = secondary_port or desired_web_port
-            print(f"Email will include port: {tunnel_manager.email_port}")
-    except Exception:
-        pass
     if tunnel_manager:
+        tunnel_manager.email_port = secondary_port or desired_web_port
+        print(f"Email will include port: {tunnel_manager.email_port}")
         vnc_server.set_tunnel_manager(tunnel_manager)
         print("Tunnel will launch after the local server binds successfully...")
 

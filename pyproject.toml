@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-media = ["sounddevice==0.5.2", "soundcard==0.4.6", "av==16.1.0", "aiortc==1.14.0"]
+media = ["sounddevice==0.5.2", "soundcard==0.4.6", "av==16.1.0"]
 email = ["resend==2.30.0"]
 perf = ["dxcam==0.3.0", "opencv-python==4.13.0.92", "fast-ctypes-screenshots==0.10", "bettercam==1.0.0", "imagecodecs==2026.3.6"]
 ssh = ["paramiko==4.0.0", "pywinpty==3.0.3; platform_system == 'Windows'"]

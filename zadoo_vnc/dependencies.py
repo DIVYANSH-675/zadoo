@@ -1,7 +1,6 @@
 """Optional dependency probes and runtime feature flags."""
 from __future__ import annotations
 
-import importlib.util
 import logging
 import threading
 
@@ -57,13 +56,6 @@ except ImportError:
     Image = None
     ImageGrab = None
     HAS_PIL = False
-
-try:
-    import win32api
-    WIN32_AVAILABLE = True
-except ImportError:
-    win32api = None
-    WIN32_AVAILABLE = False
 
 try:
     import dxcam
@@ -153,8 +145,6 @@ except Exception:
     winpty = None
     HAS_WINPTY = False
 
-HAS_AIORTC = importlib.util.find_spec("aiortc") is not None
-
 try:
     import sounddevice as sd
     HAS_SOUNDDEVICE = True
@@ -164,11 +154,9 @@ except Exception:
 
 try:
     import av
-    from fractions import Fraction
     HAS_AV = True
 except Exception:
     av = None
-    Fraction = None
     HAS_AV = False
 
 try:

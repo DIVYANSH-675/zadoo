@@ -1,72 +1,218 @@
-<!DOCTYPE html><html><head><meta charset='utf-8'><title>Terminal</title>
-<meta name='viewport' content='width=device-width,initial-scale=1'/>
-<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css'/>
-<link rel='preconnect' href='https://fonts.googleapis.com'/>
-<link href='https://fonts.googleapis.com/css2?family=Fira+Code:wght@500&display=swap' rel='stylesheet'/>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Terminal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <style>
-  @font-face{font-family:'FiraCodeMedium';src:url('https://cdn.jsdelivr.net/gh/tonsky/FiraCode@6.2/distr/woff2/FiraCode-Medium.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap;}
-  html,body{margin:0;height:100%;background:#0b0e12;color:#cfd8dc;font-family:monospace;}
-  #term{display:none;height:100%;width:100%;}
-  .xterm{padding:8px;}
-  .xterm .xterm-viewport{background:#0b0e12;}
-  .xterm-rows{color:#cfd8dc;}
-  #fallback{display:block;height:100vh;box-sizing:border-box;padding:8px;}
-  #out{height:calc(100% - 36px);overflow:auto;white-space:pre-wrap;background:#0b0e12;color:#cfd8dc;border:1px solid #222;padding:8px;}
-  #inp{width:100%;margin-top:6px;background:#0b0e12;color:#cfd8dc;border:1px solid #222;padding:8px;}
-</style></head><body>
-<div id='term'></div>
-<div id='fallback'><div id='out'>Loading terminal...</div><input id='inp' placeholder='Type your commands and press Enter'/></div>
-<script src='https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js'></script>
-<script src='https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'></script>
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: #0c0c0c;
+    color: #cccccc;
+    font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  }
+
+  #term {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0c0c0c;
+  }
+
+  #terminal-load-error {
+    display: none;
+    padding: 12px;
+    white-space: pre-wrap;
+    color: #f48771;
+    background: #0c0c0c;
+    font: 14px Consolas, "Cascadia Mono", "Courier New", monospace;
+  }
+
+  .xterm {
+    width: 100%;
+    height: 100%;
+    padding: 0;
+  }
+
+  .xterm .xterm-viewport {
+    background: #0c0c0c !important;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .xterm .xterm-viewport::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  .xterm .xterm-screen {
+    background: #0c0c0c;
+  }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<div id="terminal-load-error">Terminal renderer failed to load.</div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script>
-const proto=location.protocol==='https:'?'wss':'ws'; const ws=new WebSocket(`${proto}://${location.host}/ssh`); ws.binaryType='arraybuffer';
-function startFallback(){ document.getElementById('term').style.display='none'; const fb=document.getElementById('fallback'); fb.style.display='block'; const out=document.getElementById('out'); const inp=document.getElementById('inp');
-  out.textContent = 'Connecting to local shell...\n';
-  ws.onopen=()=>{ out.textContent += 'Connected. Type your commands and press Enter.\n'; };
-  ws.onerror=()=>{ out.textContent += '\n[Error] Terminal connection error.\n'; };
-  ws.onclose=()=>{ out.textContent += '\n[Closed] Terminal disconnected.\n'; };
-  ws.onmessage=e=>{ let d=e.data; if(d instanceof ArrayBuffer){ d=new TextDecoder().decode(new Uint8Array(d)); } out.textContent+=d; if(out.scrollHeight - out.clientHeight - out.scrollTop < 8){ out.scrollTop=out.scrollHeight; } };
-  inp.addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ws.send(new TextEncoder().encode(inp.value+"\r\n")); inp.value=''; } });
-}
-function startXterm(){ if(!window.Terminal||!window.FitAddon){ return startFallback(); } const term=new window.Terminal({cols:120,rows:34,convertEol:false,disableStdin:false,windowsMode:true,fontFamily:"'Fira Code', monospace",fontWeight:500,fontSize:16,theme:{
-  background:'#0b0e12',
-  foreground:'#f8f8f2',
-  cursor:'#f8f8f2',
-  selection:'#44475a',
-  black:'#21222c',
-  red:'#ff5555',
-  green:'#50fa7b',
-  yellow:'#f1fa8c',
-  blue:'#bd93f9',
-  magenta:'#ff79c6',
-  cyan:'#8be9fd',
-  white:'#f8f8f2',
-  brightBlack:'#6272a4',
-  brightRed:'#ff6e6e',
-  brightGreen:'#69ff94',
-  brightYellow:'#ffffa5',
-  brightBlue:'#d6acff',
-  brightMagenta:'#ff92df',
-  brightCyan:'#a4ffff',
-  brightWhite:'#ffffff'}});
-  const fit=new window.FitAddon.FitAddon(); term.loadAddon(fit); term.open(document.getElementById('term')); try{ term.setOption('fontFamily', "'FiraCodeMedium','Fira Code', monospace"); term.setOption('fontWeight','500'); }catch(e){}; fit.fit();
-  // Apply Fira Code to xterm only (no layout/color changes)
-  try { term.setOption('fontFamily', "'Fira Code', monospace"); term.setOption('fontWeight', '500'); } catch(e){}
-  if (document.fonts && document.fonts.ready) { document.fonts.ready.then(()=>{ try{ fit.fit(); sendSize(); }catch(e){} }); }
-  function sendSize(){ try{ if(ws.readyState===1){ ws.send(JSON.stringify({type:'resize', cols:term.cols, rows:term.rows})); } }catch(e){} }
-  window.addEventListener('resize',()=>{ fit.fit(); sendSize(); }); term.focus();
-  // Respond to parent messages to refit when panel opens
-  window.addEventListener('message', (ev)=>{ try{ if(ev.data && ev.data.type==='fit'){ fit.fit(); sendSize(); } }catch(e){} });
-  // Toggle views
-  document.getElementById('fallback').style.display='none';
-  document.getElementById('term').style.display='block';
-  term.write('[36mConnecting to local shell...[0m\r\n');
-  ws.onopen=()=>{ term.write('[32mConnected. Type your commands...[0m\r\n'); sendSize(); };
-  ws.onerror=()=>{ term.write('\r\n[31m[Error] Terminal connection error.[0m\r\n'); };
-  ws.onmessage=e=>{ let d=e.data; if(d instanceof ArrayBuffer){ d=new TextDecoder('utf-8').decode(new Uint8Array(d)); } term.write(d); };
-  ws.onclose=()=>term.write('\r\n[31mDisconnected[0m\r\n');
-  term.onData(data=>{ if(ws.readyState===1){ if(data===''){ data=''; } ws.send(new TextEncoder().encode(data)); } });
-}
-setTimeout(startXterm,50);
+(function () {
+  const termEl = document.getElementById('term');
+  const errorEl = document.getElementById('terminal-load-error');
+
+  function showLoadError(message) {
+    termEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    errorEl.textContent = message || 'Terminal renderer failed to load.';
+  }
+
+  if (!window.Terminal || !window.FitAddon) {
+    showLoadError('Terminal renderer failed to load.');
+    return;
+  }
+
+  const term = new window.Terminal({
+    cols: 120,
+    rows: 34,
+    convertEol: false,
+    cursorBlink: true,
+    cursorStyle: 'block',
+    disableStdin: false,
+    drawBoldTextInBrightColors: true,
+    fontFamily: 'Consolas, "Cascadia Mono", "Courier New", monospace',
+    fontSize: 16,
+    fontWeight: 'normal',
+    fontWeightBold: 'bold',
+    letterSpacing: 0,
+    lineHeight: 1,
+    scrollback: 5000,
+    windowsMode: true,
+    theme: {
+      background: '#0c0c0c',
+      foreground: '#cccccc',
+      cursor: '#ffffff',
+      cursorAccent: '#0c0c0c',
+      selectionBackground: '#264f78',
+      black: '#0c0c0c',
+      red: '#c50f1f',
+      green: '#13a10e',
+      yellow: '#c19c00',
+      blue: '#0037da',
+      magenta: '#881798',
+      cyan: '#3a96dd',
+      white: '#cccccc',
+      brightBlack: '#767676',
+      brightRed: '#e74856',
+      brightGreen: '#16c60c',
+      brightYellow: '#f9f1a5',
+      brightBlue: '#3b78ff',
+      brightMagenta: '#b4009e',
+      brightCyan: '#61d6d6',
+      brightWhite: '#f2f2f2'
+    }
+  });
+
+  const fitAddon = new window.FitAddon.FitAddon();
+  let ws = null;
+  let lastCols = 0;
+  let lastRows = 0;
+  const pendingInput = [];
+  const encoder = new TextEncoder();
+
+  term.loadAddon(fitAddon);
+  term.open(termEl);
+  term.focus();
+
+  function fitAndReport(force) {
+    try {
+      fitAddon.fit();
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (force || term.cols !== lastCols || term.rows !== lastRows) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    } catch (_) {}
+  }
+
+  function sendInput(data) {
+    const normalized = String(data || '');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(encoder.encode(normalized));
+    } else {
+      pendingInput.push(normalized);
+    }
+  }
+
+  function flushPendingInput() {
+    while (pendingInput.length && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(encoder.encode(pendingInput.shift()));
+    }
+  }
+
+  function connectShell() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ssh`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function () {
+      fitAndReport(true);
+      flushPendingInput();
+      term.focus();
+    };
+
+    ws.onmessage = function (event) {
+      let data = event.data;
+      if (data instanceof ArrayBuffer) {
+        data = new TextDecoder('utf-8').decode(new Uint8Array(data));
+      }
+      term.write(String(data || ''));
+    };
+
+    ws.onerror = function () {
+      term.write('\r\n\x1b[91mTerminal connection error.\x1b[0m\r\n');
+    };
+
+    ws.onclose = function () {
+      term.write('\r\n\x1b[90mTerminal disconnected.\x1b[0m\r\n');
+    };
+  }
+
+  term.onData(sendInput);
+  window.addEventListener('resize', function () { fitAndReport(false); });
+  window.addEventListener('message', function (event) {
+    if (event.data && event.data.type === 'fit') {
+      fitAndReport(false);
+      term.focus();
+    }
+  });
+
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(function () { fitAndReport(false); });
+    observer.observe(termEl);
+  }
+
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { fitAndReport(false); }).catch(function () {});
+  }
+
+  requestAnimationFrame(function () {
+    fitAndReport(false);
+    connectShell();
+  });
+})();
 </script>
-</body></html>
+</body>
+</html>

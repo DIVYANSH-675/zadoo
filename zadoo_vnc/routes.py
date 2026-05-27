@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import http
+import io
 import json
 import logging
 import os
@@ -17,8 +18,8 @@ from websockets.http11 import Response as WSResponse
 
 from .assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import enumerate_camera_devices
-from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH
-from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, Image, fast_ctypes_screenshots, imagecodecs, mss, np
+from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH, env_int
+from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, HAS_SOUNDDEVICE, Image, fast_ctypes_screenshots, imagecodecs, mss, np, sd
 from .dpi import get_primary_screen_size
 from .logging_utils import _log_except, _log_fallback, _log_try_ok
 
@@ -56,13 +57,32 @@ class RoutesMixin:
     }
     ADVANCED_ACTIONS = {"set_capture_method", "set_performance"}
     HOST_ACTIONS = {"refresh_tunnel", "toggle_keystroke_capture"}
-    STATE_CHANGING_HTTP_ROUTES = {
-        "/api/alert",
-        "/api/refresh-tunnel",
-        "/api/set-clipboard-image",
-        "/api/set-fps",
-        "/api/set-quality",
+    ROUTE_FEATURES = {
+        "/": "public",
+        "/api/auth": "public",
+        "/brand-header.png": "public",
+        "/trigger-icon.png": "public",
+        "/splash.png": "public",
+        "/video": "view",
+        "/audio": "view",
+        "/input": "control",
+        "/api/public-url": "view",
+        "/api/stream-stats": "view",
+        "/benchmark.html": "view",
+        "/snapshot": "view",
+        "/api/set-quality": "control",
+        "/api/set-fps": "control",
+        "/api/refresh-tunnel": "host",
+        "/terminal.html": "terminal",
+        "/ssh": "terminal",
+        "/webcam": "webcam",
+        "/api/list-cameras": "webcam",
+        "/mic": "mic",
+        "/api/list-mics": "mic",
+        "/host-controls": "host",
+        "/api/alert": "host",
     }
+    CSRF_HTTP_FEATURES = {"control", "host"}
 
     def _json_response(self, payload, status=http.HTTPStatus.OK, extra_headers=None):
         headers = Headers()
@@ -93,28 +113,41 @@ class RoutesMixin:
             body=str(body).encode("utf-8"),
         )
 
+    def _png_file_response(self, image_path, missing_message):
+        try:
+            with open(image_path, "rb") as file:
+                body = file.read()
+            headers = Headers()
+            headers["Content-Type"] = "image/png"
+            headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return WSResponse(
+                status_code=int(http.HTTPStatus.OK),
+                reason_phrase=http.HTTPStatus.OK.phrase,
+                headers=headers,
+                body=body,
+            )
+        except Exception:
+            return self._plain_response(missing_message, http.HTTPStatus.NOT_FOUND)
+
+    def _primary_screen_size_or_none(self, log_context):
+        try:
+            return get_primary_screen_size()
+        except Exception as exc:
+            _log_fallback(log_context, "pyautogui.size", "primary_screen_size_failed", exc)
+            try:
+                import pyautogui as _pg
+                return _pg.size()
+            except Exception:
+                return None
+
     def _header_get(self, request_headers, name, default=None):
         try:
             return request_headers.get(name, default)
         except Exception:
-            try:
-                return request_headers.get(name.lower(), default)
-            except Exception:
-                return default
+            return default
 
     def _env_enabled(self, name, default="0"):
         return str(os.getenv(name, default)).strip().lower() not in self.FALSE_VALUES
-
-    def _env_int(self, name, default, minimum=None, maximum=None):
-        try:
-            value = int(str(os.getenv(name, default)).strip())
-        except Exception:
-            value = int(default)
-        if minimum is not None:
-            value = max(int(minimum), value)
-        if maximum is not None:
-            value = min(int(maximum), value)
-        return value
 
     def _request_identity(self, request_headers):
         for name in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
@@ -138,9 +171,9 @@ class RoutesMixin:
             self._auth_failures = {}
             failures = self._auth_failures
         now = time.time()
-        window = self._env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
-        max_failures = self._env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
-        lockout = self._env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
+        window = env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
+        max_failures = env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
+        lockout = env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
         state = failures.setdefault(key, {"times": [], "locked_until": 0.0})
         times = [float(ts) for ts in state.get("times", []) if now - float(ts) <= window]
         times.append(now)
@@ -310,7 +343,6 @@ class RoutesMixin:
             sessions.pop(token, None)
 
     def _session_for_headers(self, request_headers):
-        self._cleanup_auth_sessions()
         token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
         if not token:
             return None
@@ -341,38 +373,14 @@ class RoutesMixin:
         return bool(session and self._role_allows(session.get("role"), feature))
 
     def _feature_for_route(self, route_path):
-        if route_path in {"/video", "/audio"}:
-            return "view"
-        if route_path == "/input":
-            return "control"
-        if route_path in {"/ssh", "/terminal.html"}:
-            return "terminal"
-        if route_path == "/webcam":
-            return "webcam"
-        if route_path == "/mic":
-            return "mic"
-        return None
-
-    def _http_feature_for_route(self, route_path):
-        if route_path in {"/", "/api/auth", "/brand-header.png", "/trigger-icon.png", "/splash.png"}:
-            return "public"
-        if route_path in {"/api/public-url", "/api/stream-stats", "/benchmark.html", "/snapshot"}:
-            return "view"
-        if route_path in {"/api/set-quality", "/api/set-fps", "/api/set-clipboard-image"}:
-            return "control"
-        if route_path == "/api/refresh-tunnel":
-            return "host"
-        if route_path in {"/terminal.html", "/ssh"}:
-            return "terminal"
-        if route_path in {"/webcam", "/api/list-cameras"}:
-            return "webcam"
-        if route_path == "/mic":
-            return "mic"
-        if route_path in {"/host-controls", "/api/alert"}:
-            return "host"
         if route_path.startswith("/api/client-log"):
             return "view"
-        return None
+        return self.ROUTE_FEATURES.get(route_path)
+
+    def _http_route_requires_csrf(self, route_path, feature=None):
+        if feature is None:
+            feature = self._feature_for_route(route_path)
+        return route_path.startswith("/api/") and feature in self.CSRF_HTTP_FEATURES
 
     def _is_ws_authorized(self, route_path, request_headers):
         feature = self._feature_for_route(route_path)
@@ -421,6 +429,7 @@ class RoutesMixin:
         self._record_auth_success(request_headers)
         token = secrets.token_urlsafe(32)
         expires_at = time.time() + self.AUTH_TTL_SECONDS
+        self._cleanup_auth_sessions()
         sessions = getattr(self, "auth_sessions", None)
         if not isinstance(sessions, dict):
             self.auth_sessions = {}
@@ -443,7 +452,83 @@ class RoutesMixin:
     def enumerate_cameras(self):
         return enumerate_camera_devices()
 
-    def _apply_quality(self, raw_value, default=75):
+    def enumerate_microphones(self):
+        if not HAS_SOUNDDEVICE or sd is None:
+            return []
+        try:
+            devices = list(sd.query_devices())
+        except Exception:
+            return []
+        try:
+            hostapis = list(sd.query_hostapis())
+        except Exception:
+            hostapis = []
+        try:
+            default_input = sd.default.device[0]
+        except Exception:
+            default_input = None
+        try:
+            if default_input is not None and int(default_input) < 0:
+                default_input = None
+        except Exception:
+            default_input = None
+
+        def hostapi_name(index):
+            try:
+                api = hostapis[int(index)]
+                return str(api.get("name") or "").strip()
+            except Exception:
+                return ""
+
+        result = []
+        default_name = "System Default"
+        if default_input is not None:
+            try:
+                default_dev = devices[int(default_input)]
+                default_name = str(default_dev.get("name") or default_name)
+            except Exception:
+                pass
+        result.append({
+            "id": "default",
+            "device_index": None,
+            "name": default_name,
+            "label": f"System Default ({default_name})",
+            "default": True,
+            "channels": 1,
+            "samplerate": None,
+        })
+
+        seen = set()
+        for index, device in enumerate(devices):
+            try:
+                max_input = int(device.get("max_input_channels") or 0)
+            except Exception:
+                max_input = 0
+            if max_input <= 0:
+                continue
+            name = str(device.get("name") or f"Microphone {index}").strip()
+            api = hostapi_name(device.get("hostapi"))
+            label = f"{name} ({api})" if api else name
+            key = (name.casefold(), api.casefold(), max_input)
+            if key in seen:
+                label = f"{label} #{index}"
+            seen.add(key)
+            try:
+                samplerate = int(float(device.get("default_samplerate") or 0)) or None
+            except Exception:
+                samplerate = None
+            result.append({
+                "id": str(index),
+                "device_index": index,
+                "name": name,
+                "label": label,
+                "default": default_input is not None and int(index) == int(default_input),
+                "channels": max_input,
+                "samplerate": samplerate,
+            })
+        return result
+
+    def _apply_quality(self, raw_value, default=85):
         try:
             value = max(1, min(100, int(raw_value)))
         except Exception:
@@ -553,10 +638,10 @@ class RoutesMixin:
         except Exception:
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
-        feature = self._http_feature_for_route(route_path)
+        feature = self._feature_for_route(route_path)
         if feature and feature != "public" and not self._is_authorized(request_headers, feature):
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
-        if route_path in self.STATE_CHANGING_HTTP_ROUTES and not self._state_changing_http_allowed(request_headers):
+        if self._http_route_requires_csrf(route_path, feature) and not self._state_changing_http_allowed(request_headers):
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
         # Process routes
@@ -595,55 +680,43 @@ class RoutesMixin:
             )
         elif route_path == "/api/auth":
             return await self.handle_auth(path, request_headers)
-        elif isinstance(path, str) and route_path == "/api/public-url":
+        elif route_path == "/api/public-url":
             try:
                 return self._json_response(json.loads(await self.handle_get_public_url()))
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/refresh-tunnel":
+        elif route_path == "/api/refresh-tunnel":
             try:
                 return self._json_response(json.loads(await self.handle_refresh_tunnel()))
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/set-quality":
+        elif route_path == "/api/set-quality":
             return self._json_response(await self.handle_set_quality(path))
-        elif isinstance(path, str) and route_path == "/api/set-fps":
+        elif route_path == "/api/set-fps":
             return self._json_response(await self.handle_set_fps(path))
-        elif isinstance(path, str) and route_path == "/api/stream-stats":
+        elif route_path == "/api/stream-stats":
             try:
                 stats = self._capture_stats_payload()
                 stream = self._stream_status_payload()
                 return self._json_response({"success": True, "stats": stats, "stream": stream})
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif isinstance(path, str) and route_path == "/api/set-clipboard-image":
-            status, headers_dict, body = await self.handle_set_clipboard_image(request_headers)
-            headers = Headers()
-            for key, value in headers_dict.items():
-                headers[key] = value
-            return WSResponse(
-                status_code=int(status),
-                reason_phrase=status.phrase,
-                headers=headers,
-                body=body,
-            )
-        elif isinstance(path, str) and path.startswith("/api/client-log"):
+        elif route_path.startswith("/api/client-log"):
             try:
                 # Accept simple GET with ?msg=... or POST with text body
                 if request_headers is None:
                     body_bytes = b""
                 else:
                     body_bytes = request_body
-                from urllib.parse import urlparse, parse_qs, unquote
-                parsed = urlparse(path)
-                qs = parse_qs(parsed.query or "")
+                parsed = urllib.parse.urlparse(path)
+                qs = urllib.parse.parse_qs(parsed.query or "")
                 msg = (qs.get("msg") or [""])[0]
                 if not msg and isinstance(body_bytes, (bytes, bytearray)) and body_bytes:
                     try:
                         msg = body_bytes.decode("utf-8", "ignore")
                     except Exception:
                         msg = str(body_bytes)
-                msg = unquote(msg)
+                msg = urllib.parse.unquote(msg)
                 _log_try_ok("client.log", msg[:500])
                 headers = Headers()
                 headers["Content-Type"] = "application/json; charset=utf-8"
@@ -709,6 +782,22 @@ class RoutesMixin:
                 headers=headers,
                 body=payload,
             )
+        elif route_path == "/api/list-mics":
+            try:
+                loop = asyncio.get_running_loop()
+                devices = await loop.run_in_executor(None, self.enumerate_microphones)
+                payload = json.dumps({"success": True, "devices": devices}).encode("utf-8")
+            except Exception:
+                payload = json.dumps({"success": False, "devices": []}).encode("utf-8")
+            headers = Headers()
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            headers["Cache-Control"] = "no-store"
+            return WSResponse(
+                status_code=int(http.HTTPStatus.OK),
+                reason_phrase=http.HTTPStatus.OK.phrase,
+                headers=headers,
+                body=payload,
+            )
         elif route_path == "/host-controls":
             page = load_host_controls_html().strip().encode("utf-8")
             headers = Headers()
@@ -722,8 +811,7 @@ class RoutesMixin:
         elif route_path == "/api/alert":
             # Accept GET or POST (websockets.process_request exposes only path/headers)
             try:
-                from urllib.parse import urlparse, parse_qs
-                qs = parse_qs(urlparse(path).query or "")
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(path).query or "")
                 code = (qs.get("code") or [""])[0].upper().strip()
                 _log_try_ok("api.alert.parse", code)
             except Exception:
@@ -759,170 +847,105 @@ class RoutesMixin:
                     body=err,
                 )
         elif route_path == "/brand-header.png":
-            try:
-                with open(BRAND_HEADER_IMAGE_PATH, 'rb') as f:
-                    img_bytes = f.read()
-                headers = Headers()
-                headers["Content-Type"] = "image/png"
-                headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.OK),
-                    reason_phrase=http.HTTPStatus.OK.phrase,
-                    headers=headers,
-                    body=img_bytes,
-                )
-            except Exception:
-                headers = Headers()
-                headers["Content-Type"] = "text/plain; charset=utf-8"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.NOT_FOUND),
-                    reason_phrase=http.HTTPStatus.NOT_FOUND.phrase,
-                    headers=headers,
-                    body=b"Header image not found",
-                )
+            return self._png_file_response(BRAND_HEADER_IMAGE_PATH, "Header image not found")
         elif route_path == "/trigger-icon.png":
-            try:
-                with open(TRIGGER_ICON_IMAGE_PATH, 'rb') as f:
-                    img_bytes = f.read()
-                headers = Headers()
-                headers["Content-Type"] = "image/png"
-                headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.OK),
-                    reason_phrase=http.HTTPStatus.OK.phrase,
-                    headers=headers,
-                    body=img_bytes,
-                )
-            except Exception:
-                headers = Headers()
-                headers["Content-Type"] = "text/plain; charset=utf-8"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.NOT_FOUND),
-                    reason_phrase=http.HTTPStatus.NOT_FOUND.phrase,
-                    headers=headers,
-                    body=b"Trigger icon not found",
-                )
+            return self._png_file_response(TRIGGER_ICON_IMAGE_PATH, "Trigger icon not found")
         elif route_path == "/splash.png":
-            try:
-                with open(SPLASH_IMAGE_PATH, 'rb') as f:
-                    img_bytes = f.read()
-                headers = Headers()
-                headers["Content-Type"] = "image/png"
-                headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.OK),
-                    reason_phrase=http.HTTPStatus.OK.phrase,
-                    headers=headers,
-                    body=img_bytes,
-                )
-            except Exception:
-                headers = Headers()
-                headers["Content-Type"] = "text/plain; charset=utf-8"
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.NOT_FOUND),
-                    reason_phrase=http.HTTPStatus.NOT_FOUND.phrase,
-                    headers=headers,
-                    body=b"Splash image not found",
-            )
+            return self._png_file_response(SPLASH_IMAGE_PATH, "Splash image not found")
         elif route_path == "/snapshot":
+            try:
+                t_req0 = time.perf_counter()
+                parsed_url = urllib.parse.urlparse(path)
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+
+                rect_norm = None
+                if all(k in query_params for k in ['x0', 'y0', 'x1', 'y1']):
+                    try:
+                        rect_norm = {
+                            'x0': float(query_params['x0'][0]),
+                            'y0': float(query_params['y0'][0]),
+                            'x1': float(query_params['x1'][0]),
+                            'y1': float(query_params['y1'][0])
+                        }
+                    except (ValueError, IndexError):
+                        pass
+                fmt = query_params.get('fmt', ['png'])[0].lower().strip()
+                if fmt not in ('jpeg', 'jpg', 'png'):
+                    fmt = 'png'
                 try:
-                    import time as _t
-                    t_req0 = _t.perf_counter()
-                    # NEW: Parse URL for crop coordinates
-                    parsed_url = urllib.parse.urlparse(path)
-                    query_params = urllib.parse.parse_qs(parsed_url.query)
-                    
-                    rect_norm = None
-                    if all(k in query_params for k in ['x0', 'y0', 'x1', 'y1']):
-                        try:
-                            rect_norm = {
-                                'x0': float(query_params['x0'][0]),
-                                'y0': float(query_params['y0'][0]),
-                                'x1': float(query_params['x1'][0]),
-                                'y1': float(query_params['y1'][0])
-                            }
-                        except (ValueError, IndexError):
-                            pass # Ignore invalid coordinates
-                    # Optional encode params (default to PNG to match clipboard expectations)
-                    fmt = query_params.get('fmt', ['png'])[0].lower().strip()
-                    if fmt not in ('jpeg', 'jpg', 'png'):
-                        fmt = 'png'
+                    quality = int(query_params.get('q', [85])[0])
+                except Exception:
+                    quality = 85
+                try:
+                    max_w = int(query_params.get('max_w', [0])[0]) or None
+                except Exception:
+                    max_w = None
+                try:
+                    max_h = int(query_params.get('max_h', [0])[0]) or None
+                except Exception:
+                    max_h = None
+                try:
+                    logging.info(
+                        "[snapshot.request] fmt=%s q=%s max_w=%s max_h=%s rect=%s",
+                        fmt,
+                        quality,
+                        str(max_w),
+                        str(max_h),
+                        'yes' if rect_norm else 'no'
+                    )
+                except Exception:
+                    pass
+
+                t_generate0 = time.perf_counter()
+                img_bytes = self._generate_snapshot_png(rect_norm=rect_norm, fmt=fmt, quality=quality, max_w=max_w, max_h=max_h)
+                t_generate1 = time.perf_counter()
+
+                if img_bytes:
+                    headers = Headers()
+                    headers["Content-Type"] = ("image/png" if fmt == 'png' else "image/jpeg")
+                    headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
                     try:
-                        quality = int(query_params.get('q', [85])[0])
+                        ext = ("png" if fmt == 'png' else "jpg")
+                        fname = f"snap-{time.strftime('%Y%m%d-%H%M%S')}.{ext}"
+                        headers["Content-Disposition"] = f"attachment; filename=\"{fname}\""
                     except Exception:
-                        quality = 85
+                        pass
                     try:
-                        max_w = int(query_params.get('max_w', [0])[0]) or None
-                    except Exception:
-                        max_w = None
-                    try:
-                        max_h = int(query_params.get('max_h', [0])[0]) or None
-                    except Exception:
-                        max_h = None
-                    # Log incoming snapshot request
-                    try:
+                        t_ready = time.perf_counter()
                         logging.info(
-                            "[snapshot.request] fmt=%s q=%s max_w=%s max_h=%s rect=%s",
+                            "[snapshot.server] total=%.2fms generate=%.2fms bytes=%.1fKB fmt=%s rect=%s",
+                            (t_ready - t_req0) * 1000.0,
+                            (t_generate1 - t_generate0) * 1000.0,
+                            len(img_bytes) / 1024.0,
                             fmt,
-                            quality,
-                            str(max_w),
-                            str(max_h),
                             'yes' if rect_norm else 'no'
                         )
                     except Exception:
                         pass
-
-                    img_bytes = self._generate_snapshot_png(rect_norm=rect_norm, fmt=fmt, quality=quality, max_w=max_w, max_h=max_h)
-                    t_req1 = _t.perf_counter()
-
-                    if img_bytes:
-                        headers = Headers()
-                        headers["Content-Type"] = ("image/png" if fmt == 'png' else "image/jpeg")
-                        headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                        try:
-                            import time as _t
-                            ext = ("png" if fmt == 'png' else "jpg")
-                            fname = f"snap-{_t.strftime('%Y%m%d-%H%M%S')}.{ext}"
-                            headers["Content-Disposition"] = f"attachment; filename=\"{fname}\""
-                        except Exception:
-                            pass
-                        # Log end-to-end server timing before returning
-                        try:
-                            logging.info(
-                                "[snapshot.server] total=%.2fms generate=%.2fms bytes=%.1fKB fmt=%s rect=%s",
-                                (t_req1 - t_req0) * 1000.0,
-                                (t_req1 - t_req0) * 1000.0,
-                                len(img_bytes) / 1024.0,
-                                fmt,
-                                'yes' if rect_norm else 'no'
-                            )
-                        except Exception:
-                            pass
-                        return WSResponse(
-                            status_code=int(http.HTTPStatus.OK),
-                            reason_phrase=http.HTTPStatus.OK.phrase,
-                            headers=headers,
-                            body=img_bytes,
-                        )
-                    else:
-                        headers = Headers()
-                        headers["Content-Type"] = "text/plain; charset=utf-8"
-                        return WSResponse(
-                            status_code=int(http.HTTPStatus.INTERNAL_SERVER_ERROR),
-                            reason_phrase=http.HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                            headers=headers,
-                            body=b"Failed to capture snapshot",
-                        )
-                except Exception as e:
-                    logging.error("Error generating snapshot", exc_info=True)
-                    headers = Headers()
-                    headers["Content-Type"] = "text/plain; charset=utf-8"
                     return WSResponse(
-                        status_code=int(http.HTTPStatus.INTERNAL_SERVER_ERROR),
-                        reason_phrase=http.HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                        status_code=int(http.HTTPStatus.OK),
+                        reason_phrase=http.HTTPStatus.OK.phrase,
                         headers=headers,
-                        body=b"Error generating snapshot",
+                        body=img_bytes,
                     )
+                headers = Headers()
+                headers["Content-Type"] = "text/plain; charset=utf-8"
+                return WSResponse(
+                    status_code=int(http.HTTPStatus.INTERNAL_SERVER_ERROR),
+                    reason_phrase=http.HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                    headers=headers,
+                    body=b"Failed to capture snapshot",
+                )
+            except Exception:
+                logging.error("Error generating snapshot", exc_info=True)
+                headers = Headers()
+                headers["Content-Type"] = "text/plain; charset=utf-8"
+                return WSResponse(
+                    status_code=int(http.HTTPStatus.INTERNAL_SERVER_ERROR),
+                    reason_phrase=http.HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                    headers=headers,
+                    body=b"Error generating snapshot",
+                )
         else:
             headers = Headers()
             headers["Content-Type"] = "text/plain; charset=utf-8"
@@ -933,50 +956,58 @@ class RoutesMixin:
                 body=b"Not Found",
             )
 
-    async def handle_get_public_url(self):
-        """API endpoint to get current public URL"""
+    def _public_url_payload(self):
         try:
-            if self.tunnel_manager and self.tunnel_manager.get_current_url():
-                current_url = self.tunnel_manager.get_current_url()
+            current_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
+            if current_url:
                 current_port = self.tunnel_manager.current_port
-                return json.dumps({
+                return {
                     'success': True, 
                     'url': current_url,
                     'port': current_port,
-                    'message': f'Current public URL for port {current_port}'
-                })
-            else:
-                return json.dumps({
-                    'success': False, 
-                    'error': 'No public URL available'
-                })
+                    'message': f'Current public URL for port {current_port}',
+                    'email_status': (self.tunnel_manager.last_email_message if self.tunnel_manager else None),
+                }
+            return {
+                'success': False,
+                'error': 'No public URL available'
+            }
         except Exception as e:
-            return json.dumps({
+            return {
                 'success': False, 
                 'error': f'Error getting URL: {str(e)}'
-            })
+            }
+
+    async def _refresh_tunnel_payload(self):
+        if not self.tunnel_manager:
+            print(" No tunnel manager available")
+            return {"success": False, "error": "No tunnel manager available"}
+
+        print(" Refreshing tunnel...")
+        loop = asyncio.get_running_loop()
+        url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
+        if not url:
+            print(" Failed to restart tunnel")
+            return {"success": False, "error": "Failed to refresh tunnel"}
+
+        current_port = self.tunnel_manager.current_port
+        print(f" New tunnel URL: {url}")
+        return {
+            "success": True,
+            "url": url,
+            "port": current_port,
+            "message": f"Successfully refreshed tunnel on port {current_port}",
+            "email_status": self.tunnel_manager.last_email_message,
+        }
+
+    async def handle_get_public_url(self):
+        """API endpoint to get current public URL"""
+        return json.dumps(self._public_url_payload())
 
     async def handle_refresh_tunnel(self):
         """API endpoint to refresh tunnel and get new URL."""
         try:
-            if not self.tunnel_manager:
-                print(" No tunnel manager available")
-                return json.dumps({"success": False, "error": "No tunnel manager available"})
-
-            print(" Refreshing tunnel...")
-            loop = asyncio.get_running_loop()
-            url = await loop.run_in_executor(None, self.tunnel_manager.refresh_tunnel)
-            if not url:
-                print(" Failed to restart tunnel")
-                return json.dumps({"success": False, "error": "Failed to refresh tunnel"})
-
-            print(f" New tunnel URL: {url}")
-            return json.dumps({
-                "success": True,
-                "url": url,
-                "port": self.tunnel_manager.current_port,
-                "email_status": self.tunnel_manager.last_email_message,
-            })
+            return json.dumps(await self._refresh_tunnel_payload())
         except Exception as e:
             return json.dumps({"success": False, "error": str(e)})
 
@@ -1002,35 +1033,18 @@ class RoutesMixin:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def handle_set_clipboard_image(self, request_headers=None):
-        """Compatibility response for the old HTTP image clipboard endpoint."""
-        response_data = json.dumps({
-            "success": False,
-            "error": "HTTP image clipboard upload is not supported by this WebSocket server.",
-            "use": "Send {action:'set_clipboard_image', mime, data_base64} to the /input WebSocket.",
-        }).encode("utf-8")
-        return http.HTTPStatus.BAD_REQUEST, {"Content-Type": "application/json; charset=utf-8"}, response_data
-
     def _capture_screen_image(self, rect_norm=None):
         """One-shot snapshot; reuse instances and capture at source (dxcam region  MSS region)."""
-        import time as _t
-        t0 = _t.perf_counter()
+        t0 = time.perf_counter()
         # Track which backend we actually used for logging
-        try:
-            self._last_snapshot_backend = 'none'
-        except Exception:
-            pass
+        self._last_snapshot_backend = 'none'
+        screen_size = self._primary_screen_size_or_none("snapshot.rect_screen_size") if rect_norm else None
         # Helper: convert normalized rect to absolute desktop rect
         def _norm_to_abs_rect():
-            if not rect_norm:
+            if not rect_norm or not screen_size:
                 return None
             try:
-                try:
-                    sw, sh = get_primary_screen_size()
-                except Exception as exc:
-                    _log_fallback("snapshot.rect_screen_size", "pyautogui.size", "primary_screen_size_failed", exc)
-                    import pyautogui as _pg
-                    sw, sh = _pg.size()
+                sw, sh = screen_size
                 x0 = max(0, min(sw, int(float(rect_norm['x0']) * sw)))
                 y0 = max(0, min(sh, int(float(rect_norm['y0']) * sh)))
                 x1 = max(0, min(sw, int(float(rect_norm['x1']) * sw)))
@@ -1047,16 +1061,7 @@ class RoutesMixin:
         prefer_mss_first = False
         if abs_rect:
             try:
-                # Get desktop size for ratio
-                try:
-                    sw2, sh2 = get_primary_screen_size()
-                except Exception as exc:
-                    _log_fallback("snapshot.roi_area_screen_size", "pyautogui.size", "primary_screen_size_failed", exc)
-                    try:
-                        import pyautogui as _pg2
-                        sw2, sh2 = _pg2.size()
-                    except Exception:
-                        sw2, sh2 = 0, 0
+                sw2, sh2 = screen_size or (0, 0)
                 if sw2 > 0 and sh2 > 0:
                     l, t, r, b = abs_rect
                     area_ratio = ((r - l) * (b - t)) / float(sw2 * sh2)
@@ -1067,6 +1072,9 @@ class RoutesMixin:
         def _try_dxcam_then_none():
             try:
                 cam = getattr(self, 'dxcam_camera', None)
+                if cam is not None and getattr(self, "dxcam_started", False):
+                    _log_fallback("snapshot.capture_backend", "mss_or_other", "dxcam_ring_buffer_active")
+                    return None
                 if cam is not None:
                     arr = cam.grab(region=abs_rect)
                     if arr is not None:
@@ -1156,10 +1164,9 @@ class RoutesMixin:
         Supports format/quality/downscale and logs captureconvertencode timings.
         """
         try:
-            import time as _t, io as _io
-            t0 = _t.perf_counter()
+            t0 = time.perf_counter()
             img = self._capture_screen_image(rect_norm=rect_norm)
-            t1 = _t.perf_counter()
+            t1 = time.perf_counter()
             if img is None:
                 return None
             # Optional downscale to limit size
@@ -1178,7 +1185,7 @@ class RoutesMixin:
             arr = np.array(img, copy=False)
             if arr.ndim == 3 and arr.shape[2] == 4:
                 arr = arr[:, :, :3]
-            t2 = _t.perf_counter()
+            t2 = time.perf_counter()
             out = None
             if fmt == 'png' and HAS_IMAGECODECS:
                 try:
@@ -1187,7 +1194,7 @@ class RoutesMixin:
                     _log_fallback("snapshot.png_encoder", "pillow_png", "imagecodecs_png_failed", exc)
                     out = None
             if out is None:
-                buf = _io.BytesIO()
+                buf = io.BytesIO()
                 try:
                     if fmt == 'png':
                         img.save(buf, format='PNG', optimize=False, compress_level=0)
@@ -1197,7 +1204,7 @@ class RoutesMixin:
                     out = buf.getvalue()
                 except Exception:
                     out = None
-            t3 = _t.perf_counter()
+            t3 = time.perf_counter()
             logging.info(
                 "[snapshot.timing] total=%.2fms | capture=%.2fms convert=%.2fms encode=%.2fms | size=%dx%d bytes=%.1fKB backend=%s fmt=%s rect=%s",
                 (t3 - t0) * 1000.0,

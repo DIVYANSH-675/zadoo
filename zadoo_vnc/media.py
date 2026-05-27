@@ -8,18 +8,31 @@ import json
 import logging
 import os
 import queue
-import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from collections import deque
 
 import websockets
 
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
-from .dependencies import *
+from .dependencies import HAS_AV, HAS_WINPTY, av, np, sc, sd
 from .logging_utils import _log_fallback
-from .win32_input import *
+from .win32_input import (
+    CURSORINFO,
+    POINT,
+    SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
+    VK_LBUTTON,
+    VK_RBUTTON,
+    _GetAsyncKeyState,
+    _GetCursorPos,
+    _get_css_cursor_from_system,
+    user32,
+)
 
 class MediaMixin:
 
@@ -56,6 +69,40 @@ class MediaMixin:
         for _ in range(wake_count):
             if not self._put_realtime_frame(frame_queue, None):
                 break
+
+    def _clarify_mono_audio(
+        self,
+        samples,
+        state,
+        *,
+        target_rms=0.12,
+        noise_floor=0.002,
+        max_gain=4.0,
+        limiter=0.96,
+    ):
+        """Small realtime clarity chain: DC removal, soft gate, smooth gain, limiter."""
+        arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return arr
+        arr = np.nan_to_num(arr, copy=False)
+        arr = arr - float(np.mean(arr))
+        rms = float(np.sqrt(np.mean(arr * arr) + 1e-12))
+        if rms < noise_floor:
+            gate = max(0.0, min(1.0, (rms / max(noise_floor, 1e-9)) ** 2))
+            arr = arr * gate
+            desired_gain = 1.0
+        else:
+            desired_gain = max(0.5, min(float(max_gain), float(target_rms) / max(rms, 1e-6)))
+        prev_gain = float(state.get("gain", 1.0)) if isinstance(state, dict) else 1.0
+        smoothing = 0.12 if desired_gain > prev_gain else 0.35
+        gain = prev_gain + (desired_gain - prev_gain) * smoothing
+        if isinstance(state, dict):
+            state["gain"] = gain
+        arr = arr * gain
+        peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+        if peak > limiter:
+            arr = arr * (float(limiter) / peak)
+        return np.clip(arr, -1.0, 1.0).astype(np.float32, copy=False)
 
     def _apply_stream_profile(self, reason="adaptive"):
         controller = getattr(self, "adaptive_stream", None)
@@ -148,7 +195,7 @@ class MediaMixin:
         })
         return stats
 
-    def _start_audio_capture(self, want_samplerate=48000, packet_frames=960, want_channels=2, mono_method="left"):
+    def _start_audio_capture(self, want_samplerate=48000, packet_frames=960, want_channels=2, mono_method="mix"):
         """
         Robust SYSTEM-audio capture (loopback) for Windows 11 using python-soundcard.
         - No dependency on sounddevice.WasapiSettings(loopback=...)
@@ -165,6 +212,7 @@ class MediaMixin:
         self._audio_stream = None
         self._audio_dev_name = None
         self._audio_sr = want_samplerate
+        self._audio_clarity_state = {"gain": 1.0}
 
         log = logging.getLogger("sysaudio")
         ring = deque()
@@ -184,14 +232,12 @@ class MediaMixin:
             loopback = None
             try:
                 for mic in sc.all_microphones(include_loopback=True):
-                    if getattr(mic, "isloopback", False) and (spk.name.split(" (")[0] in mic.name or getattr(spk, 'id', None) in getattr(mic, 'id', '')):
+                    if getattr(mic, "isloopback", False) and (
+                        spk.name.split(" (")[0] in mic.name
+                        or getattr(spk, 'id', None) in getattr(mic, 'id', '')
+                    ):
                         loopback = mic
                         break
-                if loopback is None:
-                    for mic in sc.all_microphones(include_loopback=True):
-                        if getattr(mic, "isloopback", False):
-                            loopback = mic
-                            break
             except Exception:
                 loopback = None
             return spk, loopback
@@ -209,7 +255,11 @@ class MediaMixin:
                     if current_loop is None or (now - last_pick) > 1.5:
                         last_pick = now
                         spk, loop = _pick_loopback()
-                        if loop is not None and loop != current_loop:
+                        if loop is None:
+                            log.warning("No loopback device matched default speaker %s; retrying...", getattr(spk, "name", "unknown"))
+                            time.sleep(0.2)
+                            continue
+                        if loop != current_loop:
                             try:
                                 if self._audio_stream is not None:
                                     self._audio_stream.__exit__(None, None, None)
@@ -262,6 +312,13 @@ class MediaMixin:
                             # Convert to s16le mono (if needed) and enqueue for /audio
                             try:
                                 mono = out[:, 0] if out.ndim == 2 else out.reshape(-1)
+                                mono = self._clarify_mono_audio(
+                                    mono,
+                                    self._audio_clarity_state,
+                                    target_rms=0.13,
+                                    noise_floor=0.0012,
+                                    max_gain=3.2,
+                                )
                                 pcm = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                                 self._put_realtime_frame(self.audio_queue, pcm)
                             except Exception as e:
@@ -303,16 +360,15 @@ class MediaMixin:
         except Exception:
             pass
         try:
-            if getattr(self, '_audio_stream', None):
-                if hasattr(self._audio_stream, 'stop'):
-                    self._audio_stream.stop()
-                if hasattr(self._audio_stream, 'close'):
-                    self._audio_stream.close()
-                if hasattr(self._audio_stream, '__exit__'):
-                    try:
-                        self._audio_stream.__exit__(None, None, None)
-                    except Exception:
-                        pass
+            stream = getattr(self, '_audio_stream', None)
+            if stream:
+                if hasattr(stream, '__exit__'):
+                    stream.__exit__(None, None, None)
+                else:
+                    if hasattr(stream, 'stop'):
+                        stream.stop()
+                    if hasattr(stream, 'close'):
+                        stream.close()
         except Exception:
             pass
         try:
@@ -326,22 +382,61 @@ class MediaMixin:
         self._wake_media_queue_readers(self.audio_queue, len(getattr(self, "audio_clients", [])) or 1)
         logging.info(" Audio capture stopped")
 
-    def _start_mic_capture(self, samplerate=48000, blocksize=960, channels=1):
-        """
-        Microphone of System A using sounddevice InputStream (no WASAPI special args).
-        Always sends mono s16le frames of 'blocksize' samples at 'samplerate'.
-        """
+    def _normalize_mic_device_id(self, device):
+        raw = "" if device is None else str(device).strip()
+        if not raw or raw.lower() in {"default", "system", "none", "null"}:
+            return "default"
+        try:
+            return str(int(raw))
+        except Exception:
+            return raw
+
+    def _resolve_mic_device(self, device):
+        device_id = self._normalize_mic_device_id(device)
+        if device_id == "default":
+            return None, "default"
+        try:
+            index = int(device_id)
+            info = sd.query_devices(index, kind="input")
+            if int(info.get("max_input_channels") or 0) <= 0:
+                raise ValueError("selected device has no input channels")
+            return index, str(index)
+        except Exception:
+            logging.getLogger("mic").warning("Invalid mic device %r; using system default", device)
+            return None, "default"
+
+    def _start_mic_capture(self, samplerate=48000, blocksize=960, channels=1, device=None):
+        """Start microphone capture using sounddevice InputStream. Sends mono s16le frames."""
         mic_log = logging.getLogger("mic")
         if self.mic_running:
             mic_log.info("Mic capture already running")
             return True
         if sd is None:
-            mic_log.error("Failed to start microphone capture: sounddevice is not installed")
+            mic_log.error("sounddevice is not installed; mic capture unavailable")
             return False
-        mic_log.info("Starting mic capture request sr=%s block=%s channels=%s", samplerate, blocksize, channels)
+
         self._clear_media_queue(self.mic_queue)
-        self.mic_running = True
-        self.mic_samplerate = int(samplerate)
+        self._mic_clarity_state = {"gain": 1.0}
+        device_arg, device_id = self._resolve_mic_device(device)
+
+        # Auto-detect device's native samplerate to avoid resampling failures
+        use_sr = int(samplerate)
+        use_ch = 1
+        try:
+            dev = sd.query_devices(device_arg, kind='input')
+            if dev.get('default_samplerate'):
+                use_sr = int(dev['default_samplerate'])
+            use_ch = min(max(1, int(channels or 1)), max(1, int(dev.get('max_input_channels') or 1)))
+            self.mic_device_id = device_id
+            self.mic_device_name = str(dev.get("name") or ("System Default" if device_arg is None else device_id))
+            mic_log.info("Mic device: id=%s name=%s sr=%s ch=%s", self.mic_device_id, self.mic_device_name, use_sr, use_ch)
+        except Exception as exc:
+            mic_log.warning("Could not query mic device, using defaults: %s", exc)
+            device_arg = None
+            self.mic_device_id = "default"
+            self.mic_device_name = "System Default"
+
+        self.mic_samplerate = use_sr
         self.mic_blocksize = int(blocksize)
         self.mic_channels = 1
 
@@ -350,79 +445,33 @@ class MediaMixin:
                 if not self.mic_running or not self.mic_clients:
                     return
                 if status:
-                    logging.debug(f"Mic status: {status}")
-                x = indata
-                if x.ndim == 2:
-                    if x.shape[1] > 1:
-                        x = x[:, 0]
-                    else:
-                        x = x.reshape(-1)
-                x = (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16)
-                self._put_realtime_frame(self.mic_queue, x.tobytes())
+                    logging.debug("Mic status: %s", status)
+                x = indata.reshape(-1) if indata.ndim == 1 else (
+                    np.mean(indata, axis=1) if indata.shape[1] > 1 else indata.reshape(-1)
+                )
+                x = self._clarify_mono_audio(x, self._mic_clarity_state,
+                                             target_rms=0.16, noise_floor=0.0035, max_gain=5.0)
+                self._put_realtime_frame(self.mic_queue,
+                                         (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes())
             except Exception:
                 logging.error("Mic callback error", exc_info=True)
 
-        default_samplerate = self.mic_samplerate
-        max_input_channels = 1
         try:
-            default_input = sd.query_devices(kind='input')
-            max_input_channels = max(1, int(default_input.get('max_input_channels') or 1))
-            if default_input.get('default_samplerate'):
-                default_samplerate = int(default_input['default_samplerate'])
-            mic_log.info(
-                "Default mic device name=%s max_input_channels=%s default_samplerate=%s",
-                default_input.get('name'),
-                max_input_channels,
-                default_samplerate,
+            mic_log.info("Opening mic stream device=%s sr=%s ch=%s block=%s", self.mic_device_id, use_sr, use_ch, self.mic_blocksize)
+            self.mic_stream = sd.InputStream(
+                samplerate=use_sr, channels=use_ch, dtype='float32',
+                blocksize=self.mic_blocksize, callback=mic_callback,
+                device=device_arg, latency='low'
             )
+            self.mic_stream.start()
+            self.mic_running = True
+            mic_log.info("Mic capture started device=%s @ %s Hz ch=%s block=%s", self.mic_device_name, use_sr, use_ch, self.mic_blocksize)
+            return True
         except Exception as exc:
-            mic_log.warning("Unable to query default microphone device; using requested mic format: %s", exc)
-
-        requested_channels = max(1, int(channels or 1))
-        channel_candidates = [min(requested_channels, max_input_channels)]
-        if max_input_channels >= 2 and 2 not in channel_candidates:
-            channel_candidates.append(2)
-        samplerate_candidates = [self.mic_samplerate]
-        if default_samplerate and default_samplerate not in samplerate_candidates:
-            samplerate_candidates.append(default_samplerate)
-
-        attempts = []
-        for sr in samplerate_candidates:
-            for ch in channel_candidates:
-                pair = (int(sr), int(ch))
-                if pair not in attempts:
-                    attempts.append(pair)
-
-        last_error = None
-        try:
-            for sr, ch in attempts:
-                try:
-                    mic_log.info("Opening mic stream sr=%s input_channels=%s block=%s", sr, ch, self.mic_blocksize)
-                    self.mic_stream = sd.InputStream(
-                        samplerate=sr,
-                        channels=ch,
-                        dtype='float32',
-                        blocksize=self.mic_blocksize,
-                        callback=mic_callback,
-                        device=None,
-                        latency='low'
-                    )
-                    self.mic_stream.start()
-                    self.mic_samplerate = sr
-                    message = f"Mic capture started @ {self.mic_samplerate} Hz input_channels={ch} block={self.mic_blocksize}"
-                    mic_log.info(message)
-                    print(message)
-                    return True
-                except Exception as exc:
-                    last_error = exc
-                    self.mic_stream = None
-                    mic_log.warning("Mic open attempt failed sr=%s channels=%s: %s", sr, ch, exc)
-        finally:
-            if self.mic_stream is None:
-                self.mic_running = False
-
-        mic_log.error("Failed to start microphone capture after trying %s: %s", attempts, last_error)
-        return False
+            mic_log.error("Failed to start mic capture: %s", exc)
+            self.mic_stream = None
+            self.mic_running = False
+            return False
 
     def _stop_mic_capture(self):
         mic_log = logging.getLogger("mic")
@@ -499,15 +548,29 @@ class MediaMixin:
             return True
         return False
 
-    async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol):
+    async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol, path=None):
         mic_log = logging.getLogger("mic")
         remote = getattr(websocket, 'remote_address', None)
         mic_log.info("New mic client connected from %s", remote)
         print(f"New mic client connected from {remote}")
         self.mic_clients.add(websocket)
         try:
+            requested_device = "default"
+            try:
+                if path:
+                    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+                    requested_device = self._normalize_mic_device_id((params.get("device") or ["default"])[0])
+            except Exception:
+                requested_device = "default"
+            if self.mic_running and getattr(self, "mic_device_id", "default") != requested_device:
+                mic_log.info(
+                    "Mic device changed from %s to %s; restarting capture",
+                    getattr(self, "mic_device_id", "default"),
+                    requested_device,
+                )
+                self._stop_mic_capture()
             if not self.mic_running:
-                ok = self._start_mic_capture(samplerate=48000, blocksize=960, channels=1)
+                ok = self._start_mic_capture(samplerate=48000, blocksize=960, channels=1, device=requested_device)
                 if not ok:
                     mic_log.error("Mic open failed for %s", remote)
                     print("Mic open failed")
@@ -523,7 +586,9 @@ class MediaMixin:
                 "samplerate": int(self.mic_samplerate),
                 "channels": 1,
                 "samplefmt": "s16le",
-                "blocksize": int(self.mic_blocksize)
+                "blocksize": int(self.mic_blocksize),
+                "device_id": getattr(self, "mic_device_id", "default"),
+                "device_name": getattr(self, "mic_device_name", "System Default"),
             }
             await websocket.send(json.dumps(hdr).encode('utf-8'))
             mic_log.info("Mic header sent to %s: sr=%s ch=%s fmt=%s block=%s", remote, hdr['samplerate'], hdr['channels'], hdr['samplefmt'], hdr['blocksize'])
@@ -580,7 +645,7 @@ class MediaMixin:
                     elif action == 'get_public_url':
                         await self.handle_get_url_via_websocket(websocket)
                     elif action == 'set_quality':
-                        value = self._apply_quality(event.get('value', 75))
+                        value = self._apply_quality(event.get('value', getattr(self, "current_quality", 85)))
                         print(f" Quality set to: {value}%")
                     elif action == 'set_fps':
                         value = self._apply_fps(event.get('value', 30))
@@ -598,11 +663,11 @@ class MediaMixin:
                     elif action == 'get_stream_status':
                         await self._send_stream_status(websocket)
                     elif action == 'set_capture_method':
-                        method = event.get('method', 'auto')
                         if self.screen_capturer:
+                            method = event.get('method') or self.screen_capturer.get_current_method()
                             success = self.screen_capturer.set_capture_method(method)
                             if success:
-                                print(f" Capture method changed to: {method}")
+                                print(f" Capture method changed to: {self.screen_capturer.get_current_method()}")
                             else:
                                 print(f" Failed to set capture method to: {method}")
                         else:
@@ -619,8 +684,8 @@ class MediaMixin:
                         else:
                             await websocket.send(json.dumps({
                                 'type': 'available_capture_methods',
-                                'methods': ['auto'],
-                                'current': 'auto'
+                                'methods': [],
+                                'current': None
                             }))
                     elif action == 'set_performance':
                         enabled = bool(event.get('enabled'))
@@ -695,9 +760,9 @@ class MediaMixin:
             return
 
         container = None
-        player = None
         cv2_capture = None
         cv2_first_frame = None
+        frame_delay = 0.05
         try:
             # First message may include selected device from client
             try:
@@ -837,60 +902,14 @@ class MediaMixin:
                                 continue
                         if open_ok:
                             break
-                # Non-Windows simple attempt (may not be used in this environment)
-                
-
-            if not open_ok and HAS_AIORTC and not selected_cv2_only:
-                # Fallback to aiortc MediaPlayer with dshow
-                _log_fallback("webcam.open", "aiortc_media_player", "pyav_dshow_failed")
-                try:
-                    from aiortc.contrib.media import MediaPlayer
-                    for name in candidates:
-                        for opts in option_sets:
-                            try:
-                                if opts is None:
-                                    print(f" Trying MediaPlayer open: video={name} opts=None")
-                                    player = MediaPlayer(f"video={name}", format='dshow')
-                                else:
-                                    print(f" Trying MediaPlayer open: video={name} opts={opts}")
-                                    player = MediaPlayer(f"video={name}", format='dshow', options=opts)
-                                print(f" Opened webcam via aiortc MediaPlayer: video={name} opts={opts}")
-                                break
-                            except Exception as e:
-                                print(f"  MediaPlayer open failed: video={name} opts={opts} err={e}")
-                                player = None
-                                continue
-                        if player is not None:
-                            break
-                    if player is None:
-                        for generic in ("video=0", "video=1"):
-                            for opts in option_sets:
-                                try:
-                                    if opts is None:
-                                        print(f" Trying MediaPlayer open: {generic} opts=None")
-                                        player = MediaPlayer(generic, format='dshow')
-                                    else:
-                                        print(f" Trying MediaPlayer open: {generic} opts={opts}")
-                                        player = MediaPlayer(generic, format='dshow', options=opts)
-                                    print(f" Opened webcam via aiortc MediaPlayer: {generic} opts={opts}")
-                                    break
-                                except Exception as e:
-                                    print(f"  MediaPlayer open failed: {generic} opts={opts} err={e}")
-                                    player = None
-                                    continue
-                            if player is not None:
-                                break
-                except Exception as e:
-                    player = None
-
-            if container is None and player is None and is_windows:
+            if container is None and is_windows:
                 try:
                     import cv2
                 except Exception as e:
                     cv2 = None
                     print(f"  OpenCV not available for webcam fallback: {e}")
                 if cv2 is not None:
-                    _log_fallback("webcam.open", "opencv_dshow", "pyav_and_aiortc_failed")
+                    _log_fallback("webcam.open", "opencv_dshow", "pyav_dshow_failed")
                     for index in cv2_indices:
                         try:
                             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
@@ -921,7 +940,7 @@ class MediaMixin:
                                 pass
                             cv2_capture = None
 
-            if container is None and player is None and cv2_capture is None:
+            if container is None and cv2_capture is None:
                 print(" No webcam device could be opened")
                 try:
                     await websocket.send(b"")
@@ -956,7 +975,7 @@ class MediaMixin:
                             break
                         except Exception:
                             pass
-                        await asyncio.sleep(0.05)
+                        await asyncio.sleep(frame_delay)
             elif cv2_capture is not None:
                 try:
                     import cv2
@@ -968,38 +987,17 @@ class MediaMixin:
                             else:
                                 ok, frame = True, pending_frame
                                 pending_frame = None
-                            if not ok or frame is None:
-                                await asyncio.sleep(0.05)
-                                continue
-                            ok, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-                            if ok:
+                            if ok and frame is not None:
+                                ok, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                            if ok and frame is not None:
                                 await websocket.send(encoded.tobytes())
                         except websockets.exceptions.ConnectionClosed:
                             break
                         except Exception:
-                            await asyncio.sleep(0.05)
-                            continue
-                        await asyncio.sleep(0.05)
+                            pass
+                        await asyncio.sleep(frame_delay)
                 except Exception as e:
                     print(f"Error in OpenCV webcam stream: {e}")
-            else:
-                # aiortc MediaPlayer path
-                video_track = getattr(player, 'video', None)
-                if video_track is None:
-                    print(" MediaPlayer has no video track")
-                    return
-                while True:
-                    try:
-                        frame = await video_track.recv()
-                        img = frame.to_image()
-                        buf = io.BytesIO()
-                        img.save(buf, format='JPEG', quality=70)
-                        await websocket.send(buf.getvalue())
-                    except websockets.exceptions.ConnectionClosed:
-                        break
-                    except Exception:
-                        await asyncio.sleep(0.05)
-                        continue
         except Exception as e:
             print(f"Error in webcam_stream_handler: {e}")
         finally:
@@ -1009,78 +1007,76 @@ class MediaMixin:
             except Exception:
                 pass
             try:
-                if player is not None:
-                    player.audio and player.audio.stop()
-                    player.video and player.video.stop()
-            except Exception:
-                pass
-            try:
                 if cv2_capture is not None:
                     cv2_capture.release()
             except Exception:
                 pass
 
-    async def ssh_ws_handler(self, websocket):
-        """Route immediately to a local interactive shell for responsiveness on Windows."""
-        await self.local_shell_ws_handler(websocket)
-        return
-
     async def local_shell_ws_handler(self, websocket):
         """Spawn a local shell (PowerShell/cmd) and bridge it over the websocket."""
         import shutil
-        use_pty = False
-        # Prefer Windows PowerShell for a full shell experience; fallback to cmd.exe
-        ps_path = os.path.join(os.environ.get('SystemRoot', 'C\\Windows'), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-        cmd_path = os.path.join(os.environ.get('SystemRoot', 'C\\Windows'), 'System32', 'cmd.exe')
+        proc = None
+        initial_cols = 120
+        initial_rows = 34
+        pending_client_messages = []
+        system_root = os.environ.get('SystemRoot') or r'C:\Windows'
+        ps_path = os.path.join(system_root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+        cmd_path = os.path.join(system_root, 'System32', 'cmd.exe')
         if not os.path.exists(cmd_path):
-            cmd_path = os.environ.get('ComSpec', shutil.which('cmd')) or os.path.join(os.environ.get('SystemRoot', 'C\\Windows'), 'System32', 'cmd.exe')
+            cmd_path = os.environ.get('ComSpec', shutil.which('cmd')) or os.path.join(system_root, 'System32', 'cmd.exe')
+
+        def _message_to_text(message):
+            if isinstance(message, str):
+                return message
+            return message.decode('utf-8', errors='ignore')
+
+        def _resize_from_message(message):
+            try:
+                data = _message_to_text(message).strip()
+                if not data.startswith('{'):
+                    return None
+                event = json.loads(data)
+                if event.get('type') != 'resize':
+                    return None
+                cols = max(20, min(500, int(event.get('cols', initial_cols))))
+                rows = max(5, min(200, int(event.get('rows', initial_rows))))
+                return cols, rows
+            except Exception:
+                return None
+
+        try:
+            first_message = await asyncio.wait_for(websocket.recv(), timeout=0.35)
+            first_resize = _resize_from_message(first_message)
+            if first_resize:
+                initial_cols, initial_rows = first_resize
+            else:
+                pending_client_messages.append(first_message)
+        except asyncio.TimeoutError:
+            pass
+        except websockets.exceptions.ConnectionClosed:
+            return
+
         try:
             # Use a Windows PTY when available for correct interactive behavior (Backspace, arrow keys)
-            if 'HAS_WINPTY' in globals() and HAS_WINPTY:
-                try:
-                    from winpty import PtyProcess
-                    shell_cmd = ps_path if os.path.exists(ps_path) else cmd_path
-                    # Start with a sane default size matching the client
-                    proc = PtyProcess.spawn(shell_cmd, dimensions=(34, 120))
-                    proc_writer = proc
-                    proc_reader = proc
-                    use_pty = True
-                except Exception:
-                    _log_fallback("terminal.shell", "subprocess_pipe", "winpty_spawn_failed")
-                    proc = None
-                    use_pty = False
-
-            if not use_pty:
-                if not os.path.exists(ps_path):
-                    _log_fallback("terminal.shell", "cmd.exe", "powershell_not_found")
-                shell_cmd = [ps_path, '-NoLogo', '-NoExit'] if os.path.exists(ps_path) else [cmd_path, '/K', 'chcp 65001']
-                proc = subprocess.Popen(
-                        shell_cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    bufsize=0,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            if 'HAS_WINPTY' not in globals() or not HAS_WINPTY:
+                await websocket.send(
+                    "\x1b[91mTerminal requires pywinpty for full keyboard support. "
+                    "Install requirements.txt and restart Zadoo VNC.\x1b[0m\r\n"
                 )
+                return
+
+            from winpty import PtyProcess
+            if os.path.exists(ps_path):
+                shell_cmd = f"{os.path.normpath(ps_path)} -NoLogo -NoExit"
+            else:
+                _log_fallback("terminal.shell", "cmd.exe", "powershell_not_found")
+                shell_cmd = f"{os.path.normpath(cmd_path)} /K chcp 65001"
+            proc = PtyProcess.spawn(shell_cmd, dimensions=(initial_rows, initial_cols))
             proc_writer = proc
             proc_reader = proc
-            # Proactively show something
-            try:
-                await websocket.send("Connected to local shell. Type commands and press Enter.\r\n")
-            except Exception:
-                pass
-            # Trigger prompt output
-            try:
-                if use_pty:
-                    proc_writer.write("\r\n")
-                else:
-                    proc_writer.stdin.write(b"\r\n")
-                    proc_writer.stdin.flush()
-            except Exception:
-                pass
         except Exception as e:
             try:
-                await websocket.send(json.dumps({'type': 'error', 'message': f'Local shell failed: {e}'}))
+                await websocket.send(f"\x1b[91mLocal PTY failed: {e}\x1b[0m\r\n")
             except Exception:
                 pass
             return
@@ -1089,71 +1085,44 @@ class MediaMixin:
 
         async def ws_to_proc():
             nonlocal stop_flag
+            def handle_client_message(msg):
+                data = _message_to_text(msg)
+                resize = _resize_from_message(msg)
+                if resize:
+                    cols, rows = resize
+                    try:
+                        proc_writer.set_size(rows, cols)
+                    except Exception:
+                        pass
+                    return
+
+                proc_writer.write(data)
+
             try:
+                for msg in pending_client_messages:
+                    handle_client_message(msg)
                 async for msg in websocket:
                     try:
-                        if isinstance(msg, str):
-                            data = msg
-                        else:
-                            data = msg.decode('utf-8', errors='ignore')
-                        # Handle terminal resize from client
-                        if data and data.startswith('{'):
-                            try:
-                                evt = json.loads(data)
-                                if evt.get('type')=='resize':
-                                    cols = int(evt.get('cols', 120))
-                                    rows = int(evt.get('rows', 34))
-                                    if use_pty:
-                                        try:
-                                            proc_writer.set_size(rows, cols)
-                                        except Exception:
-                                            pass
-                                    continue
-                            except Exception:
-                                pass
-                        
-                        # Normalize input: map DEL->BS always; only expand CR to CRLF for non-PTY
-                        if use_pty:
-                            data = data.replace('\x7f', '\b')
-                            proc_writer.write(data)
-                        else:
-                            data = data.replace('\r', '\r\n').replace('\x7f', '\b')
-                            proc_writer.stdin.write(data.encode('utf-8', errors='ignore'))
-                            proc_writer.stdin.flush()
+                        handle_client_message(msg)
                     except Exception:
                         break
+            except websockets.exceptions.ConnectionClosed:
+                pass
             finally:
                 stop_flag = True
 
         async def proc_to_ws():
             nonlocal stop_flag
             loop = asyncio.get_running_loop()
-            import locale
-            import re
-            enc = 'utf-8'
-            poll_alive = (lambda: (proc.isalive() if use_pty else proc.poll() is None))
+            poll_alive = proc.isalive
             while not stop_flag and poll_alive():
                 try:
                     # Read in small chunks for responsiveness
-                    if use_pty:
-                        chunk = await loop.run_in_executor(None, proc_reader.read, 256)
-                    else:
-                        chunk = await loop.run_in_executor(None, proc_reader.stdout.read, 256)
+                    chunk = await loop.run_in_executor(None, proc_reader.read, 256)
                     if not chunk:
                         await asyncio.sleep(0.02)
                         continue
-                    if isinstance(chunk, bytes):
-                        try:
-                            text = chunk.decode(enc, errors='ignore')
-                        except Exception:
-                            text = chunk.decode(locale.getpreferredencoding(False) or 'utf-8', errors='ignore')
-                    else:
-                        # winpty returns str
-                        text = chunk
-                    # Normalize bare CR from PTY to CRLF to avoid cursor overlays
-                    if use_pty and text:
-                        text = re.sub(r"\r(?!\n)", "\r\n", text)
-                    await websocket.send(text)
+                    await websocket.send(chunk.decode('utf-8', errors='ignore') if isinstance(chunk, bytes) else chunk)
                 except Exception:
                     break
 
@@ -1167,21 +1136,10 @@ class MediaMixin:
                     t.cancel()
         try:
             if proc:
-                if use_pty:
-                    try:
-                        proc.close()
-                    except Exception:
-                        pass
-                else:
-                    if proc.poll() is None:
-                        try:
-                            proc.terminate()
-                            proc.wait(timeout=2)
-                        except Exception:
-                            try:
-                                proc.kill()
-                            except Exception:
-                                pass
+                try:
+                    proc.close()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1197,6 +1155,13 @@ class MediaMixin:
             self._video_send_tasks = send_tasks
         if not hasattr(self, "_video_skipped_sends"):
             self._video_skipped_sends = 0
+
+        def cleanup_disconnected(disconnected_clients):
+            for ws in disconnected_clients:
+                self.video_clients.discard(ws)
+                task = send_tasks.pop(ws, None)
+                if task and not task.done():
+                    task.cancel()
 
         while not self.stop_event.is_set():
             try:
@@ -1214,8 +1179,7 @@ class MediaMixin:
                         print(f"Error sending frame to client: {e}")
                         disconnected.add(ws)
 
-                for ws in disconnected:
-                    self.video_clients.discard(ws)
+                cleanup_disconnected(disconnected)
 
                 event = getattr(self, "frame_ready_event", None)
                 if event is not None:
@@ -1272,11 +1236,7 @@ class MediaMixin:
                         print(f"Error scheduling frame send: {e}")
                         disconnected.add(ws)
 
-                for ws in disconnected:
-                    self.video_clients.discard(ws)
-                    task = send_tasks.pop(ws, None)
-                    if task and not task.done():
-                        task.cancel()
+                cleanup_disconnected(disconnected)
 
                 try:
                     capture_stats = self.screen_capturer.get_capture_stats()
@@ -1322,68 +1282,75 @@ class MediaMixin:
             if not (self.cursor_broadcast_enabled and self.cursor_subscribers):
                 await asyncio.sleep(0.25)
                 continue
-            if self.cursor_broadcast_enabled and self.cursor_subscribers:
+            try:
+                ci = CURSORINFO()
+                ci.cbSize = ctypes.sizeof(CURSORINFO)
+                if user32.GetCursorInfo(ctypes.byref(ci)):
+                    x, y = ci.ptScreenPos.x, ci.ptScreenPos.y
+                else:
+                    pt = POINT()
+                    if _GetCursorPos(ctypes.byref(pt)):
+                        x, y = pt.x, pt.y
+                    else:
+                        x, y = 0, 0
+
+                left_press = bool(_GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+                right_press = bool(_GetAsyncKeyState(VK_RBUTTON) & 0x8000)
+
+                vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+                vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+                vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+                vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+                if vw > 0 and vh > 0:
+                    norm_x = (x - vx) / vw
+                    norm_y = (y - vy) / vh
+                else:
+                    norm_x = 0.5
+                    norm_y = 0.5
+                cursor_visible = True
                 try:
-                    # Get cursor position using GetCursorInfo first (avoids LP_POINT issues)
-                    ci = CURSORINFO()
-                    ci.cbSize = ctypes.sizeof(CURSORINFO)
-                    if user32.GetCursorInfo(ctypes.byref(ci)):
-                        x, y = ci.ptScreenPos.x, ci.ptScreenPos.y
-                    else:
-                        # Fallback to GetCursorPos if needed
-                        pt = POINT()
-                        if _GetCursorPos(ctypes.byref(pt)):
-                            x, y = pt.x, pt.y
-                        else:
-                            x, y = 0, 0
-                    
-                    # Get button states using Windows API
-                    left_press = bool(_GetAsyncKeyState(VK_LBUTTON) & 0x8000)
-                    right_press = bool(_GetAsyncKeyState(VK_RBUTTON) & 0x8000)
-                    
-                    # Get virtual screen bounds for normalization
-                    vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-                    vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-                    vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-                    vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-                    
-                    # Normalize coordinates to 0-1 range
-                    if vw > 0 and vh > 0:
-                        norm_x = (x - vx) / vw
-                        norm_y = (y - vy) / vh
-                    else:
-                        norm_x = 0.5
-                        norm_y = 0.5
-                    
-                    # Create cursor data
-                    cursor_data = {
-                        'type': 'cursor',
-                        'x': norm_x,
-                        'y': norm_y,
-                        'left_pressed': left_press,
-                        'right_pressed': right_press,
-                        'cursor_css': _get_css_cursor_from_system()
-                    }
-                    
-                    # Send to all subscribed clients
-                    disconnected = []
-                    for ws in self.cursor_subscribers.copy():
-                        try:
-                            await ws.send(json.dumps(cursor_data))
-                        except websockets.exceptions.ConnectionClosed:
-                            disconnected.append(ws)
-                        except Exception as e:
-                            print(f"Error sending cursor data to client: {e}")
-                            disconnected.append(ws)
-                    
-                    # Remove disconnected clients
-                    for ws in disconnected:
-                        self.cursor_subscribers.discard(ws)
-                        if not self.cursor_subscribers:
-                            self.cursor_broadcast_enabled = False
-                            
-                except Exception as e:
-                    print(f"Error in broadcast_cursor_position: {e}")
+                    capturer = getattr(self, "screen_capturer", None)
+                    region = capturer.get_active_region_norm() if capturer and hasattr(capturer, "get_active_region_norm") else None
+                    if region:
+                        x0 = max(0.0, min(1.0, float(region.get("x0", 0.0))))
+                        y0 = max(0.0, min(1.0, float(region.get("y0", 0.0))))
+                        x1 = max(0.0, min(1.0, float(region.get("x1", 1.0))))
+                        y1 = max(0.0, min(1.0, float(region.get("y1", 1.0))))
+                        left, right = min(x0, x1), max(x0, x1)
+                        top, bottom = min(y0, y1), max(y0, y1)
+                        if right > left and bottom > top:
+                            cursor_visible = left <= norm_x <= right and top <= norm_y <= bottom
+                            norm_x = max(0.0, min(1.0, (norm_x - left) / (right - left)))
+                            norm_y = max(0.0, min(1.0, (norm_y - top) / (bottom - top)))
+                except Exception:
+                    cursor_visible = True
+
+                cursor_data = {
+                    'type': 'cursor',
+                    'x': norm_x,
+                    'y': norm_y,
+                    'cursor_visible': cursor_visible,
+                    'left_pressed': left_press,
+                    'right_pressed': right_press,
+                    'cursor_css': _get_css_cursor_from_system()
+                }
+
+                disconnected = []
+                for ws in self.cursor_subscribers.copy():
+                    try:
+                        await ws.send(json.dumps(cursor_data))
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.append(ws)
+                    except Exception as e:
+                        print(f"Error sending cursor data to client: {e}")
+                        disconnected.append(ws)
+
+                for ws in disconnected:
+                    self.cursor_subscribers.discard(ws)
+                if not self.cursor_subscribers:
+                    self.cursor_broadcast_enabled = False
+            except Exception as e:
+                print(f"Error in broadcast_cursor_position: {e}")
             
             # Update at 60 FPS for smooth cursor tracking while subscribed.
             await asyncio.sleep(1/60)

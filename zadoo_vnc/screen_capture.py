@@ -3,18 +3,16 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import threading
 import time
 
-from .dependencies import *
+from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_IMAGECODECS, HAS_PIL, Image, bettercam, dxcam, imagecodecs, np
 from .logging_utils import _log_fallback
-
-_NO_FRAME = object()
 
 
 class ScreenCapturer(threading.Thread):
-    # Auto-instrument all methods for detailed logging
-    def __init__(self, fps=0, quality=65):
+    def __init__(self, fps=0, quality=85):
         super().__init__(daemon=True)
         self.latest_frame_jpeg = None
         self.frame_lock = threading.Lock()
@@ -23,7 +21,6 @@ class ScreenCapturer(threading.Thread):
         self.is_running = False
         self.quality = quality
         self.fps = fps
-        self.capture_method = "auto"  # auto, dxcam, bettercam
         self.dxcam_camera = None
         self.dxcam_started = False
         self._dxcam_active_region = None
@@ -34,6 +31,7 @@ class ScreenCapturer(threading.Thread):
         # Lock BetterCam to the known working pair from diagnostics
         self.bettercam_output_idx = 0
         self.bettercam_device_idx = 0
+        self.capture_method = self._initial_capture_method()
         self.active_capture_method = "unknown"  # Track which method is actually being used
         self.capture_stats = {
             'frame_count': 0,
@@ -59,13 +57,52 @@ class ScreenCapturer(threading.Thread):
         self._backend_disabled_until = {}
         self._backend_no_frame_counts = {}
         self._backend_no_frame_since = {}
-        self._backend_no_frame_last_log = {}
-        self._auto_probe_counter = 0
-        self._auto_probe_index = 0
-        self._last_auto_fallback_key = None
-        self._last_auto_fallback_log = 0.0
         self._last_capture_source_region_applied = False
         self._last_jpeg_encoder = "unknown"
+        self._imagecodecs_jpeg_available = bool(HAS_IMAGECODECS)
+
+    def _initial_capture_method(self):
+        configured_method = os.getenv("ZADOO_CAPTURE_METHOD")
+        method = self._normalize_capture_method(configured_method)
+        if method and self._capture_method_available(method):
+            return method
+        fallback = self._preferred_capture_method()
+        if configured_method:
+            logging.warning(
+                "Ignoring unavailable ZADOO_CAPTURE_METHOD=%r; using %s",
+                configured_method,
+                fallback,
+            )
+        return fallback
+
+    @staticmethod
+    def _normalize_capture_method(method):
+        method = str(method or "").strip().lower()
+        aliases = {
+            "better_cam": "bettercam",
+            "better-cam": "bettercam",
+            "dx": "dxcam",
+            "dx_cam": "dxcam",
+            "dx-cam": "dxcam",
+        }
+        return aliases.get(method, method)
+
+    def _installed_capture_methods(self):
+        methods = []
+        if HAS_BETTERCAM:
+            methods.append("bettercam")
+        if HAS_DXCAM:
+            methods.append("dxcam")
+        return methods
+
+    def _preferred_capture_method(self):
+        methods = self._installed_capture_methods()
+        if methods:
+            return methods[0]
+        return "none"
+
+    def _capture_method_available(self, method):
+        return self._normalize_capture_method(method) in self._installed_capture_methods()
 
     def set_frame_event(self, loop, event):
         self._frame_event_loop = loop
@@ -87,14 +124,6 @@ class ScreenCapturer(threading.Thread):
 
     def run(self):
         self.is_running = True
-
-        # Initialize DXCam if available
-        if HAS_DXCAM:
-            try:
-                self.dxcam_camera = dxcam.create()
-            except Exception:
-                self.dxcam_camera = None
-        # BetterCam lazy init; created on first use
 
         next_deadline = time.perf_counter()
         while self.is_running:
@@ -185,21 +214,19 @@ class ScreenCapturer(threading.Thread):
 
     def _grab_screen(self):
         self._last_capture_source_region_applied = False
-        # Use specific method if set, otherwise use auto-detection
-        if self.capture_method != "auto" and self._backend_is_disabled(self.capture_method):
-            _log_fallback("screen_capture.capture_method", "auto", f"{self.capture_method}_cooldown")
-            logging.warning("%s capture backend is cooling down; falling back to auto", self.capture_method)
-            self.capture_method = "auto"
-            self.capture_stats['method_switches'] += 1
-            self.capture_stats['last_method_switch'] = time.time()
-        # Ensure DXCam is available on demand (lazy init)
-        if self.capture_method == "dxcam" and HAS_DXCAM:
-            if self.dxcam_camera is None:
-                try:
-                    self.dxcam_camera = dxcam.create()
-                except Exception:
-                    self.dxcam_camera = None
-                    return None
+        method = self._normalize_capture_method(self.capture_method)
+        if not self._capture_method_available(method):
+            self.active_capture_method = "unknown"
+            logging.error("Screen capture method '%s' is not available.", method)
+            return None
+        if self._backend_is_disabled(method):
+            self.active_capture_method = "unknown"
+            return None
+
+        if method == "dxcam":
+            self._prepare_backend("dxcam")
+            if self._ensure_dxcam_camera() is None:
+                return None
             try:
                 frame = self._grab_screen_dxcam()
                 if frame is not None:
@@ -209,40 +236,29 @@ class ScreenCapturer(threading.Thread):
                     self._record_backend_no_frame("dxcam")
                 return frame
             except Exception as e:
-                _log_fallback("screen_capture.explicit_dxcam", "auto_or_none", str(e), e)
+                _log_fallback("screen_capture.explicit_dxcam", "no_frame", str(e), e)
                 logging.warning("DXCam capture failed", exc_info=True)
-                if self.capture_method != "auto":
-                    return None
+                self._record_backend_failure("dxcam")
+                return None
 
-        if self.capture_method == "bettercam" and HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
+        if method == "bettercam":
+            self._prepare_backend("bettercam")
             try:
                 logging.debug("Attempting BetterCam capture (explicit method)")
                 frame = self._grab_screen_bettercam()
                 if frame is not None:
                     self.active_capture_method = "bettercam"
                     logging.debug("BetterCam capture succeeded (explicit)")
+                else:
+                    self._record_backend_no_frame("bettercam")
                 return frame
             except Exception as exc:
-                _log_fallback("screen_capture.explicit_bettercam", "auto_or_none", str(exc), exc)
+                _log_fallback("screen_capture.explicit_bettercam", "no_frame", str(exc), exc)
                 logging.exception("BetterCam explicit capture threw exception")
-                if self.capture_method != "auto":
-                    return None
+                self._record_backend_failure("bettercam")
+                return None
         
-        # Auto mode: try methods in order of performance
-        if self.capture_method == "auto":
-            failed_methods = []
-            for method in self._auto_method_order():
-                frame = self._grab_auto_method(method)
-                if frame is _NO_FRAME:
-                    return None
-                if frame is not None:
-                    if failed_methods:
-                        self._log_auto_fallback(method, failed_methods)
-                    self.active_capture_method = method
-                    return frame
-                failed_methods.append(method)
-        
-        logging.error("All screen capture methods failed.")
+        logging.error("Screen capture method '%s' is unsupported.", method)
         return None
 
     def _record_backend_perf(self, method, capture_ms, success):
@@ -273,6 +289,8 @@ class ScreenCapturer(threading.Thread):
             self._release_bettercam()
         elif method == "dxcam":
             self._release_dxcam()
+        if method == self.capture_method:
+            self.active_capture_method = "unknown"
         logging.warning("%s capture backend disabled for %ss after repeated failures", method, seconds)
 
     def _backend_is_disabled(self, method):
@@ -303,99 +321,25 @@ class ScreenCapturer(threading.Thread):
         self._backend_no_frame_counts.pop(method, None)
         self._backend_no_frame_since.pop(method, None)
 
-    def _should_fallback_after_no_frame(self, method, count, elapsed):
-        if str(method) != "dxcam":
-            return True
-        with self.frame_lock:
-            has_frame = self.latest_frame_jpeg is not None
-        if not has_frame:
-            return count >= 12 or elapsed >= 0.5
-        return count >= 240 or elapsed >= 5.0
-
-    def _log_no_frame_fallback(self, method, count, elapsed):
+    def _prepare_backend(self, method):
         method = str(method or "")
-        now = time.time()
-        last_log = float(self._backend_no_frame_last_log.get(method, 0.0) or 0.0)
-        if now - last_log < 2.0:
-            return
-        self._backend_no_frame_last_log[method] = now
-        _log_fallback(
-            "screen_capture.auto_backend",
-            "next_backend",
-            f"{method}_no_frame_after_{count}_misses_{elapsed:.2f}s",
-        )
+        if method == "dxcam" and self.bettercam_camera is not None:
+            logging.info("DXCam: releasing BetterCam before initialization")
+            self._release_bettercam()
+        elif method == "bettercam" and self.dxcam_camera is not None:
+            logging.info("BetterCam: releasing DXCam before initialization")
+            self._release_dxcam()
 
-    def _log_auto_fallback(self, method, failed_methods):
-        key = (str(method or ""), tuple(str(item) for item in failed_methods or ()))
-        now = time.time()
-        if key == self._last_auto_fallback_key and now - self._last_auto_fallback_log < 5.0:
-            return
-        self._last_auto_fallback_key = key
-        self._last_auto_fallback_log = now
-        _log_fallback("screen_capture.auto_capture", method, "failed=" + ",".join(failed_methods))
-
-    def _auto_candidates(self):
-        methods = []
-        if HAS_DXCAM and not self._backend_is_disabled("dxcam"):
-            methods.append("dxcam")
-        if HAS_BETTERCAM and not self._backend_is_disabled("bettercam"):
-            methods.append("bettercam")
-        return methods
-
-    def _auto_method_order(self):
-        methods = self._auto_candidates()
-        if not methods:
-            return []
-        base_rank = {name: index for index, name in enumerate(methods)}
-
-        def score(method):
-            stats = self.backend_perf.get(method) or {}
-            samples = int(stats.get("samples") or 0)
-            if samples < 3:
-                return 1000.0 + base_rank.get(method, 99)
-            return float(stats.get("avg_ms") or 999.0) + float(stats.get("failures") or 0) * 20.0
-
-        ordered = sorted(methods, key=score)
-        self._auto_probe_counter += 1
-        if self._auto_probe_counter >= 120:
-            self._auto_probe_counter = 0
-            self._auto_probe_index %= len(methods)
-            self._auto_probe_index = (self._auto_probe_index + 1) % len(methods)
-            probe = methods[self._auto_probe_index]
-            if probe in ordered:
-                ordered.remove(probe)
-                ordered.insert(0, probe)
-        return ordered
-
-    def _grab_auto_method(self, method):
-        if self._backend_is_disabled(method):
+    def _ensure_dxcam_camera(self):
+        if not HAS_DXCAM:
             return None
+        if self.dxcam_camera is not None:
+            return self.dxcam_camera
         try:
-            frame = None
-            if method == "dxcam" and HAS_DXCAM:
-                if self.dxcam_camera is None:
-                    try:
-                        self.dxcam_camera = dxcam.create()
-                    except Exception:
-                        self.dxcam_camera = None
-                        return None
-                frame = self._grab_screen_dxcam()
-            elif method == "bettercam" and HAS_BETTERCAM:
-                logging.debug("Attempting BetterCam capture (auto mode)")
-                frame = self._grab_screen_bettercam()
-            if frame is None:
-                count, elapsed = self._record_backend_no_frame(method)
-                if not self._should_fallback_after_no_frame(method, count, elapsed):
-                    return _NO_FRAME
-                self._log_no_frame_fallback(method, count, elapsed)
-            else:
-                self._reset_backend_no_frame(method)
-            return frame
-        except Exception as exc:
-            _log_fallback("screen_capture.auto_backend", "next_backend", f"{method}_exception", exc)
-            self._record_backend_failure(method)
-            logging.debug("Auto capture method failed: %s", method, exc_info=True)
-        return None
+            self.dxcam_camera = dxcam.create()
+        except Exception:
+            self.dxcam_camera = None
+        return self.dxcam_camera
 
     def _dxcam_target_fps(self):
         try:
@@ -436,9 +380,9 @@ class ScreenCapturer(threading.Thread):
         return tuple(int(value) for value in region)
 
     def _ensure_dxcam_started(self):
-        if self.dxcam_camera is None:
-            self.dxcam_camera = dxcam.create()
-        cam = self.dxcam_camera
+        cam = self._ensure_dxcam_camera()
+        if cam is None:
+            return None
         target_fps = self._dxcam_target_fps()
         region = self._dxcam_desired_region()
         needs_restart = (
@@ -474,6 +418,8 @@ class ScreenCapturer(threading.Thread):
         """DXCam ring-buffer capture method - returns RGB ndarray."""
         try:
             cam = self._ensure_dxcam_started()
+            if cam is None:
+                return None
             frame = cam.get_latest_frame(copy=True)
             self._last_capture_source_region_applied = bool(self._dxcam_source_region_applied)
             return frame
@@ -486,13 +432,6 @@ class ScreenCapturer(threading.Thread):
         try:
             # Ensure BetterCam is created and started safely
             if self.bettercam_camera is None:
-                # Ensure DXCam is released before initializing BetterCam (avoid device/output conflicts)
-                try:
-                    if self.dxcam_camera is not None:
-                        logging.info("BetterCam: releasing DXCam before initialization")
-                        self._release_dxcam()
-                except Exception:
-                    pass
                 # Use the working indices from diagnostics only; do not probe
                 try:
                     logging.info(f"BetterCam: creating (device_idx=0, output_idx=0)")
@@ -595,7 +534,6 @@ class ScreenCapturer(threading.Thread):
             logging.debug("BetterCam release failed", exc_info=True)
 
     def _encode_frame(self, frame):
-        global HAS_IMAGECODECS
         try:
             # Fast path: ndarray -> JPEG (supports RGB or grayscale)
             if isinstance(frame, np.ndarray):
@@ -620,7 +558,7 @@ class ScreenCapturer(threading.Thread):
                     except Exception as exc:
                         _log_fallback("screen_capture.downscale", "undownscaled_frame", "downscale_failed", exc)
                         pass
-                if HAS_IMAGECODECS:
+                if self._imagecodecs_jpeg_available and HAS_IMAGECODECS:
                     try:
                         # Ensure contiguous memory for encoder (avoid implicit copy stalls)
                         if not arr.flags.c_contiguous:
@@ -630,7 +568,7 @@ class ScreenCapturer(threading.Thread):
                     except Exception as exc:
                         _log_fallback("screen_capture.jpeg_encoder", "pillow_jpeg", "imagecodecs_jpeg_failed", exc)
                         logging.warning("imagecodecs jpeg_encode failed  falling back", exc_info=True)
-                        HAS_IMAGECODECS = False
+                        self._imagecodecs_jpeg_available = False
                 if HAS_PIL:
                     buffer = io.BytesIO()
                     img = Image.fromarray(arr)
@@ -660,11 +598,12 @@ class ScreenCapturer(threading.Thread):
 
     def set_capture_method(self, method):
         """Set the screen capture method"""
+        method = self._normalize_capture_method(method)
         available_methods = self.get_available_methods()
         if method in available_methods:
             with self.capture_control_lock:
                 old_method = self.capture_method
-                if method in ("auto", "dxcam") and self.bettercam_camera is not None:
+                if method == "dxcam" and self.bettercam_camera is not None:
                     self._release_bettercam()
                 if method == "bettercam" and self.dxcam_camera is not None:
                     self._release_dxcam()
@@ -684,22 +623,11 @@ class ScreenCapturer(threading.Thread):
 
     def get_available_methods(self):
         """Get list of available capture methods"""
-        methods = ["auto"]
+        methods = self._installed_capture_methods()
         
         logging.debug("Checking available capture methods")
         logging.debug("HAS_DXCAM=%s dxcam_camera=%s", HAS_DXCAM, self.dxcam_camera is not None)
         logging.debug("HAS_BETTERCAM=%s bettercam_camera=%s", HAS_BETTERCAM, self.bettercam_camera is not None)
-        
-        if HAS_DXCAM:
-            methods.append("dxcam")
-            logging.debug("Added dxcam capture method")
-        if HAS_BETTERCAM:
-            methods.append("bettercam")
-            logging.debug("Added bettercam capture method")
-            
-        # de-dup and keep a stable order preference
-        pref = ["auto", "dxcam", "bettercam"]
-        methods = [m for m in pref if m in dict.fromkeys(methods)]
         logging.debug("Available capture methods: %s", methods)
         return methods
 
@@ -715,11 +643,7 @@ class ScreenCapturer(threading.Thread):
             capture_method = self.capture_method
             backend_perf = {k: dict(v) for k, v in self.backend_perf.items()}
             disabled_until = dict(self._backend_disabled_until)
-        is_working = (
-            active_method != "unknown"
-            and stats['current_fps'] > 0
-            and (capture_method == "auto" or active_method == capture_method)
-        )
+        is_working = active_method != "unknown" and stats['current_fps'] > 0
         return {
             'current_fps': stats['current_fps'],
             'active_method': active_method,
@@ -763,15 +687,12 @@ class ScreenCapturer(threading.Thread):
             verification['status'] = 'not_working'
         elif stats['current_fps'] == 0:
             verification['status'] = 'no_frames'
-        elif stats['set_method'] == "auto":
-            verification['status'] = 'auto_selected'
-            verification['is_working'] = True
         elif stats['active_method'] == stats['set_method']:
             verification['status'] = 'working_correctly'
             verification['is_working'] = True
         else:
-            verification['status'] = 'not_working'
-            verification['is_working'] = False
+            verification['status'] = 'fallback_working'
+            verification['is_working'] = True
             
         return verification
     def set_performance_mode(self, enabled: bool, region: str, scale_div: int):
@@ -815,32 +736,39 @@ class ScreenCapturer(threading.Thread):
             pass
         return None
 
+    def get_active_region_norm(self):
+        """Return the visible capture region in normalized full-screen coordinates."""
+        if not getattr(self, 'perf_enabled', False):
+            return None
+        region = str(getattr(self, 'perf_region', 'full') or 'full')
+        if region == 'center_0.75':
+            return {'x0': 0.125, 'y0': 0.125, 'x1': 0.875, 'y1': 0.875}
+        if region == 'center_0.5':
+            return {'x0': 0.25, 'y0': 0.25, 'x1': 0.75, 'y1': 0.75}
+        if region == 'custom' and getattr(self, '_custom_rect_norm', None):
+            try:
+                x0 = max(0.0, min(1.0, float(self._custom_rect_norm.get('x0', 0.0))))
+                y0 = max(0.0, min(1.0, float(self._custom_rect_norm.get('y0', 0.0))))
+                x1 = max(0.0, min(1.0, float(self._custom_rect_norm.get('x1', 1.0))))
+                y1 = max(0.0, min(1.0, float(self._custom_rect_norm.get('y1', 1.0))))
+                left, right = min(x0, x1), max(x0, x1)
+                top, bottom = min(y0, y1), max(y0, y1)
+                if right > left and bottom > top:
+                    return {'x0': left, 'y0': top, 'x1': right, 'y1': bottom}
+            except Exception:
+                return None
+        return None
+
     def _apply_perf_region(self, frame: np.ndarray) -> np.ndarray:
         if not (self.perf_enabled and isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] in (3,4)):
             return frame
         try:
             h, w = frame.shape[:2]
-            if self.perf_region == 'center_0.75':
-                rh, rw = int(h*0.75), int(w*0.75)
-            elif self.perf_region == 'center_0.5':
-                rh, rw = int(h*0.5), int(w*0.5)
-            elif self.perf_region == 'custom' and getattr(self, '_custom_rect_norm', None):
-                x0 = max(0.0, min(1.0, float(self._custom_rect_norm.get('x0', 0))))
-                y0 = max(0.0, min(1.0, float(self._custom_rect_norm.get('y0', 0))))
-                x1 = max(0.0, min(1.0, float(self._custom_rect_norm.get('x1', 1))))
-                y1 = max(0.0, min(1.0, float(self._custom_rect_norm.get('y1', 1))))
-                ix0, iy0 = int(x0 * w), int(y0 * h)
-                ix1, iy1 = int(x1 * w), int(y1 * h)
-                ix0, iy0 = max(0, ix0), max(0, iy0)
-                ix1, iy1 = min(w, ix1), min(h, iy1)
-                if ix1 > ix0 and iy1 > iy0:
-                    return frame[iy0:iy1, ix0:ix1, :]
+            region = self._roi_norm_to_pixels(w, h)
+            if not region:
                 return frame
-            else:
-                return frame
-            y0 = max(0, (h - rh)//2)
-            x0 = max(0, (w - rw)//2)
-            return frame[y0:y0+rh, x0:x0+rw, :]
+            l, t, r, b = region
+            return frame[t:b, l:r, :]
         except Exception:
             return frame
 
@@ -862,3 +790,4 @@ class ScreenCapturer(threading.Thread):
     def stop(self):
         self.is_running = False
         self._release_dxcam()
+        self._release_bettercam()

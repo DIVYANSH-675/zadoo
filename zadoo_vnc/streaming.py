@@ -50,7 +50,6 @@ def _detect_gpu_names() -> list[str]:
     if platform.system().lower() != "windows":
         return []
     if not _env_enabled("ZADOO_DETECT_GPU_NAMES", "0"):
-        _log_fallback("streaming.gpu_detection", "software_jpeg", "gpu_name_detection_disabled")
         return []
     command = (
         "Get-CimInstance Win32_VideoController | "
@@ -107,18 +106,11 @@ class AdaptiveStreamController:
         self.encoder_capabilities = dict(encoder_capabilities or detect_encoder_capabilities())
         requested = str(os.getenv("ZADOO_STREAM_MODE", "adaptive_jpeg_ws")).strip().lower()
         self.requested_transport = requested or "adaptive_jpeg_ws"
-        self.webrtc_configured = bool(
-            os.getenv("ZADOO_WEBRTC_TURN_URL")
-            or os.getenv("ZADOO_WEBRTC_SFU_URL")
-            or os.getenv("ZADOO_WEBRTC_SIGNALING_URL")
-        )
+        self.webrtc_configured = False
         self.transport_mode = "jpeg_ws"
         self.fallback_reason = ""
-        if self.requested_transport.startswith("webrtc") and not self.webrtc_configured:
-            self.fallback_reason = "WebRTC transport requested but no TURN, SFU, or signaling URL is configured."
-            _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
-        elif self.requested_transport.startswith("webrtc"):
-            self.fallback_reason = "WebRTC media mode is staged; adaptive JPEG WebSocket remains active until the media bridge is enabled."
+        if self.requested_transport.startswith("webrtc"):
+            self.fallback_reason = "WebRTC transport is not enabled in this build; using adaptive JPEG WebSocket."
             _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
 
         start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p120")).strip().lower()
@@ -265,7 +257,7 @@ class AdaptiveStreamController:
         capture_ms = self.last_server_stats["capture_ms"]
         encode_ms = self.last_server_stats["encode_ms"]
         capture_fps = self.last_server_stats["capture_fps"]
-        quality = int(capture_stats.get("quality") or 65)
+        quality = int(self.last_server_stats.get("quality") or 0)
         full_resolution_locked = quality >= 85
 
         network_backlog = max_write_buffer > 128_000 or skipped_delta > max(2, video_clients * 3)

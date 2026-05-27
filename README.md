@@ -37,6 +37,7 @@ Copy `.env.example` to `.env` and fill only the values you need.
 - `ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT` and `ZADOO_SKIP_CLOUDFLARED_SIGNATURE_CHECK` control cloudflared download and signature verification behavior.
 - `ZADOO_CLIPBOARD_TEXT_MAX_BYTES` and `ZADOO_CLIPBOARD_IMAGE_MAX_BYTES` cap remote clipboard payload sizes.
 - `ZADOO_DETECT_GPU_NAMES=1` enables optional PowerShell GPU-name detection; it is off by default to keep startup responsive.
+- `ZADOO_CAPTURE_METHOD=bettercam` or `dxcam` selects the screen capture backend. BetterCam is the default when installed.
 - `ZADOO_ADAPTIVE_STREAM=1` keeps screen sharing on the adaptive JPEG WebSocket path.
 - `ZADOO_STREAM_START_PROFILE=720p120` is the stable default. Use `720p240` or `1080p240` to opt in to higher-FPS startup profiles when the host, browser, and network can keep up.
 - `ZADOO_STREAM_MODE=adaptive_jpeg_ws` is the active video transport. WebRTC/H.264 is not enabled by this build.
@@ -44,7 +45,7 @@ Copy `.env.example` to `.env` and fill only the values you need.
 
 ## Screen Sharing Performance
 
-Live screen sharing uses DXCam first and BetterCam as the fallback. DXCam `0.3.0` is driven through its ring-buffer API, `start(region, target_fps, video_mode)` plus `get_latest_frame()`, because that is the high-throughput path. This installed DXCam API does not expose the researched `processor_backend="cv2"` argument.
+Live screen sharing uses one explicit capture backend at a time. The UI lets the user switch directly between BetterCam and DXCam, and BetterCam is chosen by default when available to avoid DXGI device conflicts between the two libraries. Set `ZADOO_CAPTURE_METHOD=dxcam` on hosts where DXCam is known to be stable. DXCam `0.3.0` is driven through its ring-buffer API, `start(region, target_fps, video_mode)` plus `get_latest_frame()`, because that is the high-throughput path. This installed DXCam API does not expose the researched `processor_backend="cv2"` argument.
 
 Install `imagecodecs` with the requirements file so JPEG encoding uses the fast path. The default `720p120` profile applies quality and scaling automatically until the user manually changes the quality slider. For maximum FPS, set `ZADOO_STREAM_START_PROFILE=720p240`; use `1080p240` only on fast local networks and capable hardware.
 

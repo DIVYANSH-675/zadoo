@@ -9,7 +9,6 @@ from typing import Set
 
 import websockets
 
-from .network import get_local_ip
 from .tunnel import CloudflareTunnelManager
 
 from .input_control import InputControlMixin
@@ -26,15 +25,14 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.tunnel_manager = None
         self.enable_tunnel = True
         self.screen_capturer = None
-        self.current_quality = 65
-        self._quality_locked_by_user = False
+        self.current_quality = 85
+        self._quality_locked_by_user = True
         self.current_fps = 0
         self.encoder_capabilities = detect_encoder_capabilities()
         self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
         if self.adaptive_stream.enabled:
             startup_profile = self.adaptive_stream.profile
             self.current_fps = startup_profile.target_fps
-            self.current_quality = startup_profile.quality
         self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.mic_clients: Set[websockets.WebSocketServerProtocol] = set()
@@ -44,7 +42,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.audio_thread = None
         self.audio_queue = queue.Queue(maxsize=10)
         self.audio_running = False
-        self.stop_event = asyncio.Event()
+        self.stop_event = None
         self.loop = None
         self.frame_ready_event = None
         self.selected_camera = None
@@ -62,6 +60,8 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.mic_samplerate = 48000
         self.mic_blocksize = 960
         self.mic_channels = 1
+        self.mic_device_id = "default"
+        self.mic_device_name = "System Default"
         # Typematic repeat state for non-modifier keys
         self._repeat_keys = {}
         # Alert presets for host controls
@@ -98,17 +98,10 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             self.loop = asyncio.get_running_loop()
         except Exception:
             self.loop = None
+        self.stop_event = asyncio.Event()
         self.frame_ready_event = asyncio.Event()
         if self.screen_capturer and hasattr(self.screen_capturer, "set_frame_event"):
             self.screen_capturer.set_frame_event(self.loop, self.frame_ready_event)
-        print("=" * 60)
-        print(" VNC SERVER STARTING...")
-        print(f" Primary: http://localhost:{self.port}")
-        if self.secondary_port:
-            print(f"Secondary: http://localhost:{self.secondary_port}")
-        print(f"Network: http://{get_local_ip()}:{self.port}")
-        print(" Internet: Check above for public URL")
-        print("=" * 60)
         self._announce_auth_codes()
 
         # Bind before starting tunnels or background stream tasks, so failed
@@ -183,7 +176,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         try:
             await self.stop_event.wait()
         finally:
-            self.stop_event.set()
             try:
                 self._host_hotkey_poller_active = False
                 self.stop_global_keyboard_hook()
@@ -239,9 +231,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         elif route_path == "/audio":
             await self.audio_stream_handler(websocket)
         elif route_path == "/mic":
-            await self.mic_stream_handler(websocket)
+            await self.mic_stream_handler(websocket, path=path)
         elif route_path == "/ssh":
-            await self.ssh_ws_handler(websocket)
+            await self.local_shell_ws_handler(websocket)
         elif route_path == "/webcam":
             await self.webcam_stream_handler(websocket)
         else:
@@ -249,9 +241,10 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             await self.video_stream_handler(websocket)
 
     def stop(self):
-        if self.loop:
+        if self.loop and self.stop_event is not None:
             def _stop():
-                self.stop_event.set()
+                if self.stop_event is not None:
+                    self.stop_event.set()
                 for server in list(getattr(self, "_servers", []) or []):
                     try:
                         server.close()

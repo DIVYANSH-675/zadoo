@@ -100,6 +100,24 @@ def assert_camera_payload(body: bytes, *, require_objects: bool = False) -> None
                 fail(f"camera device {index} missing non-empty {key!r}")
 
 
+def assert_mic_payload(body: bytes) -> None:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        fail(f"mic payload is not valid JSON: {exc}")
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        fail("mic payload missing success=true")
+    devices = payload.get("devices")
+    if not isinstance(devices, list):
+        fail("mic payload devices is not a list")
+    for index, device in enumerate(devices):
+        if not isinstance(device, dict):
+            fail(f"mic device {index} is not an object")
+        for key in ("id", "name", "label"):
+            if not isinstance(device.get(key), str) or not device.get(key).strip():
+                fail(f"mic device {index} missing non-empty {key!r}")
+
+
 def source_files():
     seen = set()
     for glob in SOURCE_GLOBS:
@@ -173,18 +191,36 @@ def assert_imports() -> None:
             fail("VNCServer did not instantiate with expected ports")
         if not getattr(server, "adaptive_stream", None) or server.adaptive_stream.profile.name != "720p120":
             fail("adaptive stream did not select the default 720p120 startup profile")
-        if server.current_fps != 120 or server.current_quality != 54:
-            fail(f"startup profile did not apply fps/quality: fps={server.current_fps} quality={server.current_quality}")
-        if server._quality_locked_by_user:
-            fail("startup quality should be adaptive until the user changes quality")
+        if server.current_fps != 120 or server.current_quality != 85:
+            fail(f"startup profile did not apply fps/locked quality: fps={server.current_fps} quality={server.current_quality}")
+        if not server._quality_locked_by_user:
+            fail("startup quality should be locked at 85 until the user changes quality")
         methods = screen_capture.ScreenCapturer().get_available_methods()
-        expected_methods = ["auto"]
-        if screen_capture.HAS_DXCAM:
-            expected_methods.append("dxcam")
+        expected_methods = []
         if screen_capture.HAS_BETTERCAM:
             expected_methods.append("bettercam")
+        if screen_capture.HAS_DXCAM:
+            expected_methods.append("dxcam")
         if methods != expected_methods:
             fail(f"available capture methods changed: {methods}, expected {expected_methods}")
+
+        region_capturer = screen_capture.ScreenCapturer()
+        region_capturer.set_performance_mode(True, "center_0.5", 1)
+        if region_capturer.get_active_region_norm() != {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75}:
+            fail(f"center performance region changed: {region_capturer.get_active_region_norm()}")
+        region_capturer.set_performance_mode(True, "custom", 1)
+        region_capturer.set_custom_region({"x0": 0.2, "y0": 0.1, "x1": 0.6, "y1": 0.5})
+        server.screen_capturer = region_capturer
+        mapped = server._map_view_norm_to_screen_norm(0.5, 0.5)
+        if tuple(round(v, 4) for v in mapped) != (0.4, 0.3):
+            fail(f"custom ROI mouse mapping failed: {mapped}")
+        mapped_corner = server._map_view_norm_to_screen_norm(1.0, 0.0)
+        if tuple(round(v, 4) for v in mapped_corner) != (0.6, 0.1):
+            fail(f"custom ROI corner mapping failed: {mapped_corner}")
+        region_capturer.set_performance_mode(False, "full", 1)
+        if server._map_view_norm_to_screen_norm(0.5, 0.5) != (0.5, 0.5):
+            fail("disabled performance mode should not remap mouse coordinates")
+        server.screen_capturer = None
 
         class FakeDXCam:
             width = 640
@@ -312,15 +348,14 @@ def assert_imports() -> None:
             checks = {
                 "/api/public-url": 200,
                 "/api/list-cameras": 200,
+                "/api/list-mics": 200,
                 "/api/set-quality?value=80": 200,
                 "/api/set-fps?value=20": 200,
-                "/api/set-clipboard-image": 400,
             }
             for path, expected_status in checks.items():
                 request_headers = csrf_headers if path in {
                     "/api/set-quality?value=80",
                     "/api/set-fps?value=20",
-                    "/api/set-clipboard-image",
                 } else headers
                 response = await server.process_request(path, request_headers)
                 if response is None:
@@ -329,12 +364,20 @@ def assert_imports() -> None:
                     fail(f"route {path} returned {response.status_code}, expected {expected_status}")
                 if path == "/api/list-cameras":
                     assert_camera_payload(response.body, require_objects=True)
+                elif path == "/api/list-mics":
+                    assert_mic_payload(response.body)
                 else:
                     payload = json.loads(response.body.decode("utf-8"))
                     if path.startswith("/api/set-quality") and payload.get("quality") != 80:
                         fail(f"set-quality returned {payload.get('quality')}, expected 80")
                     if path.startswith("/api/set-fps") and payload.get("fps") != 20:
                         fail(f"set-fps returned {payload.get('fps')}, expected 20")
+            removed_clipboard_response = await server.process_request("/api/set-clipboard-image", csrf_headers)
+            if removed_clipboard_response.status_code != 404:
+                fail(
+                    "removed /api/set-clipboard-image returned "
+                    f"{removed_clipboard_response.status_code}, expected 404"
+                )
             if server.current_quality != 80:
                 fail(f"server current_quality is {server.current_quality}, expected 80")
             if server.current_fps != 20:
@@ -587,6 +630,11 @@ def assert_live(base_url: str) -> None:
     if status != 200:
         fail(f"live list-cameras failed: status={status}")
     assert_camera_payload(body, require_objects=True)
+
+    status, content_type, body = fetch(base_url, "/api/list-mics", auth_headers)
+    if status != 200:
+        fail(f"live list-mics failed: status={status}")
+    assert_mic_payload(body)
 
     status, content_type, body = fetch(base_url, "/api/public-url", auth_headers)
     if status != 200:
