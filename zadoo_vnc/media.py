@@ -70,6 +70,23 @@ class MediaMixin:
             if not self._put_realtime_frame(frame_queue, None):
                 break
 
+    def _close_audio_stream(self):
+        stream = getattr(self, "_audio_stream", None)
+        if not stream:
+            return
+        try:
+            if hasattr(stream, "__exit__"):
+                stream.__exit__(None, None, None)
+            else:
+                if hasattr(stream, "stop"):
+                    stream.stop()
+                if hasattr(stream, "close"):
+                    stream.close()
+        except Exception:
+            pass
+        finally:
+            self._audio_stream = None
+
     def _clarify_mono_audio(
         self,
         samples,
@@ -260,11 +277,7 @@ class MediaMixin:
                             time.sleep(0.2)
                             continue
                         if loop != current_loop:
-                            try:
-                                if self._audio_stream is not None:
-                                    self._audio_stream.__exit__(None, None, None)
-                            except Exception:
-                                pass
+                            self._close_audio_stream()
                             try:
                                 self._audio_stream = loop.recorder(samplerate=want_samplerate, channels=2)
                                 self._audio_stream.__enter__()
@@ -324,22 +337,12 @@ class MediaMixin:
                             except Exception as e:
                                 log.debug(f"sender err: {e}")
                     except Exception as e:
-                        try:
-                            if self._audio_stream is not None:
-                                self._audio_stream.__exit__(None, None, None)
-                        except Exception:
-                            pass
-                        self._audio_stream = None
+                        self._close_audio_stream()
                         current_loop = None
                         time.sleep(0.05)
                         continue
             finally:
-                try:
-                    if self._audio_stream is not None:
-                        self._audio_stream.__exit__(None, None, None)
-                except Exception:
-                    pass
-                self._audio_stream = None
+                self._close_audio_stream()
                 self._audio_running = False
                 self.audio_running = False
                 if getattr(self, "_audio_stop_evt", None) is stop_evt:
@@ -359,18 +362,7 @@ class MediaMixin:
                 stop_evt.set()
         except Exception:
             pass
-        try:
-            stream = getattr(self, '_audio_stream', None)
-            if stream:
-                if hasattr(stream, '__exit__'):
-                    stream.__exit__(None, None, None)
-                else:
-                    if hasattr(stream, 'stop'):
-                        stream.stop()
-                    if hasattr(stream, 'close'):
-                        stream.close()
-        except Exception:
-            pass
+        self._close_audio_stream()
         try:
             if getattr(self, '_audio_thread', None) and self._audio_thread.is_alive():
                 self._audio_thread.join(timeout=0.5)
@@ -750,14 +742,6 @@ class MediaMixin:
     async def webcam_stream_handler(self, websocket):
         """Stream JPEG frames from the server's webcam (DirectShow on Windows) to the client."""
         print(f" Webcam client connected from {websocket.remote_address}")
-        # Prefer PyAV (FFmpeg) on Windows via DirectShow
-        if not HAS_AV:
-            print(" PyAV not available; webcam streaming disabled")
-            try:
-                await websocket.send(b"")
-            except Exception:
-                pass
-            return
 
         container = None
         cv2_capture = None
@@ -788,6 +772,8 @@ class MediaMixin:
             loop = asyncio.get_running_loop()
 
             async def open_dshow_device(device, opts=None):
+                if not HAS_AV or av is None:
+                    raise RuntimeError("PyAV unavailable")
                 def _open():
                     if opts is None:
                         return av.open(device, format='dshow')
@@ -863,45 +849,48 @@ class MediaMixin:
                         'Logitech',
                         'OBS Virtual Camera'
                     ])
-                # Try PyAV DirectShow device strings
-                for name in candidates:
-                    for opts in option_sets:
-                        try:
-                            device = f"video={name}"
-                            if opts is None:
-                                print(f" Trying dshow open: {device} opts=None")
-                            else:
-                                print(f" Trying dshow open: {device} opts={opts}")
-                            container = await open_dshow_device(device, opts)
-                            open_ok = True
-                            print(f" Opened webcam via dshow device: {device} opts={opts}")
-                            break
-                        except Exception as e:
-                            print(f"  Open failed: {device} opts={opts} err={e}")
-                            container = None
-                            continue
-                    if open_ok:
-                        break
-                # Fallback attempts with generic device strings
-                if not open_ok and not selected_cv2_only:
-                    _log_fallback("webcam.open", "generic_dshow_devices", "named_dshow_candidates_failed")
-                    for generic in ("video=0", "0", "video=1", "1"):
+                if HAS_AV and av is not None:
+                    # Try PyAV DirectShow device strings
+                    for name in candidates:
                         for opts in option_sets:
                             try:
+                                device = f"video={name}"
                                 if opts is None:
-                                    print(f" Trying dshow open: {generic} opts=None")
+                                    print(f" Trying dshow open: {device} opts=None")
                                 else:
-                                    print(f" Trying dshow open: {generic} opts={opts}")
-                                container = await open_dshow_device(generic, opts)
+                                    print(f" Trying dshow open: {device} opts={opts}")
+                                container = await open_dshow_device(device, opts)
                                 open_ok = True
-                                print(f" Opened webcam via dshow generic: {generic} opts={opts}")
+                                print(f" Opened webcam via dshow device: {device} opts={opts}")
                                 break
                             except Exception as e:
-                                print(f"  Open failed: {generic} opts={opts} err={e}")
+                                print(f"  Open failed: {device} opts={opts} err={e}")
                                 container = None
                                 continue
                         if open_ok:
                             break
+                    # Fallback attempts with generic device strings
+                    if not open_ok and not selected_cv2_only:
+                        _log_fallback("webcam.open", "generic_dshow_devices", "named_dshow_candidates_failed")
+                        for generic in ("video=0", "0", "video=1", "1"):
+                            for opts in option_sets:
+                                try:
+                                    if opts is None:
+                                        print(f" Trying dshow open: {generic} opts=None")
+                                    else:
+                                        print(f" Trying dshow open: {generic} opts={opts}")
+                                    container = await open_dshow_device(generic, opts)
+                                    open_ok = True
+                                    print(f" Opened webcam via dshow generic: {generic} opts={opts}")
+                                    break
+                                except Exception as e:
+                                    print(f"  Open failed: {generic} opts={opts} err={e}")
+                                    container = None
+                                    continue
+                            if open_ok:
+                                break
+                else:
+                    print(" PyAV not available; trying OpenCV camera open")
             if container is None and is_windows:
                 try:
                     import cv2
@@ -910,6 +899,8 @@ class MediaMixin:
                     print(f"  OpenCV not available for webcam fallback: {e}")
                 if cv2 is not None:
                     _log_fallback("webcam.open", "opencv_dshow", "pyav_dshow_failed")
+                    if not cv2_indices:
+                        cv2_indices.extend([0, 1, 2])
                     for index in cv2_indices:
                         try:
                             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
