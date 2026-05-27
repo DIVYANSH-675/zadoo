@@ -2078,34 +2078,13 @@
             border-color: var(--deck-blue);
             box-shadow: 0 0 0 1px rgba(11,161,217,0.18);
         }
-        .bug-attach-row {
+        .bug-submit-row {
             display: grid;
-            grid-template-columns: 1fr auto;
+            grid-template-columns: auto;
             gap: 7px;
-            align-items: stretch;
+            justify-items: end;
         }
-        .bug-file-label {
-            min-width: 0;
-            height: 36px;
-            border: 1px solid var(--deck-border);
-            border-radius: 8px;
-            background: linear-gradient(180deg, rgba(16,27,31,0.92), rgba(8,14,16,0.96));
-            color: var(--deck-text);
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            padding: 0 9px;
-            cursor: pointer;
-            font-size: 10px;
-            font-weight: 800;
-        }
-        .bug-file-name {
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .bug-file-input {
+        .bug-hidden-input {
             position: absolute;
             opacity: 0;
             width: 1px;
@@ -2450,9 +2429,6 @@
             <path d="M20 19l-3.35 -2" />
             <path d="M4 7l3.75 2.4" />
             <path d="M20 7l-3.75 2.4" />
-        </symbol>
-        <symbol id="ti-paperclip" viewBox="0 0 24 24">
-            <path d="M15 7l-6.5 6.5a1.5 1.5 0 0 0 3 3l6.5 -6.5a3 3 0 0 0 -6 -6l-6.5 6.5a4.5 4.5 0 0 0 9 9l6.5 -6.5" />
         </symbol>
         <symbol id="ti-send-2" viewBox="0 0 24 24">
             <path d="M4.698 4.034l16.302 7.966l-16.302 7.966a.503 .503 0 0 1 -.546 -.124a.555 .555 0 0 1 -.12 -.568l2.468 -7.274l-2.468 -7.274a.555 .555 0 0 1 .12 -.568a.503 .503 0 0 1 .546 -.124" />
@@ -2815,11 +2791,11 @@
                     </div>
                     <div class="sidebar-section deck-card bug-report-section" id="bug-report-section" hidden>
                         <div class="section-title">File Bug</div>
-                        <form class="bug-form" id="bug-report-form" enctype="multipart/form-data">
+                        <form class="bug-form" id="bug-report-form">
                             <input type="hidden" name="access_key" value="aaf7c6a3-bc6f-4b76-a0aa-58a72b822a80">
                             <input type="hidden" name="subject" value="Zadoo VNC Bug Report">
                             <input type="hidden" name="from_name" value="Zadoo VNC">
-                            <input type="checkbox" name="botcheck" class="bug-file-input" tabindex="-1" autocomplete="off">
+                            <input type="checkbox" name="botcheck" class="bug-hidden-input" tabindex="-1" autocomplete="off">
                             <div class="bug-field">
                                 <label for="bug-title">Title</label>
                                 <input class="bug-input" id="bug-title" name="title" type="text" maxlength="120" required placeholder="What broke?">
@@ -2832,12 +2808,7 @@
                                 <label for="bug-email">Contact</label>
                                 <input class="bug-input" id="bug-email" name="email" type="email" placeholder="optional@email.com">
                             </div>
-                            <div class="bug-attach-row">
-                                <label class="bug-file-label" for="bug-attachment">
-                                    <svg class="ti" aria-hidden="true"><use href="#ti-paperclip"></use></svg>
-                                    <span class="bug-file-name" id="bug-file-name">Attach images</span>
-                                </label>
-                                <input class="bug-file-input" id="bug-attachment" name="attachment" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onchange="updateBugAttachmentLabel()">
+                            <div class="bug-submit-row">
                                 <button class="bug-submit" id="bug-submit" type="submit">
                                     <svg class="ti" aria-hidden="true"><use href="#ti-send-2"></use></svg>
                                     Send
@@ -3309,49 +3280,13 @@
         }
     }
 
-    function updateBugAttachmentLabel() {
-        const input = document.getElementById('bug-attachment');
-        const label = document.getElementById('bug-file-name');
-        if (!label) return;
-        const files = input && input.files ? Array.from(input.files) : [];
-        if (!files.length) {
-            label.textContent = 'Attach images';
-            setBugStatus('', '');
-            return;
-        }
-        label.textContent = files.length === 1 ? files[0].name : `${files.length} images selected`;
-        setBugStatus('Images ready. Max 5 MB each.', '');
-    }
-
     async function handleBugReportSubmit(event) {
         event.preventDefault();
         const form = document.getElementById('bug-report-form');
         const submit = document.getElementById('bug-submit');
-        const attachment = document.getElementById('bug-attachment');
         if (!form) return;
 
-        const files = attachment && attachment.files ? Array.from(attachment.files).slice(0, 3) : [];
-        if (attachment && attachment.files && attachment.files.length > 3) {
-            setBugStatus('Attach up to 3 images only.', 'error');
-            return;
-        }
-        for (const file of files) {
-            const isImage = /^image\//i.test(file.type || '');
-            if (!isImage) {
-                setBugStatus('Please attach an image file only.', 'error');
-                return;
-            }
-            if (file.size > 5 * 1024 * 1024) {
-                setBugStatus('Image must be 5 MB or smaller.', 'error');
-                return;
-            }
-        }
-
         const formData = new FormData(form);
-        formData.delete('attachment');
-        files.forEach((file, index) => {
-            formData.append(index === 0 ? 'attachment' : `screenshot_${index + 1}`, file);
-        });
         const activeLane = document.querySelector('.capture-chip.active span');
         formData.append('page_url', window.location.href);
         formData.append('viewport', `${window.innerWidth}x${window.innerHeight}`);
@@ -3374,7 +3309,6 @@
                 throw new Error(payload.message || 'Bug report failed.');
             }
             form.reset();
-            updateBugAttachmentLabel();
             setBugStatus('Bug report sent. Thank you.', 'success');
         } catch (error) {
             setBugStatus((error && error.message) || 'Could not send bug report.', 'error');
