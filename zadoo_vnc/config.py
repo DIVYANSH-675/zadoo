@@ -9,11 +9,26 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent
 RUNTIME_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else PROJECT_DIR
 
-QUALITY = 85
-STOP_FILE = "stop_vnc.flag"
-BRAND_HEADER_IMAGE_PATH = str(RUNTIME_DIR / "brand-header.png")
-TRIGGER_ICON_IMAGE_PATH = str(RUNTIME_DIR / "trigger-icon.png")
-SPLASH_IMAGE_PATH = str(RUNTIME_DIR / "splash.png")
+
+def resource_path(name: str) -> Path:
+    """Resolve bundled resources in source, one-folder, and one-file builds."""
+    if getattr(sys, "frozen", False):
+        try:
+            bundled_root = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+            candidate = bundled_root / name
+            if candidate.exists():
+                return candidate
+        except Exception:
+            pass
+        candidate = RUNTIME_DIR / name
+        if candidate.exists():
+            return candidate
+    return PROJECT_DIR / name
+
+
+BRAND_HEADER_IMAGE_PATH = str(resource_path("brand-header.png"))
+TRIGGER_ICON_IMAGE_PATH = str(resource_path("trigger-icon.png"))
+SPLASH_IMAGE_PATH = str(resource_path("splash.png"))
 
 
 def env_int(name, default, minimum=None, maximum=None):

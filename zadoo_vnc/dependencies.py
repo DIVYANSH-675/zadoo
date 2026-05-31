@@ -17,14 +17,12 @@ except ImportError:
 
 try:
     import numpy as np
-    HAS_NUMPY = True
 except ImportError:
     np = None
-    HAS_NUMPY = False
 
 try:
     imagecodecs = None
-    if HAS_NUMPY:
+    if np is not None:
         import imagecodecs
         HAS_IMAGECODECS = True
     else:
@@ -50,11 +48,10 @@ except ImportError:
     HAS_KEYBOARD = False
 
 try:
-    from PIL import Image, ImageGrab
+    from PIL import Image
     HAS_PIL = True
 except ImportError:
     Image = None
-    ImageGrab = None
     HAS_PIL = False
 
 try:
@@ -161,12 +158,12 @@ except Exception:
 
 try:
     import soundcard as sc
+    HAS_SOUNDCARD = True
 except Exception:
     sc = None
+    HAS_SOUNDCARD = False
 
 try:
     import resend
-    HAS_RESEND = True
 except Exception:
     resend = None
-    HAS_RESEND = False

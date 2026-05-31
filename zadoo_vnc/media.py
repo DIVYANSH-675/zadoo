@@ -17,7 +17,7 @@ from collections import deque
 import websockets
 
 from .camera_discovery import camera_open_candidates, normalize_camera_devices, resolve_camera_selection
-from .dependencies import HAS_AV, HAS_WINPTY, av, np, sc, sd
+from .dependencies import HAS_AV, HAS_SOUNDCARD, HAS_WINPTY, av, np, sc, sd
 from .logging_utils import _log_fallback
 from .win32_input import (
     CURSORINFO,
@@ -182,7 +182,7 @@ class MediaMixin:
             except Exception:
                 self.video_clients.discard(ws)
 
-    def _capture_stats_payload(self):
+    def _capture_stats_payload(self, stream=None):
         if self.screen_capturer:
             stats = self.screen_capturer.get_capture_stats()
         else:
@@ -193,7 +193,8 @@ class MediaMixin:
                 "target_fps_mode": "max" if not self.current_fps else "fixed",
             }
         send_tasks = getattr(self, "_video_send_tasks", {})
-        stream = self._stream_status_payload()
+        if stream is None:
+            stream = self._stream_status_payload()
         encoder = stream.get("encoder_capabilities") or {}
         stats.update({
             "video_clients": len(self.video_clients),
@@ -221,9 +222,11 @@ class MediaMixin:
         """
         if getattr(self, "_audio_running", False):
             return
+        if not HAS_SOUNDCARD or sc is None:
+            logging.getLogger("sysaudio").warning("soundcard is unavailable; system audio capture cannot start")
+            return
         self._clear_media_queue(self.audio_queue)
         self._audio_running = True
-        self.audio_running = True
         self._audio_backend = "soundcard_loopback"
         self._audio_thread = None
         self._audio_stream = None
@@ -344,7 +347,6 @@ class MediaMixin:
             finally:
                 self._close_audio_stream()
                 self._audio_running = False
-                self.audio_running = False
                 if getattr(self, "_audio_stop_evt", None) is stop_evt:
                     self._audio_stop_evt = None
                 log.info(" System-audio worker stopped")
@@ -355,7 +357,6 @@ class MediaMixin:
 
     def _stop_audio_capture(self):
         self._audio_running = False
-        self.audio_running = False
         try:
             stop_evt = getattr(self, "_audio_stop_evt", None)
             if stop_evt is not None:
@@ -1049,20 +1050,42 @@ class MediaMixin:
 
         try:
             # Use a Windows PTY when available for correct interactive behavior (Backspace, arrow keys)
-            if 'HAS_WINPTY' not in globals() or not HAS_WINPTY:
+            if not HAS_WINPTY:
                 await websocket.send(
                     "\x1b[91mTerminal requires pywinpty for full keyboard support. "
                     "Install requirements.txt and restart Zadoo VNC.\x1b[0m\r\n"
                 )
                 return
 
-            from winpty import PtyProcess
+            from winpty import Backend, PtyProcess
             if os.path.exists(ps_path):
-                shell_cmd = f"{os.path.normpath(ps_path)} -NoLogo -NoExit"
+                shell_cmd = [os.path.normpath(ps_path), "-NoLogo", "-NoProfile", "-NoExit"]
             else:
                 _log_fallback("terminal.shell", "cmd.exe", "powershell_not_found")
-                shell_cmd = f"{os.path.normpath(cmd_path)} /K chcp 65001"
-            proc = PtyProcess.spawn(shell_cmd, dimensions=(initial_rows, initial_cols))
+                shell_cmd = [os.path.normpath(cmd_path), "/K", "chcp", "65001"]
+            shell_cwd = os.path.expanduser("~") or os.getcwd()
+            backend_candidates = [None]
+            if getattr(sys, "frozen", False):
+                # Use ConPTY first for modern keyboard semantics; PTY writes are
+                # offloaded below so a slow backend cannot starve the reader task.
+                backend_candidates = [Backend.ConPTY, Backend.WinPTY]
+            last_spawn_error = None
+            for backend in backend_candidates:
+                attempts = 3 if getattr(sys, "frozen", False) and backend == Backend.ConPTY else 1
+                for attempt in range(attempts):
+                    try:
+                        proc = PtyProcess.spawn(shell_cmd, cwd=shell_cwd, dimensions=(initial_rows, initial_cols), backend=backend)
+                        logging.debug("Terminal PTY started with backend=%s", backend)
+                        break
+                    except BaseException as exc:
+                        last_spawn_error = exc
+                        _log_fallback("terminal.pty_backend", str(backend), "spawn_failed", exc)
+                        if attempt + 1 < attempts:
+                            await asyncio.sleep(0.45 * (attempt + 1))
+                if proc is not None:
+                    break
+            if proc is None:
+                raise last_spawn_error or RuntimeError("PTY spawn failed")
             proc_writer = proc
             proc_reader = proc
         except Exception as e:
@@ -1076,7 +1099,9 @@ class MediaMixin:
 
         async def ws_to_proc():
             nonlocal stop_flag
-            def handle_client_message(msg):
+            loop = asyncio.get_running_loop()
+
+            async def handle_client_message(msg):
                 data = _message_to_text(msg)
                 resize = _resize_from_message(msg)
                 if resize:
@@ -1087,14 +1112,14 @@ class MediaMixin:
                         pass
                     return
 
-                proc_writer.write(data)
+                await loop.run_in_executor(None, proc_writer.write, data)
 
             try:
                 for msg in pending_client_messages:
-                    handle_client_message(msg)
+                    await handle_client_message(msg)
                 async for msg in websocket:
                     try:
-                        handle_client_message(msg)
+                        await handle_client_message(msg)
                     except Exception:
                         break
             except websockets.exceptions.ConnectionClosed:
@@ -1108,8 +1133,9 @@ class MediaMixin:
             poll_alive = proc.isalive
             while not stop_flag and poll_alive():
                 try:
-                    # Read in small chunks for responsiveness
-                    chunk = await loop.run_in_executor(None, proc_reader.read, 256)
+                    # pywinpty can wait for a large read buffer to fill, which makes
+                    # short command output appear only after the next keystroke.
+                    chunk = await loop.run_in_executor(None, proc_reader.read, 1)
                     if not chunk:
                         await asyncio.sleep(0.02)
                         continue

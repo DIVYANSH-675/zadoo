@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 
+from .dependencies import pyautogui
 from .logging_utils import _log_fallback
 
 _DPI_AWARENESS_ATTEMPTED = False
@@ -31,5 +32,6 @@ def get_primary_screen_size():
         except Exception as exc:
             _log_fallback("dpi.primary_screen_size", "pyautogui.size", "win32_metrics_failed", exc)
             pass
-    import pyautogui as _pg
-    return _pg.size()
+    if pyautogui is None:
+        raise RuntimeError("pyautogui is unavailable")
+    return pyautogui.size()

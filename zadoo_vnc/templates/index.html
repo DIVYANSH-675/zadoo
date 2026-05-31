@@ -294,7 +294,6 @@
             accent-color: #00d4ff;
         }
 
-        /* Neon controls removed - reverted to original simple controls */
         .np-icon { width:18px; height:18px; display:inline-block; color:#cfe8ee; }
         .notepad-resizer { position:absolute; left:-6px; top:0; width:6px; height:100%; cursor: ew-resize; }
         .CodeMirror { height: 100% !important; background: #0b0f17; color: #e5e7eb; }
@@ -486,6 +485,11 @@
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
+        }
+        .feature-locked {
+            opacity: 0.45 !important;
+            cursor: not-allowed !important;
+            filter: grayscale(0.45);
         }
         .sidebar-btn.icon-only {
             justify-content: center;
@@ -2032,9 +2036,67 @@
         .public-link-section .url-actions {
             border-left-color: rgba(109,171,174,0.2);
         }
+        .public-access-row {
+            display: grid;
+            grid-template-columns: 54px 1fr;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+        .public-access-row .info-label {
+            font-size: 9px;
+        }
+        .public-access-row .futuristic-select {
+            height: 28px;
+            padding: 4px 8px;
+        }
         .url-text {
             color: #c8f8dd;
             font-size: 9px;
+        }
+        .controller-alert-stack {
+            position: fixed;
+            top: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10020;
+            display: grid;
+            gap: 8px;
+            width: min(420px, calc(100vw - 28px));
+            pointer-events: none;
+        }
+        .controller-alert {
+            border: 1px solid rgba(244,165,31,0.78);
+            border-radius: 8px;
+            background: rgba(13, 18, 21, 0.96);
+            box-shadow: 0 14px 38px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.05);
+            padding: 12px 14px;
+            color: #f9fbf4;
+            opacity: 0;
+            transform: translateY(-8px);
+            transition: opacity .18s ease, transform .18s ease;
+        }
+        .controller-alert.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .controller-alert.hide {
+            opacity: 0;
+            transform: translateY(-8px);
+        }
+        .controller-alert-title {
+            color: #ffd177;
+            font-size: 13px;
+            font-weight: 900;
+            line-height: 1.25;
+            margin-bottom: 4px;
+        }
+        .controller-alert-message {
+            color: #eef8f7;
+            font-size: 12px;
+            line-height: 1.35;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
         .bug-report-section {
             padding: 8px;
@@ -2269,8 +2331,9 @@
         .splash-container { position: relative; max-width: 1000px; width: 90%; }
         .splash-container img { width: 100%; height: auto; display: block; }
         #auth-form { position: absolute; top: 76%; left: 23%; width: 54%; height: 17%; }
-        #auth-code { width: 100%; height: 100%; box-sizing: border-box; border: none; background-color: transparent; text-align: center; font-size: 2.5vw; font-family: 'Courier New', Courier, monospace; font-weight: bold; color: #4a2c0f; outline: none; text-transform: uppercase; }
+        #auth-code { width: 100%; height: 100%; box-sizing: border-box; border: none; background-color: transparent; text-align: center; font-size: 2.5vw; font-family: 'Courier New', Courier, monospace; font-weight: bold; color: #4a2c0f; outline: none; }
         @media (min-width: 1000px) { #auth-code { font-size: 40px; } }
+        @media (max-width: 480px) { #auth-form { top: 76%; left: 20%; width: 60%; height: 18%; } #auth-code { font-size: 16px; } }
         .hidden { display: none; }
         .fade-out { opacity: 0; }
         .shake { animation: shake 0.5s; }
@@ -2444,6 +2507,7 @@
             </form>
         </div>
     </div>
+    <div id="controller-alert-stack" class="controller-alert-stack" aria-live="assertive" aria-atomic="false"></div>
     
     <!-- Keyboard Configure Popup Overlay -->
     <div id="kb-overlay" class="kb-overlay" style="display:none;">
@@ -2664,11 +2728,11 @@
                     <div class="sidebar-section deck-card">
                         <div class="section-title">Clipboard</div>
                         <div class="clipboard-grid">
-                            <button class="sidebar-btn deck-action" onclick="getRemoteClipboard()" title="Pull from remote">
+                            <button class="sidebar-btn deck-action" id="btn-clipboard-pull" onclick="getRemoteClipboard()" title="Pull from remote">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-download"></use></svg>
                                 <span>Pull</span>
                             </button>
-                            <button class="sidebar-btn deck-action" onclick="setRemoteClipboard()" title="Push to remote">
+                            <button class="sidebar-btn deck-action" id="btn-clipboard-push" onclick="setRemoteClipboard()" title="Push to remote">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-upload"></use></svg>
                                 <span>Push</span>
                             </button>
@@ -2775,6 +2839,12 @@
                         </button>
                     </div>
                     <div class="sidebar-section deck-card public-link-section" id="public-link-section" hidden>
+                        <div class="public-access-row">
+                            <span class="info-label">Access</span>
+                            <button class="url-action-btn" title="Open settings" aria-label="Open settings" onclick="alert('Open Zadoo Settings from the Start menu to manage permissions.')">
+                                <svg class="ti" aria-hidden="true"><use href="#ti-settings"></use></svg>
+                            </button>
+                        </div>
                         <div class="url-display">
                             <div class="url-info">
                                 <div class="url-text" id="link-text">Getting public URL...</div>
@@ -2822,8 +2892,6 @@
             </div>
         </div>
         
-        <!-- Advanced button removed -->
-
         <!-- SSH Terminal Panel -->
         <div id="terminal-panel" class="terminal-panel">
             <div class="drag-resize" id="terminal-resizer"></div>
@@ -2994,6 +3062,7 @@
     let micFirstChunkLogged = false;
     let pendingMicClientEvents = [];
     let emailStatus = 'Pending';
+    window.__zadooAuthenticated = false;
     // Robo typing state
     let roboEnabled = false;
     let roboPlaying = false;
@@ -3108,8 +3177,6 @@
         
 
     })();
-    // Keyboard Configure modal removed (checkpoint 1)
-
     function toggleAnimatedInput() {
         const toggleBtn = document.getElementById('toggle-input-btn');
         const toggleSwitch = document.getElementById('toggle-switch');
@@ -3436,6 +3503,10 @@
     async function refreshCameras() {
         const sel = document.getElementById('camera-select');
         if (!sel) return;
+        if (!window.__zadooAuthenticated) {
+            setCameraSelectPlaceholder('Login required');
+            return;
+        }
         const previous = sel.value;
         cameraDeviceMap = new Map();
         closeCameraMenu();
@@ -3487,6 +3558,10 @@
     async function refreshMics() {
         const sel = document.getElementById('mic-select');
         if (!sel) return;
+        if (!window.__zadooAuthenticated) {
+            setMicSelectPlaceholder('Login required');
+            return;
+        }
         const previous = sel.value || 'default';
         setMicSelectPlaceholder('Loading microphones...');
         try {
@@ -3838,8 +3913,6 @@
                 ta.focus();
             }
         }
-        // Search removed per request
-
         window.openCodeEditor = function(){
             // Ensure notepad is open, then switch to code editor view
             const panel = document.getElementById('notepad-panel');
@@ -4363,6 +4436,46 @@
         socket.send(JSON.stringify({ action: 'stream_ping', client_ts: performance.now() }));
     }
 
+    const controllerAlertSeen = new Set();
+    function showControllerAlert(data) {
+        const alertId = data && data.id ? String(data.id) : '';
+        if (alertId) {
+            if (controllerAlertSeen.has(alertId)) return;
+            controllerAlertSeen.add(alertId);
+            if (controllerAlertSeen.size > 60) {
+                const first = controllerAlertSeen.values().next().value;
+                controllerAlertSeen.delete(first);
+            }
+        }
+        const stack = document.getElementById('controller-alert-stack');
+        if (!stack) return;
+
+        const item = document.createElement('div');
+        item.className = 'controller-alert';
+
+        const title = document.createElement('div');
+        title.className = 'controller-alert-title';
+        title.textContent = String((data && data.title) || 'Alert');
+
+        const message = document.createElement('div');
+        message.className = 'controller-alert-message';
+        message.textContent = String((data && data.message) || '');
+
+        item.appendChild(title);
+        item.appendChild(message);
+        stack.appendChild(item);
+        requestAnimationFrame(() => item.classList.add('show'));
+
+        const timeout = Math.max(2500, Math.min(12000, Number(data && data.duration_ms) || 6000));
+        setTimeout(() => {
+            item.classList.remove('show');
+            item.classList.add('hide');
+            setTimeout(() => {
+                try { item.remove(); } catch (_) {}
+            }, 260);
+        }, timeout);
+    }
+
     function connectVideo() {
         const videoSocket = new WebSocket(`${WSS_URL}/video`);
         videoSocket.binaryType = 'blob';
@@ -4393,6 +4506,8 @@
                     } else if (data.type === 'stream_pong') {
                         const clientTs = Number(data.client_ts || 0);
                         if (clientTs) videoMetrics.rttMs = smoothMetric(videoMetrics.rttMs, performance.now() - clientTs);
+                    } else if (data.type === 'controller_alert') {
+                        showControllerAlert(data);
                     }
                 } catch (e) {
                     console.error("Error parsing video message:", e);
@@ -4406,7 +4521,7 @@
             setTimeout(connectVideo, 2000);
         };
     }
-    function connectInput_legacy_removed() {
+    function initializeInputControls() {
         // Avoid multiple sockets
         if (window.inputSocket && (window.inputSocket.readyState === WebSocket.OPEN || window.inputSocket.readyState === WebSocket.CONNECTING)) {
             return;
@@ -4449,7 +4564,44 @@
             }
         });
         
-        inputSocket.onmessage = function(event) {
+        function clipboardButton(kind) {
+            return document.getElementById(kind === 'push' ? 'btn-clipboard-push' : 'btn-clipboard-pull');
+        }
+
+        function setClipboardStatus(kind, message) {
+            const btn = clipboardButton(kind);
+            if (btn) showTempStatus(btn, message);
+        }
+        window.setClipboardStatus = setClipboardStatus;
+
+        function fallbackWriteLocalClipboard(text) {
+            const ta = document.createElement('textarea');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            ta.style.top = '0';
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+            document.body.removeChild(ta);
+            return ok;
+        }
+
+        async function writeLocalClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                } catch (err) {
+                    console.warn('Clipboard writeText failed, trying fallback:', err);
+                }
+            }
+            return fallbackWriteLocalClipboard(text);
+        }
+
+        function handleInputMessage(event) {
             try {
                 const data = JSON.parse(event.data);
                 if (data && data.type) {
@@ -4460,6 +4612,8 @@
                 
                 if (data.type === 'keystroke_capture') {
                     handleKeystrokeCapture(data);
+                } else if (data.type === 'controller_alert') {
+                    showControllerAlert(data);
                 } else if (data.type === 'available_capture_methods') {
                     updateCaptureMethodOptions(data.methods, data.current);
                 } else if (data.type === 'capture_verification') {
@@ -4470,12 +4624,13 @@
                     if (data.success) {
                         publicUrl = data.url;
                         document.getElementById('link-text').textContent = data.url;
-                        if (data.email_status) {
-                            const el = document.getElementById('email-status');
-                            if (el) el.textContent = data.email_status;
-                        }
                     } else {
+                        publicUrl = '';
                         document.getElementById('link-text').textContent = 'Local access only';
+                    }
+                    if (data.email_status) {
+                        const el = document.getElementById('email-status');
+                        if (el) el.textContent = data.email_status;
                     }
                 } else if (data.type === 'refresh_status') {
                     document.getElementById('link-text').textContent = data.message;
@@ -4495,20 +4650,41 @@
                             if (el) el.textContent = data.email_status;
                         }
                     } else {
+                        publicUrl = '';
                         linkText.textContent = data.message || 'Failed to get new URL';
                     }
                 } else if (data.type === 'clipboard_content') {
-                    // Handle clipboard content from server
-                    navigator.clipboard.writeText(data.data).then(() => {
-                        console.log(" Clipboard set successfully on client.");
+                    if (data.error) {
+                        console.error('Remote clipboard pull failed:', data.error);
+                        setClipboardStatus('pull', 'Failed');
+                        return;
+                    }
+                    writeLocalClipboard(data.data || '').then(ok => {
+                        if (ok) {
+                            console.log(" Clipboard pulled from remote.");
+                            setClipboardStatus('pull', 'Copied');
+                        } else {
+                            console.error(" Failed to write pulled clipboard locally.");
+                            setClipboardStatus('pull', 'Blocked');
+                        }
                     }).catch(err => {
-                        console.error(" Failed to set clipboard on client:", err);
+                        console.error(" Failed to write pulled clipboard locally:", err);
+                        setClipboardStatus('pull', 'Blocked');
                     });
+                } else if (data.type === 'clipboard_set_result') {
+                    if (data.success) {
+                        setClipboardStatus('push', 'Pushed');
+                    } else {
+                        console.error('Remote clipboard push failed:', data.error);
+                        setClipboardStatus('push', 'Failed');
+                    }
                 }
             } catch (e) {
                 console.error("Error parsing input message:", e);
             }
-        };
+        }
+
+        inputSocket.onmessage = handleInputMessage;
         
         inputSocket.onclose = function() {
             console.log(" Input socket disconnected");
@@ -4519,29 +4695,6 @@
         inputSocket.onerror = function(error) {
             console.error(" Input socket error:", error);
             updateStatus("Connection Error");
-        };
-
-        // Subscribe helper
-        function sendSubscribe_legacy(enabled) {
-            if (!window.inputSocket) return;
-            const send = () => window.inputSocket.send(JSON.stringify({ action: 'cursor_broadcast', enabled }));
-            if (window.inputSocket.readyState === WebSocket.OPEN) send();
-            else if (window.inputSocket.readyState === WebSocket.CONNECTING) {
-                const once = () => { try { window.inputSocket.removeEventListener('open', once); } catch(_) {}; send(); };
-                window.inputSocket.addEventListener('open', once);
-            }
-        }
-
-        // Render helper (single source of truth)
-        window.renderRemoteCursor_legacy = function(nx, ny){
-            const dot = document.getElementById('mouse-overlay');
-            if (!dot || !window.showMouseOverlay) return;
-            const m = getRenderMetrics(); if (!m) return;
-            const x = m.offsetX + Math.max(0, Math.min(1, +nx || 0)) * m.renderWidth;
-            const y = m.offsetY + Math.max(0, Math.min(1, +ny || 0)) * m.renderHeight;
-            dot.style.left = x + 'px';
-            dot.style.top  = y + 'px';
-            if (dot.style.display !== 'block') dot.style.display = 'block';
         };
 
         function sendEvent(event) {
@@ -4632,7 +4785,6 @@
             }
           }
 
-          // Replace your connectInput() with this (or ensure these two lines run on open)
           window.connectInput = function connectInput() {
             const WSS_PROTOCOL = (location.protocol === 'https:') ? 'wss' : 'ws';
             const WS_INPUT_URL = `${WSS_PROTOCOL}://${location.host}/input`;
@@ -4641,8 +4793,11 @@
 
             window.inputSocket.onopen = function () {
               console.log(' Input socket connected');
+              updateStatus('Connected');
+              window.inputSocket.onmessage = handleInputMessage;
               attachCursorHandler(window.inputSocket);     // < ensure handler is attached
               flushMicClientEvents();
+              fetchPublicUrl(window.inputSocket);
               if (window.showMouseOverlay) sendSubscribe(true); // < resubscribe after reconnect
             };
             window.inputSocket.onclose = function () {
@@ -4698,6 +4853,11 @@
                 if (t.closest('#sidebar-trigger')) return true;
             } catch (_) { }
             return false;
+        }
+
+        function isTerminalPanelOpen() {
+            const panel = document.getElementById('terminal-panel');
+            return !!(panel && panel.classList.contains('open'));
         }
 
         let isDragging = false;
@@ -4771,6 +4931,7 @@
         // Keyboard event handling - simple and reliable
         document.addEventListener('keydown', function(e) {
             if (window.__splashVisible) return;
+            if (isTerminalPanelOpen()) return;
             // When keyboard popup is open, block typing controls
             const kb = document.getElementById('kb-overlay');
             if (kb && kb.style.display === 'flex') return;
@@ -4792,6 +4953,7 @@
 
         document.addEventListener('keyup', function(e) {
             if (window.__splashVisible) return;
+            if (isTerminalPanelOpen()) return;
             // When keyboard popup is open, block typing controls
             const kb = document.getElementById('kb-overlay');
             if (kb && kb.style.display === 'flex') return;
@@ -4811,7 +4973,7 @@
         });
     }
     if (typeof window.connectInput !== 'function') {
-        window.connectInput = connectInput_legacy_removed;
+        window.connectInput = initializeInputControls;
     }
 
     // Sidebar functions
@@ -4841,6 +5003,15 @@
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({action: 'get_public_url'}));
         }
+    }
+
+    function updateSharedPublicLinkDisplay() {
+        const linkText = document.getElementById('link-text');
+        const rawUrl = publicUrl || (linkText ? linkText.textContent.trim() : '');
+        if (!linkText || !rawUrl || rawUrl.startsWith('Getting') || rawUrl.startsWith('Generating') || rawUrl.startsWith('Local') || rawUrl.startsWith('Error')) {
+            return;
+        }
+        linkText.textContent = rawUrl;
     }
 
     function refreshPublicLink() {
@@ -4907,18 +5078,6 @@
         }
     }
 
-    function legacyCopyFallback(text, btn) {
-        const ta = document.createElement('textarea');
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); } catch (_) {}
-        document.body.removeChild(ta);
-        showTempStatus(btn, 'Copied!');
-    }
-
     function showTempStatus(btn, msg) {
         const originalTitle = btn.title || btn.getAttribute('aria-label') || '';
         btn.title = msg;
@@ -4936,19 +5095,71 @@
     }
 
     function getRemoteClipboard() {
-        if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-            window.inputSocket.send(JSON.stringify({action: 'get_clipboard'}));
-        }
+        sendInputSocketMessage({action: 'get_clipboard'}, 'pull');
     }
 
     function setRemoteClipboard() {
-        navigator.clipboard.readText().then(text => {
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({action: 'set_clipboard', data: text}));
-            }
+        readLocalClipboardForPush().then(text => {
+            sendInputSocketMessage({action: 'set_clipboard', data: text}, 'push');
         }).catch(err => {
             console.error('Failed to read clipboard: ', err);
+            updateClipboardStatus('push', 'Blocked');
         });
+    }
+
+    function updateClipboardStatus(kind, message) {
+        if (typeof window.setClipboardStatus === 'function') {
+            window.setClipboardStatus(kind, message);
+        }
+    }
+
+    function ensureInputSocket() {
+        if (!window.inputSocket || window.inputSocket.readyState === WebSocket.CLOSED) {
+            try {
+                if (typeof window.connectInput === 'function') window.connectInput();
+            } catch (_) {}
+        }
+        return window.inputSocket || null;
+    }
+
+    function sendInputSocketMessage(payload, statusKind) {
+        const sock = ensureInputSocket();
+        if (!sock) {
+            updateClipboardStatus(statusKind, 'Offline');
+            return false;
+        }
+        const send = () => {
+            try {
+                sock.send(JSON.stringify(payload));
+                return true;
+            } catch (err) {
+                console.error('Input socket send failed:', err);
+                updateClipboardStatus(statusKind, 'Failed');
+                return false;
+            }
+        };
+        if (sock.readyState === WebSocket.OPEN) return send();
+        if (sock.readyState === WebSocket.CONNECTING) {
+            sock.addEventListener('open', send, { once: true });
+            return true;
+        }
+        updateClipboardStatus(statusKind, 'Offline');
+        return false;
+    }
+
+    async function readLocalClipboardForPush() {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            try {
+                return await navigator.clipboard.readText();
+            } catch (err) {
+                console.warn('Clipboard readText failed, using manual paste fallback:', err);
+            }
+        }
+        const fallback = window.prompt('Paste text to push to the remote clipboard');
+        if (fallback === null) {
+            throw new Error('clipboard read cancelled');
+        }
+        return fallback;
     }
 
     // Draggable trigger functionality
@@ -5131,7 +5342,18 @@
     }
 
     // Advanced SSH Terminal controls
+    function focusTerminalIframe() {
+        const iframe = document.getElementById('terminal-iframe');
+        if (!iframe) return;
+        try { iframe.focus(); } catch (e) {}
+        try { if (iframe.contentWindow) iframe.contentWindow.focus(); } catch (e) {}
+        try { if (iframe.contentWindow) iframe.contentWindow.postMessage({ type: 'focus' }, '*'); } catch (e) {}
+    }
+
     function toggleTerminal() {
+        if (window.__zadooPermissions && window.__zadooPermissions.terminal === false) {
+            return;
+        }
         const panel = document.getElementById('terminal-panel');
         if (!panel) return;
         const host = document.getElementById('terminal-host');
@@ -5146,6 +5368,7 @@
                 iframe.onload = () => {
                     // Ask the iframe to fit once it becomes visible
                     try { iframe.contentWindow.postMessage({ type: 'fit' }, '*'); } catch {}
+                    focusTerminalIframe();
                 };
                 host.appendChild(iframe);
                 host.dataset.initialized = '1';
@@ -5161,12 +5384,16 @@
                 // fire multiple times to catch the end of the slide-in transition
                 [50, 200, 400].forEach((ms)=> setTimeout(()=>{
                     try { iframe.contentWindow.postMessage({ type: 'fit' }, '*'); } catch {}
+                    focusTerminalIframe();
                 }, ms));
             }
         }
     }
 
     function openTerminalNewTab() {
+        if (window.__zadooPermissions && window.__zadooPermissions.terminal === false) {
+            return;
+        }
         try {
             window.open('/terminal.html', '_blank');
         } catch (e) {}
@@ -5177,6 +5404,10 @@
         const resizer = document.getElementById('terminal-resizer');
         if (!panel || !resizer) return;
         let dragging = false;
+        panel.addEventListener('pointerdown', function(e){
+            if (e.target === resizer) return;
+            setTimeout(focusTerminalIframe, 0);
+        });
         resizer.addEventListener('mousedown', function(e){ dragging = true; e.preventDefault(); });
         window.addEventListener('mousemove', function(e){ if(!dragging) return; const vw = window.innerWidth; const newW = vw - e.clientX; panel.style.width = Math.max(320, Math.min(vw, newW)) + 'px'; panel.style.right = '0'; });
         window.addEventListener('mouseup', function(){ dragging = false; });
@@ -6088,6 +6319,7 @@
                 function closeSplash(){
                     // Unblock input immediately
                     window.__splashVisible = false;
+                    window.__zadooAuthenticated = true;
                     try { document.body.style.overflow = 'auto'; } catch(_) {}
                     try { document.body.classList.remove('splash-active'); } catch(_) {}
                     // Set a short-lived cookie to allow protected endpoints
@@ -6101,22 +6333,54 @@
                     setTimeout(function(){ try { splash.classList.add('hidden'); } catch(_) {}; }, 500);
                     try { connectVideo(); } catch(_) {}
                     try { if (typeof window.connectInput === 'function') window.connectInput(); } catch(_) {}
+                    try { refreshCameras(); } catch(_) {}
+                    try { refreshMics(); } catch(_) {}
                 }
                 async function authenticateCode(code){
+                    const headers = { 'X-Zadoo-Code': code };
                     const res = await fetch('/api/auth', {
                         method: 'GET',
                         credentials: 'same-origin',
                         cache: 'no-store',
-                        headers: { 'X-Zadoo-Code': code }
+                        headers: headers
                     });
                     let payload = {};
                     try { payload = await res.json(); } catch(_) {}
                     if (!res.ok || !payload.success) {
                         throw new Error(payload.error || 'Invalid code');
                     }
-                    return payload.mode || 'full';
+                    return payload;
                 }
-                function applyAuthorizedMode(mode){
+                function setFeatureEnabled(selectors, enabled) {
+                    (selectors || []).forEach(function(selector){
+                        try {
+                            document.querySelectorAll(selector).forEach(function(el){
+                                el.disabled = !enabled;
+                                el.classList.toggle('feature-locked', !enabled);
+                                if (!enabled) el.setAttribute('title', 'Disabled by permissions');
+                            });
+                        } catch(_) {}
+                    });
+                }
+                function applyPermissions(permissions) {
+                    permissions = permissions || {};
+                    window.__zadooPermissions = permissions;
+                    setFeatureEnabled(['#btn-disable-mouse', '#mouse-toggle-btn'], !!permissions.mouse);
+                    setFeatureEnabled(['#btn-disable-keyboard', 'button[onclick="openKeyboardPage()"]'], !!permissions.keyboard);
+                    setFeatureEnabled(['#btn-clipboard-pull'], !!permissions.clipboard_pull);
+                    setFeatureEnabled(['#btn-clipboard-push'], !!permissions.clipboard_push);
+                    setFeatureEnabled(['#audio-toggle'], !!permissions.system_audio);
+                    setFeatureEnabled(['#mic-toggle'], !!permissions.mic);
+                    setFeatureEnabled(['#btn-webcam', '#device-settings-toggle'], !!permissions.camera);
+                    setFeatureEnabled(['#btn-terminal'], !!permissions.terminal);
+                    setFeatureEnabled(['button[onclick="takeSnapshot(event)"]'], !!permissions.snapshots);
+                    setFeatureEnabled(['#capture-method-select', '.capture-chip', '#perf-toggle', '#perf-region', '#perf-scale', '#perf-gray'], !!permissions.advanced_video);
+                    setFeatureEnabled(['#btn-refresh-url'], !!permissions.tunnel_refresh);
+                    if (!permissions.mouse) { try { blockMouse = true; } catch(_) {} }
+                    if (!permissions.keyboard) { try { blockKeyboard = true; } catch(_) {} }
+                }
+                function applyAuthorizedMode(result){
+                    const mode = (result && result.mode) || result || 'full';
                     // Reset mode flags before applying the server-approved access level.
                     try { window.__advancedDisabled = false; window.__advPartialDisabled = false; window.__modeChallenger = false; } catch(_) {}
                     try { document.cookie = 'zadoo_adv_partial=; path=/; max-age=0; SameSite=Lax'; } catch(_) {}
@@ -6135,6 +6399,9 @@
                         try { blockMouse = true; } catch(_) {}
                         try { blockKeyboard = true; } catch(_) {}
                     }
+                    if (result && result.permissions) {
+                        applyPermissions(result.permissions);
+                    }
                     closeSplash();
                 }
                 function showAuthError(){
@@ -6145,23 +6412,17 @@
                         setTimeout(function(){ try { input.classList.remove('shake'); } catch(_) {} }, 500);
                     } catch(_) {}
                 }
-                if (input) {
-                    input.addEventListener('input', function(){
-                        try { input.value = (input.value || '').toUpperCase(); } catch(_) {}
-                    });
-                }
                 if (form) {
                     form.addEventListener('submit', async function(ev){
                         ev.preventDefault();
                         const val = (input && input.value ? input.value.trim() : '');
-                        const up = (val || '').toUpperCase();
-                        if (!up) {
+                        if (!val) {
                             showAuthError();
                             return;
                         }
                         try {
-                            const mode = await authenticateCode(up);
-                            applyAuthorizedMode(mode);
+                            const result = await authenticateCode(val);
+                            applyAuthorizedMode(result);
                         } catch(_) {
                             showAuthError();
                         }

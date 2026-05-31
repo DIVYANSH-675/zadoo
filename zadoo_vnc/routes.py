@@ -19,15 +19,18 @@ from websockets.http11 import Response as WSResponse
 from .assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
 from .camera_discovery import enumerate_camera_devices
 from .config import BRAND_HEADER_IMAGE_PATH, SPLASH_IMAGE_PATH, TRIGGER_ICON_IMAGE_PATH, env_int
-from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, HAS_SOUNDDEVICE, Image, fast_ctypes_screenshots, imagecodecs, mss, np, sd
+from .dependencies import HAS_FAST_CTYPES, HAS_IMAGECODECS, HAS_MSS, HAS_SOUNDDEVICE, HAS_WINPTY, Image, fast_ctypes_screenshots, imagecodecs, mss, np, sd
 from .dpi import get_primary_screen_size
 from .logging_utils import _log_except, _log_fallback, _log_try_ok
+from .settings import DEFAULT_PERMISSIONS, get_settings_store
 
 class RoutesMixin:
     AUTH_COOKIE_NAME = "zadoo_auth"
     CSRF_COOKIE_NAME = "zadoo_csrf"
     AUTH_TTL_SECONDS = 3600
+    AUTH_CODE_ENV = "ZADOO_ACCESS_CODE"
     FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+    ACCESS_ROLES = {"full", "limited", "partial", "lockdown"}
     VIEW_ACTIONS = {
         "client_stream_stats",
         "cursor_broadcast",
@@ -40,49 +43,55 @@ class RoutesMixin:
         "stream_ping",
         "verify_capture_method",
     }
-    CONTROL_ACTIONS = {
-        "click",
-        "control",
-        "drag",
+    MOUSE_ACTIONS = {"click", "control", "drag", "move", "scroll"}
+    KEYBOARD_ACTIONS = {"key", "key_combo", "type_text"}
+    CONTROL_ACTIONS = MOUSE_ACTIONS | KEYBOARD_ACTIONS | {
         "get_clipboard",
-        "key",
-        "key_combo",
-        "move",
-        "scroll",
         "set_clipboard",
         "set_clipboard_image",
         "set_fps",
         "set_quality",
-        "type_text",
     }
     ADVANCED_ACTIONS = {"set_capture_method", "set_performance"}
     HOST_ACTIONS = {"refresh_tunnel", "toggle_keystroke_capture"}
     ROUTE_FEATURES = {
         "/": "public",
         "/api/auth": "public",
+        "/api/settings/status": "public",
+        "/api/settings/save": "settings",
+        "/api/settings/reveal-resend": "settings",
         "/brand-header.png": "public",
         "/trigger-icon.png": "public",
         "/splash.png": "public",
         "/video": "view",
-        "/audio": "view",
-        "/input": "control",
+        "/audio": "system_audio",
+        "/input": "view",
         "/api/public-url": "view",
         "/api/stream-stats": "view",
         "/benchmark.html": "view",
-        "/snapshot": "view",
-        "/api/set-quality": "control",
-        "/api/set-fps": "control",
-        "/api/refresh-tunnel": "host",
+        "/snapshot": "snapshots",
+        "/api/set-quality": "advanced_video",
+        "/api/set-fps": "advanced_video",
+        "/api/refresh-tunnel": "tunnel_refresh",
         "/terminal.html": "terminal",
         "/ssh": "terminal",
-        "/webcam": "webcam",
-        "/api/list-cameras": "webcam",
+        "/webcam": "camera",
+        "/api/list-cameras": "camera",
         "/mic": "mic",
         "/api/list-mics": "mic",
-        "/host-controls": "host",
-        "/api/alert": "host",
+        "/host-controls": "remote_alerts",
+        "/api/alert": "remote_alerts",
     }
-    CSRF_HTTP_FEATURES = {"control", "host"}
+    CSRF_HTTP_FEATURES = {
+        "advanced_video",
+        "mouse",
+        "keyboard",
+        "clipboard_pull",
+        "clipboard_push",
+        "tunnel_refresh",
+        "remote_alerts",
+        "settings",
+    }
 
     def _json_response(self, payload, status=http.HTTPStatus.OK, extra_headers=None):
         headers = Headers()
@@ -134,11 +143,7 @@ class RoutesMixin:
             return get_primary_screen_size()
         except Exception as exc:
             _log_fallback(log_context, "pyautogui.size", "primary_screen_size_failed", exc)
-            try:
-                import pyautogui as _pg
-                return _pg.size()
-            except Exception:
-                return None
+            return None
 
     def _header_get(self, request_headers, name, default=None):
         try:
@@ -212,6 +217,42 @@ class RoutesMixin:
         except Exception:
             return False
 
+    def _is_local_request(self, request_headers):
+        raw_host = str(self._header_get(request_headers, "Host", "") or "").strip().lower()
+        if raw_host.startswith("["):
+            host = raw_host.split("]", 1)[0].strip("[]")
+        else:
+            host = raw_host.rsplit(":", 1)[0] if raw_host.count(":") <= 1 else raw_host
+        if host in {"", "localhost", "127.0.0.1", "::1", "[::1]"}:
+            return True
+        forwarded = str(self._header_get(request_headers, "CF-Connecting-IP", "") or self._header_get(request_headers, "X-Forwarded-For", "") or "")
+        if forwarded and not forwarded.startswith(("127.", "::1")):
+            return False
+        return host.startswith("127.")
+
+    def _settings_store(self):
+        store = getattr(self, "settings_store", None)
+        if store is None:
+            store = get_settings_store()
+            self.settings_store = store
+        return store
+
+    def _settings_configured(self):
+        try:
+            return bool(self._settings_store().configured())
+        except Exception:
+            return False
+
+    def _json_body(self, request_body):
+        if not request_body:
+            return {}
+        try:
+            if isinstance(request_body, (bytes, bytearray)):
+                return json.loads(request_body.decode("utf-8", "ignore"))
+            return json.loads(str(request_body))
+        except Exception:
+            return {}
+
     def _state_changing_http_allowed(self, request_headers):
         header_token = str(self._header_get(request_headers, "X-Zadoo-CSRF", "") or "")
         if not header_token:
@@ -243,19 +284,29 @@ class RoutesMixin:
         action = str(action or "")
         if action in self.VIEW_ACTIONS:
             return "view"
-        if action in self.CONTROL_ACTIONS:
-            return "control"
+        if action in self.MOUSE_ACTIONS:
+            return "mouse"
+        if action in self.KEYBOARD_ACTIONS:
+            return "keyboard"
+        if action == "get_clipboard":
+            return "clipboard_pull"
+        if action in {"set_clipboard", "set_clipboard_image"}:
+            return "clipboard_push"
+        if action in {"set_quality", "set_fps"}:
+            return "advanced_video"
         if action in self.ADVANCED_ACTIONS:
-            return "advanced"
-        if action in self.HOST_ACTIONS:
-            return "host"
+            return "advanced_video"
+        if action == "refresh_tunnel":
+            return "tunnel_refresh"
+        if action == "toggle_keystroke_capture":
+            return "remote_alerts"
         return None
 
     def _is_ws_action_authorized_for_headers(self, request_headers, action):
         feature = self._feature_for_action(action)
         if feature is None:
             return False
-        return self._role_allows(self._role_for_headers(request_headers), feature)
+        return self._feature_allowed_for_headers(request_headers, feature)
 
     def _is_ws_action_authorized(self, websocket, action):
         return self._is_ws_action_authorized_for_headers(self._headers_for_websocket(websocket), action)
@@ -270,6 +321,35 @@ class RoutesMixin:
         except Exception:
             pass
 
+    def _feature_allowed_for_headers(self, request_headers, feature):
+        if feature == "public":
+            return True
+        if feature == "settings":
+            return self._is_local_request(request_headers)
+        if not self._settings_configured():
+            return self._role_allows(self._role_for_headers(request_headers), feature)
+        session = self._session_for_headers(request_headers)
+        if not isinstance(session, dict):
+            return False
+        return self._settings_permission_allows(feature)
+
+    def _settings_permission_allows(self, feature):
+        if feature in {"public", "view"}:
+            return True
+        if feature == "settings":
+            return False
+        if feature == "terminal" and not HAS_WINPTY:
+            return False
+        return bool(self._settings_permissions().get(feature, False))
+
+    def _settings_permissions(self):
+        settings = self._settings_store().load(reload=True)
+        permissions = dict(DEFAULT_PERMISSIONS)
+        permissions.update({k: bool(v) for k, v in (settings.get("permissions") or {}).items() if k in permissions})
+        if not HAS_WINPTY:
+            permissions["terminal"] = False
+        return permissions
+
     def _cookie_value(self, request_headers, name):
         cookie_header = self._header_get(request_headers, "Cookie", "")
         if not isinstance(cookie_header, str) or not cookie_header:
@@ -282,38 +362,33 @@ class RoutesMixin:
         except Exception:
             return None
 
-    def _auth_codes(self):
+    def _auth_code(self):
         def clean(value):
             return str(value if value is not None else "").strip()
 
-        codes = {
-            "full": clean(os.getenv("CODE_FULL")),
-            "limited": clean(os.getenv("CODE_LIMITED")),
-            "partial": clean(os.getenv("CODE_PARTIAL")),
-            "lockdown": clean(os.getenv("CODE_LOCKDOWN")),
-        }
-        custom = clean(os.getenv("CUSTOM_PASSWORD"))
-        if custom:
-            codes["custom"] = custom
-        configured = {role: value.upper() for role, value in codes.items() if value}
+        if self._settings_configured():
+            return ""
+        configured = clean(os.getenv(self.AUTH_CODE_ENV))
         if configured:
-            return configured
-        runtime_codes = getattr(self, "_runtime_auth_codes", None)
-        if not isinstance(runtime_codes, dict) or not runtime_codes:
+            return configured.upper()
+        runtime_code = getattr(self, "_runtime_auth_code", "")
+        if not runtime_code:
             code = secrets.token_urlsafe(6).replace("-", "").replace("_", "").upper()[:6]
-            runtime_codes = {"full": code}
-            self._runtime_auth_codes = runtime_codes
+            self._runtime_auth_code = code
             self._runtime_auth_generated = True
-        return runtime_codes
+            return code
+        return str(runtime_code).strip().upper()
 
     def _announce_auth_codes(self):
-        codes = self._auth_codes()
+        if self._settings_configured():
+            print(" Access code source: installed settings")
+            return
+        code = self._auth_code()
         if getattr(self, "_runtime_auth_generated", False):
-            code = codes.get("full")
             if code:
                 print("=" * 60)
-                print(f" Temporary full access code: {code}")
-                print(" Set CODE_FULL in .env to use your own persistent code.")
+                print(f" Temporary access code: {code}")
+                print(f" Set {self.AUTH_CODE_ENV} in .env to use your own persistent code.")
                 print("=" * 60)
         else:
             print(" Access code source: environment")
@@ -321,12 +396,29 @@ class RoutesMixin:
     def _match_auth_code(self, code):
         submitted = str(code or "").strip().upper()
         if not submitted:
-            return None
-        for role, expected in self._auth_codes().items():
-            expected_clean = str(expected or "").strip().upper()
-            if secrets.compare_digest(submitted, expected_clean):
-                return "full" if role == "custom" else role
-        return None
+            return False
+        if self._settings_configured():
+            return self._settings_store().verify_access_code(str(code or "").strip())
+        return secrets.compare_digest(submitted, self._auth_code())
+
+    def _requested_auth_role(self, path, request_headers):
+        requested = self._header_get(request_headers, "X-Zadoo-Access", "")
+        if not requested:
+            parsed = urllib.parse.urlparse(str(path or ""))
+            query = urllib.parse.parse_qs(parsed.query or "")
+            requested = (query.get("access") or query.get("mode") or [""])[0]
+        role = str(requested or "full").strip().lower()
+        aliases = {
+            "all": "full",
+            "advanced": "partial",
+            "control": "limited",
+            "controls": "limited",
+            "view": "lockdown",
+            "view_only": "lockdown",
+            "view-only": "lockdown",
+        }
+        role = aliases.get(role, role)
+        return role if role in self.ACCESS_ROLES else None
 
     def _cleanup_auth_sessions(self):
         sessions = getattr(self, "auth_sessions", None)
@@ -360,26 +452,29 @@ class RoutesMixin:
             return True
         if feature == "view":
             return role in {"full", "limited", "partial", "lockdown"}
-        if feature == "control":
+        if feature in {"mouse", "keyboard", "clipboard_pull", "clipboard_push"}:
             return role in {"full", "limited", "partial"}
-        if feature == "advanced":
+        if feature in {"advanced", "advanced_video", "snapshots"}:
             return role in {"full", "partial"}
-        if feature in {"terminal", "webcam", "mic", "host"}:
+        if feature in {"terminal", "camera", "webcam", "mic", "system_audio", "tunnel_refresh", "remote_alerts", "host"}:
             return role == "full"
         return False
 
     def _is_authorized(self, request_headers, feature="view"):
-        session = self._session_for_headers(request_headers)
-        return bool(session and self._role_allows(session.get("role"), feature))
+        return self._feature_allowed_for_headers(request_headers, feature)
 
     def _feature_for_route(self, route_path):
         if route_path.startswith("/api/client-log"):
             return "view"
+        if route_path.startswith("/api/settings/"):
+            return self.ROUTE_FEATURES.get(route_path, "settings")
         return self.ROUTE_FEATURES.get(route_path)
 
     def _http_route_requires_csrf(self, route_path, feature=None):
         if feature is None:
             feature = self._feature_for_route(route_path)
+        if feature == "settings":
+            return False
         return route_path.startswith("/api/") and feature in self.CSRF_HTTP_FEATURES
 
     def _is_ws_authorized(self, route_path, request_headers):
@@ -415,8 +510,7 @@ class RoutesMixin:
                 {"success": False, "error": "Query string auth is disabled"},
                 http.HTTPStatus.BAD_REQUEST,
             )
-        role = self._match_auth_code(code)
-        if not role:
+        if not self._match_auth_code(code):
             if code:
                 retry_after = self._record_auth_failure(request_headers)
                 if retry_after:
@@ -425,6 +519,15 @@ class RoutesMixin:
                         http.HTTPStatus.TOO_MANY_REQUESTS,
                     )
             return self._json_response({"success": False, "error": "Invalid code"}, http.HTTPStatus.UNAUTHORIZED)
+        role = None
+        permissions = None
+        if self._settings_configured():
+            role = "custom"
+            permissions = self._settings_permissions()
+        else:
+            role = self._requested_auth_role(parsed.geturl(), request_headers)
+            if role is None:
+                return self._json_response({"success": False, "error": "Invalid access level"}, http.HTTPStatus.BAD_REQUEST)
 
         self._record_auth_success(request_headers)
         token = secrets.token_urlsafe(32)
@@ -435,7 +538,8 @@ class RoutesMixin:
             self.auth_sessions = {}
             sessions = self.auth_sessions
         csrf_token = secrets.token_urlsafe(32)
-        sessions[token] = {"role": role, "expires_at": expires_at, "csrf": csrf_token}
+        session_payload = {"role": role, "expires_at": expires_at, "csrf": csrf_token}
+        sessions[token] = session_payload
         auth_cookie = (
             f"{self.AUTH_COOKIE_NAME}={token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
             "HttpOnly; SameSite=Lax"
@@ -444,8 +548,11 @@ class RoutesMixin:
             f"{self.CSRF_COOKIE_NAME}={csrf_token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
             "SameSite=Lax"
         )
+        payload = {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS, "csrf_token": csrf_token}
+        if permissions is not None:
+            payload["permissions"] = permissions
         return self._json_response(
-            {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS, "csrf_token": csrf_token},
+            payload,
             extra_headers={"Set-Cookie": [auth_cookie, csrf_cookie]},
         )
 
@@ -615,24 +722,10 @@ class RoutesMixin:
 
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:
-            hdrs = request_headers
-            get = None
-            try:
-                get = hdrs.get  # websockets Headers
-            except Exception:
-                get = None
-            upgrade_val = None
-            connection_val = None
-            if get:
-                try:
-                    upgrade_val = (get("Upgrade") or get("upgrade") or "").lower()
-                    connection_val = (get("Connection") or get("connection") or "").lower()
-                except Exception:
-                    pass
-            if (isinstance(upgrade_val, str) and "websocket" in upgrade_val) or (
-                isinstance(connection_val, str) and "upgrade" in connection_val
-            ):
-                if self._is_ws_authorized(route_path, hdrs):
+            upgrade_val = (request_headers.get("Upgrade") or "").lower() if request_headers else ""
+            connection_val = (request_headers.get("Connection") or "").lower() if request_headers else ""
+            if "websocket" in upgrade_val or "upgrade" in connection_val:
+                if self._is_ws_authorized(route_path, request_headers):
                     return None
                 return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
         except Exception:
@@ -678,26 +771,83 @@ class RoutesMixin:
                 headers=headers,
                 body=html.encode("utf-8"),
             )
+        elif route_path in {"/setup", "/settings"}:
+            headers = Headers()
+            headers["Content-Type"] = "text/plain; charset=utf-8"
+            headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return WSResponse(
+                status_code=int(http.HTTPStatus.NOT_FOUND),
+                reason_phrase=http.HTTPStatus.NOT_FOUND.phrase,
+                headers=headers,
+                body=b"Open Zadoo Settings from the Windows app.",
+            )
         elif route_path == "/api/auth":
             return await self.handle_auth(path, request_headers)
+        elif route_path == "/api/settings/status":
+            if not self._is_local_request(request_headers):
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            return self._json_response({"success": True, "settings": self._settings_store().public_view()})
+        elif route_path == "/api/settings/reload":
+            if not self._is_local_request(request_headers):
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            code = str(self._header_get(request_headers, "X-Zadoo-Code", "") or "")
+            if self._settings_configured() and not self._settings_store().verify_access_code(code):
+                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
+            settings = self._settings_store().load(reload=True)
+            try:
+                self.runtime_settings = settings
+                self._load_alert_presets_from_settings()
+            except Exception:
+                pass
+            self.auth_sessions = {}
+            return self._json_response({"success": True, "settings": self._settings_store().public_view()})
+        elif route_path == "/api/settings/reveal-resend":
+            if not self._is_local_request(request_headers):
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            payload = self._json_body(request_body)
+            code = str(payload.get("admin_code") or self._header_get(request_headers, "X-Zadoo-Code", "") or "")
+            if self._settings_configured() and not self._settings_store().verify_access_code(code):
+                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
+            return self._json_response({"success": True, "resend_api_key": self._settings_store().get_resend_api_key()})
+        elif route_path == "/api/settings/save":
+            if not self._is_local_request(request_headers):
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            payload = self._json_body(request_body)
+            try:
+                old_configured = self._settings_configured()
+                old_has_code = bool(self._settings_store().load().get("access_code"))
+                admin_code = str(payload.get("admin_code") or self._header_get(request_headers, "X-Zadoo-Code", "") or "")
+                settings = self._settings_store().apply_setup(payload, require_code=admin_code)
+                try:
+                    self.runtime_settings = settings
+                    self._load_alert_presets_from_settings()
+                except Exception:
+                    pass
+                if old_configured and old_has_code and payload.get("access_code"):
+                    self.auth_sessions = {}
+                return self._json_response({"success": True, "settings": self._settings_store().public_view()})
+            except PermissionError:
+                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
+            except Exception as e:
+                return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.BAD_REQUEST)
         elif route_path == "/api/public-url":
             try:
-                return self._json_response(json.loads(await self.handle_get_public_url()))
+                return self._json_response(self._public_url_payload())
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif route_path == "/api/refresh-tunnel":
             try:
-                return self._json_response(json.loads(await self.handle_refresh_tunnel()))
+                return self._json_response(await self._refresh_tunnel_payload())
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif route_path == "/api/set-quality":
-            return self._json_response(await self.handle_set_quality(path))
+            return self._json_response(self.handle_set_quality(path))
         elif route_path == "/api/set-fps":
-            return self._json_response(await self.handle_set_fps(path))
+            return self._json_response(self.handle_set_fps(path))
         elif route_path == "/api/stream-stats":
             try:
-                stats = self._capture_stats_payload()
                 stream = self._stream_status_payload()
+                stats = self._capture_stats_payload(stream)
                 return self._json_response({"success": True, "stats": stats, "stream": stream})
             except Exception as e:
                 return self._json_response({"success": False, "error": str(e)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -818,10 +968,13 @@ class RoutesMixin:
                 code = ""
                 _log_except("api.alert.parse", sys.exc_info()[1])
             try:
-                title, message = self.alert_presets.get(code, ("Alert", f"Code: {code}"))
+                self._load_alert_presets_from_settings()
+                title, message = self.alert_presets.get(code, ("", ""))
+                if not (title or message):
+                    return self._json_response({"ok": False, "error": "Alert slot is not set"}, http.HTTPStatus.NOT_FOUND)
                 _log_try_ok("api.alert.lookup", f"{title}|{message}")
             except Exception:
-                title, message = ("Alert", f"Code: {code}")
+                title, message = ("", "")
                 _log_except("api.alert.lookup", sys.exc_info()[1])
             try:
                 self._broadcast_controller_alert(title, message)
@@ -970,7 +1123,8 @@ class RoutesMixin:
                 }
             return {
                 'success': False,
-                'error': 'No public URL available'
+                'error': 'No public URL available',
+                'email_status': (self.tunnel_manager.last_email_message if self.tunnel_manager else None),
             }
         except Exception as e:
             return {
@@ -1000,18 +1154,7 @@ class RoutesMixin:
             "email_status": self.tunnel_manager.last_email_message,
         }
 
-    async def handle_get_public_url(self):
-        """API endpoint to get current public URL"""
-        return json.dumps(self._public_url_payload())
-
-    async def handle_refresh_tunnel(self):
-        """API endpoint to refresh tunnel and get new URL."""
-        try:
-            return json.dumps(await self._refresh_tunnel_payload())
-        except Exception as e:
-            return json.dumps({"success": False, "error": str(e)})
-
-    async def handle_set_quality(self, path=None):
+    def handle_set_quality(self, path=None):
         """API endpoint to set graphics quality via query string."""
         try:
             parsed = urllib.parse.urlparse(str(path or ""))
@@ -1022,7 +1165,7 @@ class RoutesMixin:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def handle_set_fps(self, path=None):
+    def handle_set_fps(self, path=None):
         """API endpoint to set FPS via query string."""
         try:
             parsed = urllib.parse.urlparse(str(path or ""))
@@ -1057,43 +1200,6 @@ class RoutesMixin:
 
         abs_rect = _norm_to_abs_rect()
 
-        # Heuristic: for small ROIs, MSS region can be faster than dxcam
-        prefer_mss_first = False
-        if abs_rect:
-            try:
-                sw2, sh2 = screen_size or (0, 0)
-                if sw2 > 0 and sh2 > 0:
-                    l, t, r, b = abs_rect
-                    area_ratio = ((r - l) * (b - t)) / float(sw2 * sh2)
-                    prefer_mss_first = area_ratio <= 0.25
-            except Exception:
-                prefer_mss_first = False
-
-        def _try_dxcam_then_none():
-            try:
-                cam = getattr(self, 'dxcam_camera', None)
-                if cam is not None and getattr(self, "dxcam_started", False):
-                    _log_fallback("snapshot.capture_backend", "mss_or_other", "dxcam_ring_buffer_active")
-                    return None
-                if cam is not None:
-                    arr = cam.grab(region=abs_rect)
-                    if arr is not None:
-                        rgb = arr[:, :, :3][:, :, ::-1].copy(order='C')
-                        try:
-                            self._last_snapshot_backend = 'dxcam'
-                        except Exception:
-                            pass
-                        # Pillow deprecation: mode parameter on fromarray will be removed in Pillow 13
-                        try:
-                            return Image.fromarray(rgb)
-                        except Exception as exc:
-                            _log_fallback("snapshot.dxcam.image", "Image.frombuffer", "Image.fromarray_failed", exc)
-                            return Image.frombuffer('RGB', (rgb.shape[1], rgb.shape[0]), rgb.tobytes())
-            except Exception:
-                _log_fallback("snapshot.capture_backend", "mss_or_other", "dxcam_failed")
-                logging.warning('Snapshot dxcam failed; falling back', exc_info=True)
-            return None
-
         def _try_mss_then_none():
             if HAS_MSS:
                 try:
@@ -1123,21 +1229,9 @@ class RoutesMixin:
                     logging.warning('Snapshot MSS failed', exc_info=True)
             return None
 
-        # Order backends based on ROI size
-        if prefer_mss_first:
-            img = _try_mss_then_none()
-            if img is not None:
-                return img
-            img = _try_dxcam_then_none()
-            if img is not None:
-                return img
-        else:
-            img = _try_dxcam_then_none()
-            if img is not None:
-                return img
-            img = _try_mss_then_none()
-            if img is not None:
-                return img
+        img = _try_mss_then_none()
+        if img is not None:
+            return img
 
         # 2) fast_ctypes (full, then crop)
         if HAS_FAST_CTYPES:
@@ -1179,7 +1273,8 @@ class RoutesMixin:
                     r = min(rw, rh)
                     if r < 1.0:
                         new_size = (max(1, int(tw * r)), max(1, int(th * r)))
-                        img = img.resize(new_size, Image.BILINEAR)
+                        resample = getattr(Image, "Resampling", Image).BILINEAR
+                        img = img.resize(new_size, resample)
             except Exception:
                 pass
             arr = np.array(img, copy=False)

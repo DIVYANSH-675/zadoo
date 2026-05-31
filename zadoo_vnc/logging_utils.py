@@ -35,8 +35,16 @@ def _restore_logging_streams():
 def _setup_logging_to_file():
     global _LOG_FILE_HANDLE, _ORIGINAL_STDOUT, _ORIGINAL_STDERR, _LOGGING_RESTORE_REGISTERED
     try:
-        base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        log_dir = os.path.join(base_dir, "logs")
+        if getattr(sys, "frozen", False):
+            try:
+                from .settings import settings_dir
+
+                log_dir = str(settings_dir() / "logs")
+            except Exception:
+                log_dir = os.path.join(os.path.dirname(sys.executable), "logs")
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            log_dir = os.path.join(base_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"zadoo_{datetime.now():%Y%m%d}.log")
 

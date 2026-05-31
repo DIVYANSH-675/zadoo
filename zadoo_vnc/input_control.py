@@ -33,7 +33,6 @@ from .win32_input import (
     SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN,
-    _GetAsyncKeyState,
     _sendinput_mouse_button,
     _sendinput_mouse_move_abs,
     user32,
@@ -41,16 +40,10 @@ from .win32_input import (
 
 class InputControlMixin:
     ALERT_PRESET_HOTKEYS = {
-        'A': ('shift+numpad 5', 'shift+clear'),
-        'B': ('shift+numpad 0', 'shift+insert'),
-        'C': ('shift+numpad 8', 'shift+up'),
-        'D': ('shift+numpad 2', 'shift+down'),
-    }
-    ALERT_PRESET_KEY_NAMES = {
-        'A': ('num 5', 'numpad 5', 'kp_5', 'num5', 'clear'),
-        'B': ('num 0', 'numpad 0', 'kp_0', 'num0', 'insert'),
-        'C': ('num 8', 'numpad 8', 'kp_8', 'num8', 'up'),
-        'D': ('num 2', 'numpad 2', 'kp_2', 'num2', 'down'),
+        'A': ('shift+num 5', 'shift+clear'),
+        'B': ('shift+num 0', 'shift+insert'),
+        'C': ('shift+num 8', 'shift+up'),
+        'D': ('shift+num 2', 'shift+down'),
     }
     ALERT_PRESET_VK_KEYS = {
         'A': (0x65, 0x0C),  # NumPad5 / Clear
@@ -111,44 +104,6 @@ class InputControlMixin:
             _log_except(f"{log_name}.queue", exc)
             return False
 
-    def _load_alert_presets_from_env(self):
-        """Override alert presets (A/B/C/D) from environment variables.
-        Supported keys per preset (e.g. for A):
-          - ALERT_A_TITLE, ALERT_A_MESSAGE
-          - ALERT_A="Title|Message" (or "Title::Message")
-        """
-        def _pair_for(key: str):
-            base = f"ALERT_{key}"
-            title = os.getenv(f"{base}_TITLE")
-            message = os.getenv(f"{base}_MESSAGE")
-            combined = os.getenv(base)
-            if (not title and not message) and combined:
-                if '|' in combined:
-                    parts = combined.split('|', 1)
-                elif '::' in combined:
-                    parts = combined.split('::', 1)
-                else:
-                    parts = [combined, '']
-                title = (parts[0] or '').strip()
-                message = (parts[1] or '').strip() if len(parts) > 1 else ''
-            return (title, message)
-        changed = []
-        for k in ('A','B','C','D'):
-            t, m = _pair_for(k)
-            if (t and t.strip()) or (m and m.strip()):
-                cur = self.alert_presets.get(k, ("Alert", k))
-                new_title = (t or '').strip() or cur[0]
-                new_message = (m or '').strip() or cur[1]
-                self.alert_presets[k] = (new_title, new_message)
-                changed.append(k)
-        try:
-            if changed:
-                print(f"[alerts] Presets overridden from env for: {', '.join(changed)}")
-            else:
-                print("[alerts] Using default alert presets (no env overrides)")
-        except Exception:
-            pass
-
     def _capture_char(self, ch: str):
         try:
             if getattr(self, "custom_alert_active", False):
@@ -197,8 +152,8 @@ class InputControlMixin:
 
                     # This handler should ONLY process input actions or cursor subscriptions
                     if action in ['click', 'move', 'drag', 'key', 'key_combo', 'scroll', 'type_text', 'get_clipboard', 'set_clipboard', 'set_clipboard_image']:
-                        # Drop input while blocked
-                        if getattr(self, 'block_host_input', False):
+                        # Drop only host input while blocked; clipboard sync is a separate control.
+                        if getattr(self, 'block_host_input', False) and action in {'click', 'move', 'drag', 'key', 'key_combo', 'scroll', 'type_text'}:
                             _log_try_ok('input_event_handler.blocked', action)
                             continue
                         self.process_event(event, websocket)
@@ -747,10 +702,26 @@ class InputControlMixin:
     def _broadcast_controller_alert(self, title: str, message: str):
         """Send an alert to all connected controller browsers (System B)."""
         try:
-            cnt = len(getattr(self, 'input_clients', []) or [])
-            print(f" Broadcasting alert to {cnt} input client(s): '{title}'  '{message}'")
-            payload = json.dumps({'type': 'controller_alert', 'title': title, 'message': message})
-            for ws in list(self.input_clients):
+            clients = []
+            seen = set()
+            for group_name in ("input_clients", "video_clients"):
+                for ws in list(getattr(self, group_name, []) or []):
+                    marker = id(ws)
+                    if marker not in seen:
+                        seen.add(marker)
+                        clients.append(ws)
+
+            seq = int(getattr(self, "_controller_alert_seq", 0) or 0) + 1
+            self._controller_alert_seq = seq
+            alert_id = f"{int(time.time() * 1000)}-{seq}"
+            print(f" Broadcasting alert to {len(clients)} client socket(s): '{title}'  '{message}'")
+            payload = json.dumps({
+                'type': 'controller_alert',
+                'id': alert_id,
+                'title': title,
+                'message': message,
+            })
+            for ws in clients:
                 try:
                     if self._queue_ws_send(ws, payload, "_broadcast_controller_alert"):
                         _log_try_ok("_broadcast_controller_alert.queue", str(getattr(ws, 'remote_address', '?')))
@@ -763,6 +734,13 @@ class InputControlMixin:
 
     def _broadcast_alert_preset(self, code: str, cooldown_seconds: float = 0.4):
         code = str(code or "").upper()
+        try:
+            self._load_alert_presets_from_settings()
+        except Exception:
+            pass
+        if code not in getattr(self, "alert_presets", {}):
+            _log_try_ok("_broadcast_alert_preset.disabled", code)
+            return False
         now = time.time()
         cooldowns = getattr(self, "_alert_preset_cooldowns", None)
         if not isinstance(cooldowns, dict):
@@ -771,7 +749,7 @@ class InputControlMixin:
         if now < float(cooldowns.get(code, 0.0) or 0.0):
             return False
         cooldowns[code] = now + cooldown_seconds
-        title, message = self.alert_presets.get(code, ("Alert", code))
+        title, message = self.alert_presets.get(code)
         self._broadcast_controller_alert(title, message)
         return True
 
@@ -803,18 +781,8 @@ class InputControlMixin:
             print(f"Error broadcasting keystroke: {e}")
             _log_except("_broadcast_keystroke_capture", e)
 
-    def _is_numlock_off(self) -> bool:
-        """True when NumLock is OFF."""
-        try:
-            import ctypes
-            return (ctypes.windll.user32.GetKeyState(0x90) & 1) == 0
-        except Exception as exc:
-            # Be permissive if we can't read the state
-            _log_fallback("numlock.read_off", "assume_off", str(exc), exc)
-            return True
-
-    def _install_numlock_hotkeys(self, numlock_off: bool):
-        """Register/remove all global hotkeys depending on NumLock state."""
+    def _install_alert_hotkeys(self):
+        """Register alert hotkeys for both NumLock states."""
         with self._get_hotkey_lock():
             try:
                 import keyboard
@@ -829,45 +797,40 @@ class InputControlMixin:
                     pass
             self._hk_ids = []
 
-            # Only register when NumLock is OFF (as requested)
-            if not numlock_off:
-                try:
-                    print("NumLock ON  hotkeys disabled (not registered)")
-                except Exception:
-                    pass
-                return
-
             add = self._hk_ids.append
+            registered = 0
 
-            # Never suppress host keys from global hooks; stale suppressing hooks can lock local input.
-            add(keyboard.add_hotkey('shift+numpad 1', lambda: self._begin_custom_alert_capture(source="hk"), suppress=False))
-            add(keyboard.add_hotkey('shift+end',      lambda: self._begin_custom_alert_capture(source="hk"), suppress=False))
-            add(keyboard.add_hotkey('shift+numpad 3', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
-            add(keyboard.add_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"),   suppress=False))
+            def add_alert_hotkey(hotkey, callback):
+                nonlocal registered
+                try:
+                    add(keyboard.add_hotkey(hotkey, callback, suppress=False))
+                    registered += 1
+                except Exception:
+                    _log_except("_install_alert_hotkeys.add", sys.exc_info()[1])
+                    try:
+                        print(f" Alert hotkey unavailable: {hotkey}")
+                    except Exception:
+                        pass
+
+            # Register both physical numpad names and navigation aliases so alerts
+            # work whether NumLock is on or off.
+            add_alert_hotkey('shift+num 1', lambda: self._begin_custom_alert_capture(source="hk"))
+            add_alert_hotkey('shift+end', lambda: self._begin_custom_alert_capture(source="hk"))
+            add_alert_hotkey('shift+num 3', lambda: self._end_custom_alert_capture(source="hk"))
+            add_alert_hotkey('shift+pagedown', lambda: self._end_custom_alert_capture(source="hk"))
 
             for code, hotkeys in self.ALERT_PRESET_HOTKEYS.items():
                 for hotkey in hotkeys:
-                    add(keyboard.add_hotkey(
-                        hotkey,
-                        lambda code=code: self._broadcast_alert_preset(code),
-                        suppress=False,
-                    ))
-
-    def _watch_numlock_and_update_hotkeys(self):
-        """Background watcher: re-register hotkeys when NumLock state changes."""
-        last = None
-        while getattr(self, "_numlock_watcher_active", False):
+                    add_alert_hotkey(hotkey, lambda code=code: self._broadcast_alert_preset(code))
+            self._alert_hotkeys_active = registered > 0
             try:
-                state_off = self._is_numlock_off()
-                if state_off != last:
-                    last = state_off
-                    self._install_numlock_hotkeys(state_off)
+                print(f" Alert hotkeys registered: {registered} (NumLock on/off supported)")
             except Exception:
                 pass
-            time.sleep(0.25)
+            return registered
 
     def _install_custom_capture_hotkeys(self):
-        """Install per-key capture hotkeys without suppressing host keyboard input."""
+        """Install per-key capture hotkeys and keep typed text out of the host app."""
         with self._get_hotkey_lock():
             if not HAS_KEYBOARD:
                 print("[custom] keyboard module not available; custom capture disabled")
@@ -877,7 +840,7 @@ class InputControlMixin:
 
             def add(hk, fn):
                 try:
-                    h = keyboard.add_hotkey(hk, fn, suppress=False, trigger_on_release=False)
+                    h = keyboard.add_hotkey(hk, fn, suppress=True, trigger_on_release=False)
                     self._custom_capture_hotkeys.append(h)
                     _log_try_ok("_install_custom_capture_hotkeys.add", hk)
                 except Exception:
@@ -932,15 +895,10 @@ class InputControlMixin:
         if getattr(self, "custom_alert_active", False):
             _log_try_ok("_begin_custom_alert_capture.idempotent", "already_active")
             return
-        if not self._is_numlock_off():
-            print(" Ignored: NumLock is ON (turn NumLock off to start capture)")
-            _log_try_ok("_begin_custom_alert_capture.blocked", "numlock_on")
-            return
         self.custom_alert_active = True
         self.custom_alert_buf = []
         self._install_custom_capture_hotkeys()
-        # Do not globally suppress here; per-key handlers already suppress
-        print("  CAPTURE: ON (NumLock OFF, source=%s)" % source)
+        print("  CAPTURE: ON (source=%s)" % source)
         _log_try_ok("_begin_custom_alert_capture", source)
 
     def _end_custom_alert_capture(self, source: str = "poller"):
@@ -948,15 +906,10 @@ class InputControlMixin:
         if not getattr(self, "custom_alert_active", False):
             _log_try_ok("_end_custom_alert_capture.idempotent", "not_active")
             return
-        if not self._is_numlock_off():
-            print(" Ignored: NumLock is ON (turn NumLock off to stop capture)")
-            _log_try_ok("_end_custom_alert_capture.blocked", "numlock_on")
-            return
         self._remove_custom_capture_hotkeys()
         text = ''.join(self.custom_alert_buf)
         self.custom_alert_active = False
         self.custom_alert_buf = []
-        # Do not flip global suppress here either
         print("  CAPTURE: OFF (source=%s)  sending %d chars" % (source, len(text)))
         if text:
             try:
@@ -1018,12 +971,9 @@ class InputControlMixin:
         
         try:
             self._register_keyboard_cleanup()
-            # Register hotkeys based on current NumLock state and keep them in sync
+            # Register hotkeys once; each preset includes both NumLock names.
             try:
-                self._install_numlock_hotkeys(self._is_numlock_off())
-                if not getattr(self, "_numlock_watcher_active", False):
-                    self._numlock_watcher_active = True
-                    threading.Thread(target=self._watch_numlock_and_update_hotkeys, daemon=True).start()
+                self._install_alert_hotkeys()
             except Exception:
                 pass
             def on_key_event(event):
@@ -1032,66 +982,8 @@ class InputControlMixin:
                         keyboard.suppress_event()
                 except Exception:
                     pass
-                # Combos (NumPad, independent of NumLock; trigger on keydown of the numpad key):
-                # A: Shift + Num5 (also 'clear')
-                # B: Shift + Num0 (also 'insert')
-                # C: Shift + Num8 (also 'up')
-                # D: Shift + Num2 (also 'down')
-                try:
-                    # --- Custom "type-to-alert" capture mode hotkeys ---
-                    VK_LSHIFT, VK_RSHIFT, VK_SHIFT = 0xA0, 0xA1, 0x10
-                    VK_NUMPAD1, VK_NUMPAD3        = 0x61, 0x63
-                    VK_END, VK_NEXT               = 0x23, 0x22
-                    is_shift = (
-                        bool(user32.GetAsyncKeyState(VK_LSHIFT) & 0x8000) or
-                        bool(user32.GetAsyncKeyState(VK_RSHIFT) & 0x8000) or
-                        bool(user32.GetAsyncKeyState(VK_SHIFT)  & 0x8000)
-                    )
-
-                    now = time.time()
-                    # START capture: Shift + (NumPad1 OR End)
-                    if is_shift and (
-                        bool(user32.GetAsyncKeyState(VK_NUMPAD1) & 0x8000) or
-                        bool(user32.GetAsyncKeyState(VK_END) & 0x8000)
-                    ):
-                        if now >= getattr(self, '_custom_alert_cooldown_until', 0.0) and (not self.custom_alert_active):
-                            self._custom_alert_cooldown_until = now + 0.40
-                            self._begin_custom_alert_capture()
-                            return
-
-                    # END capture: Shift + (NumPad3 OR PageDown)
-                    if is_shift and (
-                        bool(user32.GetAsyncKeyState(VK_NUMPAD3) & 0x8000) or
-                        bool(user32.GetAsyncKeyState(VK_NEXT) & 0x8000)
-                    ):
-                        if now >= getattr(self, '_custom_alert_cooldown_until', 0.0) and self.custom_alert_active:
-                            self._custom_alert_cooldown_until = now + 0.40
-                            self._end_custom_alert_capture()
-                            return
-
-                    # During capture, letter buffering/suppression is handled by dedicated hotkeys.
-                    if self.custom_alert_active:
-                        return
-
-                    if getattr(event, 'event_type', 'down') == 'down':
-                        name = (getattr(event, 'name', '') or '').lower()
-                        # Shift pressed?
-                        try:
-                            is_shift = (
-                                bool(_GetAsyncKeyState(0xA0) & 0x8000) or
-                                bool(_GetAsyncKeyState(0xA1) & 0x8000) or
-                                bool(_GetAsyncKeyState(0x10) & 0x8000)
-                            )
-                        except Exception:
-                            is_shift = False
-
-                        if is_shift:
-                            for code, names in self.ALERT_PRESET_KEY_NAMES.items():
-                                if name in names:
-                                    self._broadcast_alert_preset(code)
-                                    return
-                except Exception:
-                    pass
+                if getattr(self, "custom_alert_active", False):
+                    return
 
                 if self.keystroke_capture_enabled and getattr(event, 'event_type', 'down') == 'down':
                     key_name = event.name
@@ -1140,7 +1032,6 @@ class InputControlMixin:
 
     def stop_global_keyboard_hook(self):
         """Stop the global keyboard hook"""
-        self._numlock_watcher_active = False
         try:
             with self._get_hotkey_lock():
                 try:
@@ -1156,6 +1047,7 @@ class InputControlMixin:
                     self._hk_ids = []
                 except Exception:
                     pass
+                self._alert_hotkeys_active = False
                 try:
                     if self.keyboard_hook is not None:
                         keyboard.unhook(self.keyboard_hook)
@@ -1297,9 +1189,6 @@ class InputControlMixin:
                 if text:
                     self._type_text_chunk(text)
                 return
-            # Initialize state map lazily
-            if not hasattr(self, 'live_typing_text_by_client'):
-                self.live_typing_text_by_client = {}
             key = websocket if websocket is not None else 'global'
             prev = self.live_typing_text_by_client.get(key, '')
             typed_delta = False

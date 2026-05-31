@@ -127,7 +127,6 @@
   let lastCols = 0;
   let lastRows = 0;
   const pendingInput = [];
-  const encoder = new TextEncoder();
 
   term.loadAddon(fitAddon);
   term.open(termEl);
@@ -150,7 +149,7 @@
   function sendInput(data) {
     const normalized = String(data || '');
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(encoder.encode(normalized));
+      ws.send(normalized);
     } else {
       pendingInput.push(normalized);
     }
@@ -158,8 +157,28 @@
 
   function flushPendingInput() {
     while (pendingInput.length && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(encoder.encode(pendingInput.shift()));
+      ws.send(pendingInput.shift());
     }
+  }
+
+  function focusTerminal() {
+    try { term.focus(); } catch (_) {}
+  }
+
+  function sendControlCode(key) {
+    if (!key || key.length !== 1) return false;
+    const code = key.toUpperCase().charCodeAt(0);
+    if (code < 65 || code > 90) return false;
+    sendInput(String.fromCharCode(code - 64));
+    return true;
+  }
+
+  async function pasteClipboardText() {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return;
+      const text = await navigator.clipboard.readText();
+      if (text) sendInput(text.replace(/\r?\n/g, '\r'));
+    } catch (_) {}
   }
 
   function connectShell() {
@@ -170,7 +189,7 @@
     ws.onopen = function () {
       fitAndReport(true);
       flushPendingInput();
-      term.focus();
+      focusTerminal();
     };
 
     ws.onmessage = function (event) {
@@ -190,12 +209,44 @@
     };
   }
 
+  term.attachCustomKeyEventHandler(function (event) {
+    if (!event || event.type !== 'keydown') return true;
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+      const key = String(event.key || '').toLowerCase();
+      if (event.shiftKey && key === 'c') {
+        try {
+          const selected = term.getSelection();
+          if (selected && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(selected).catch(function () {});
+          }
+        } catch (_) {}
+        event.preventDefault();
+        return false;
+      }
+      if ((event.shiftKey && key === 'v') || (!event.shiftKey && key === 'v')) {
+        pasteClipboardText();
+        event.preventDefault();
+        return false;
+      }
+      if (!event.shiftKey && sendControlCode(key)) {
+        event.preventDefault();
+        return false;
+      }
+    }
+    return true;
+  });
+
   term.onData(sendInput);
+  termEl.addEventListener('pointerdown', function () { setTimeout(focusTerminal, 0); });
+  termEl.addEventListener('mousedown', function () { setTimeout(focusTerminal, 0); });
+  window.addEventListener('focus', focusTerminal);
   window.addEventListener('resize', function () { fitAndReport(false); });
   window.addEventListener('message', function (event) {
     if (event.data && event.data.type === 'fit') {
       fitAndReport(false);
-      term.focus();
+      focusTerminal();
+    } else if (event.data && event.data.type === 'focus') {
+      focusTerminal();
     }
   });
 

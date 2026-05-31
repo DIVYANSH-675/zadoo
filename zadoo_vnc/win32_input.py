@@ -175,39 +175,6 @@ except Exception:
         return False
 
 
-def get_cursor_pos():
-    """Return (x, y) screen coordinates of the cursor."""
-    ci = CURSORINFO()
-    ci.cbSize = ctypes.sizeof(CURSORINFO)
-    if user32.GetCursorInfo(ctypes.byref(ci)):
-        return ci.ptScreenPos.x, ci.ptScreenPos.y
-    try:
-        pt = POINT()
-        if _GetCursorPos(ctypes.byref(pt)):
-            return pt.x, pt.y
-    except Exception:
-        pass
-    return 0, 0
-
-
-def left_pressed():
-    return bool(_GetAsyncKeyState(VK_LBUTTON) & 0x8000)
-
-
-def right_pressed():
-    return bool(_GetAsyncKeyState(VK_RBUTTON) & 0x8000)
-
-
-def get_virtual_screen_bounds():
-    vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-    vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-    vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-    vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-    if vw > 0 and vh > 0:
-        return vx, vy, vw, vh
-    return 0, 0, 1920, 1080
-
-
 __all__ = [
     "CURSORINFO",
     "INPUT",
@@ -234,9 +201,5 @@ __all__ = [
     "_get_css_cursor_from_system",
     "_sendinput_mouse_button",
     "_sendinput_mouse_move_abs",
-    "get_cursor_pos",
-    "get_virtual_screen_bounds",
-    "left_pressed",
-    "right_pressed",
     "user32",
 ]

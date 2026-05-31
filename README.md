@@ -1,6 +1,6 @@
-# Zadoo VNC
+# Zadoo
 
-Zadoo VNC is a Windows-focused remote screen, input, clipboard, and Cloudflare tunnel runtime. The compatibility entrypoint is `zadoo_vnc_single.py`; the package entrypoint is `zadoo-vnc`.
+Zadoo is a Windows-focused remote screen, input, clipboard, media, terminal, alert, and Cloudflare tunnel runtime. The source package remains `zadoo_vnc`; the compatibility entrypoint is `zadoo_vnc_single.py`.
 
 ## Setup
 
@@ -22,26 +22,26 @@ python -m pip install -e .[media,email,perf,ssh]
 python zadoo_vnc_single.py
 ```
 
-The app starts a local web UI, screen capture, input WebSockets, and one Cloudflare tunnel when `cloudflared.exe` is available or can be downloaded.
+The app starts a local web UI on the fixed port `6173`. Installed builds open the small native `Zadoo Settings` window on first launch; create one access code, at most 10 characters, plus at least one access profile. The Cloudflare tunnel stays disabled until setup is complete.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill only the values you need.
+Installed builds store user settings in:
 
-- `RESEND_API_KEY`, `RESEND_FROM`, and `EMAIL_TO` or `GMAIL_TO` enable tunnel email notifications.
-- `CODE_FULL`, `CODE_LIMITED`, `CODE_PARTIAL`, `CODE_LOCKDOWN`, and `CUSTOM_PASSWORD` control server-side access sessions. If none are set, the app prints one temporary full-access code at startup.
-- `ZADOO_ALLOWED_ORIGINS` adds comma-separated extra HTTP/WebSocket origins. Same-host browser origins are allowed by default.
-- `ZADOO_ALLOW_QUERY_AUTH=1` temporarily re-enables legacy `/api/auth?code=...`; the UI uses the safer `X-Zadoo-Code` header by default.
-- `ZADOO_AUTH_MAX_FAILURES`, `ZADOO_AUTH_WINDOW_SECONDS`, and `ZADOO_AUTH_LOCKOUT_SECONDS` tune in-memory login throttling.
-- `ZADOO_DISABLE_STARTUP_TASK=1` prevents frozen builds from creating the Windows logon task.
-- `ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT` and `ZADOO_SKIP_CLOUDFLARED_SIGNATURE_CHECK` control cloudflared download and signature verification behavior.
-- `ZADOO_CLIPBOARD_TEXT_MAX_BYTES` and `ZADOO_CLIPBOARD_IMAGE_MAX_BYTES` cap remote clipboard payload sizes.
-- `ZADOO_DETECT_GPU_NAMES=1` enables optional PowerShell GPU-name detection; it is off by default to keep startup responsive.
-- `ZADOO_CAPTURE_METHOD=bettercam` or `dxcam` selects the screen capture backend. BetterCam is the default when installed.
-- `ZADOO_ADAPTIVE_STREAM=1` keeps screen sharing on the adaptive JPEG WebSocket path.
-- `ZADOO_STREAM_START_PROFILE=720p120` is the stable default. Use `720p240` or `1080p240` to opt in to higher-FPS startup profiles when the host, browser, and network can keep up.
-- `ZADOO_STREAM_MODE=adaptive_jpeg_ws` is the active video transport. WebRTC/H.264 is not enabled by this build.
-- `ALERT_A`, `ALERT_B`, `ALERT_C`, and `ALERT_D` customize host alert presets.
+```text
+%ProgramData%\Zadoo\config.json
+```
+
+Settings include the access-code hash, Resend API key encrypted with Windows DPAPI, recipient email, alert slots, profiles, share links, startup state, and setup completion.
+
+- One access code is used for all sessions. It is limited to 10 characters, and the old value is never revealed.
+- Share links use non-guessable tokens bound to a profile, so remote users cannot upgrade permissions by editing the URL.
+- Profiles control mouse, keyboard, clipboard pull, clipboard push, system audio, mic, camera, terminal, snapshots, advanced video controls, tunnel refresh, and remote alerts.
+- Trusted profiles are required for tunnel refresh and remote alerts.
+- Alert A-D slots have no defaults. Blank slots are disabled.
+- The Resend area shows `Email not Set` until both the API key and recipient email are configured.
+
+`.env.example` is now for development/test fallback only. User-facing configuration should be done from the native Zadoo Settings window.
 
 ## Screen Sharing Performance
 
@@ -51,15 +51,37 @@ Install `imagecodecs` with the requirements file so JPEG encoding uses the fast 
 
 No API keys or access codes are intentionally bundled. If a previous key or code was exposed in source or logs, rotate it before using public links.
 
+## Windows Packaging
+
+The packaging entrypoint is:
+
+```powershell
+.\scripts\build_windows.ps1 -Arch x64
+.\scripts\build_windows.ps1 -Arch All -PfxPath C:\path\codesign.pfx
+```
+
+The script creates isolated build environments under `.build_envs\py311-x64` and `.build_envs\py311-x86`, installs `requirements.txt` for x64 or `requirements-x86.txt` for x86 plus `build_requirements.txt`, validates imports, bundles the matching signed `cloudflared.exe`, builds a PyInstaller one-folder app for the installer, builds portable one-file EXEs, signs the EXEs/installers, and compiles Inno Setup installers.
+
+Required local tools:
+
+- Python 3.11 x64 for x64 builds.
+- Python 3.11 x86 for x86 builds.
+- Inno Setup 6 for installers.
+- Windows SDK `signtool.exe` and a PFX for release signing. Without a PFX, local builds use a self-signed `CN=Zadoo Local Build` certificate.
+- `C:\Users\divya\Real\app_icon.ico` for the EXE and installer icon.
+
+Artifacts are written under `dist\onedir`, `dist\portable`, and `dist\installer`. The x86 build excludes PyAV, pywinpty, DXCam, and BetterCam because those packages do not provide stable Python 3.11 win32 support here; x86 uses the stable fallback capture/camera paths and terminal reports unavailable when PTY support is missing.
+
 ## Smoke Tests
 
 ```powershell
 python -m compileall zadoo_vnc zadoo_vnc_single.py scripts
 python scripts/smoke_test.py
+python scripts/check_template_js.py
 python scripts/smoke_test.py --live http://localhost:6173
 ```
 
-The live smoke test assumes the app is already running.
+The live smoke test assumes the app is already running. For configured installs, set `ZADOO_SMOKE_AUTH_CODE` and, if needed, `ZADOO_SMOKE_SHARE_TOKEN` before running the live check.
 
 ## Notes
 

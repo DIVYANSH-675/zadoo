@@ -5,17 +5,23 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
-from .config import env_int
+from .config import RUNTIME_DIR, env_int, resource_path
 from .dependencies import resend
 from .logging_utils import _log_fallback
 from .network import get_local_ip
+from .settings import get_settings_store, settings_dir
 
 
 class CloudflareTunnelManager:
+    DEFAULT_RESEND_FROM = "onboarding@resend.dev"
+    EMAIL_NOT_SET_MESSAGE = "Email not Set"
+
     def __init__(self, primary_port):
         self.primary_port = primary_port
         self.current_port = primary_port
@@ -24,14 +30,16 @@ class CloudflareTunnelManager:
         self.cloudflared_path = None
         self.last_notified_url = None
 
-        # Resend is optional and entirely env-driven. No API key or default
-        # recipient is bundled in source.
-        self.resend_api_key = os.getenv("RESEND_API_KEY")
-        self.resend_from = os.getenv("RESEND_FROM", "onboarding@resend.dev")
-        self.email_to = os.getenv("EMAIL_TO") or os.getenv("GMAIL_TO")
+        # Resend is optional and user-configured through installed settings.
+        # Environment values remain a developer fallback before setup.
+        store = get_settings_store()
+        settings = store.load()
+        self.resend_api_key = store.get_resend_api_key() or os.getenv("RESEND_API_KEY")
+        self.resend_from = self.DEFAULT_RESEND_FROM
+        self.email_to = str(settings.get("email_to") or os.getenv("EMAIL_TO") or "").strip()
 
         self.last_email_status = None
-        self.last_email_message = None
+        self.last_email_message = None if self.resend_api_key and self.email_to else self.EMAIL_NOT_SET_MESSAGE
         self._notified_states = set()
         self._tunnel_lock = threading.RLock()
 
@@ -102,22 +110,48 @@ class CloudflareTunnelManager:
         except Exception:
             logging.debug("Stale cloudflared cleanup failed", exc_info=True)
 
+    def _cloudflared_download_url(self):
+        forced = os.getenv("ZADOO_CLOUDFLARED_ARCH", "").strip().lower()
+        arch = "386" if forced in {"x86", "386", "32"} or sys.maxsize <= 2**32 else "amd64"
+        return f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-{arch}.exe"
+
+    def _cloudflared_candidates(self):
+        env_path = os.getenv("ZADOO_CLOUDFLARED_PATH", "").strip()
+        if env_path:
+            yield Path(env_path)
+        yield resource_path("cloudflared.exe")
+        yield RUNTIME_DIR / "cloudflared.exe"
+        yield Path(os.getcwd()) / "cloudflared.exe"
+        yield settings_dir() / "bin" / "cloudflared.exe"
+
+    def _find_cloudflared(self):
+        for path in self._cloudflared_candidates():
+            try:
+                if path.exists() and path.is_file():
+                    return str(path)
+            except Exception:
+                continue
+        return None
+
     def download_cloudflared(self):
         """Download cloudflared if not present."""
-        self.cloudflared_path = os.path.join(os.getcwd(), "cloudflared.exe")
-
-        if os.path.exists(self.cloudflared_path):
+        existing = self._find_cloudflared()
+        if existing:
+            self.cloudflared_path = existing
             print(" Using existing cloudflared.exe")
             return True
 
         try:
             print(" Downloading cloudflared...")
-            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+            url = self._cloudflared_download_url()
             timeout = env_int("ZADOO_CLOUDFLARED_DOWNLOAD_TIMEOUT", 30, 1, 600)
+            target = settings_dir() / "bin" / "cloudflared.exe"
+            target.parent.mkdir(parents=True, exist_ok=True)
 
-            with urllib.request.urlopen(url, timeout=timeout) as response, open(self.cloudflared_path, "wb") as out_file:
+            with urllib.request.urlopen(url, timeout=timeout) as response, open(target, "wb") as out_file:
                 out_file.write(response.read())
 
+            self.cloudflared_path = str(target)
             print(" Downloaded cloudflared.exe")
             return True
 
@@ -207,10 +241,10 @@ class CloudflareTunnelManager:
             self.primary_tunnel_process, self.primary_public_url = self.start_tunnel(self.primary_port)
 
             if self.primary_public_url:
-                print("" * 80)
+                print("=" * 80)
                 print(" PRIMARY PORT PUBLIC URL READY!")
                 print(f" Port {self.primary_port}: {self.primary_public_url}")
-                print("" * 80)
+                print("=" * 80)
                 try:
                     self.notify_public_url(self.primary_public_url, self.email_port)
                 except Exception:
@@ -271,10 +305,14 @@ class CloudflareTunnelManager:
     def notify_public_url(self, url, port):
         """Send an email notification when Resend configuration is available."""
         try:
+            store = get_settings_store()
+            settings = store.load(reload=True)
+            self.resend_api_key = store.get_resend_api_key() or os.getenv("RESEND_API_KEY")
+            self.email_to = str(settings.get("email_to") or os.getenv("EMAIL_TO") or "").strip()
             if not (resend and self.resend_api_key and self.resend_from and self.email_to):
                 self.last_notified_url = url
                 self.last_email_status = False
-                self.last_email_message = "Email disabled (set RESEND_API_KEY and EMAIL_TO)"
+                self.last_email_message = self.EMAIL_NOT_SET_MESSAGE
                 return False
 
             private_ip = get_local_ip()
@@ -323,20 +361,19 @@ class CloudflareTunnelManager:
         """Clean up the tunnel process owned by this manager."""
         print(" Cleaning up owned tunnel process...")
 
-        process_name = "Primary"
         process = self.primary_tunnel_process
         if process:
             try:
-                print(f" Stopping {process_name} tunnel...")
+                print(" Stopping Primary tunnel...")
                 process.terminate()
                 process.wait(timeout=5)
-                print(f" {process_name} tunnel stopped")
+                print(" Primary tunnel stopped")
             except Exception:
                 try:
                     process.kill()
-                    print(f" {process_name} tunnel force killed")
+                    print(" Primary tunnel force killed")
                 except Exception:
-                    print(f" Could not stop {process_name} tunnel")
+                    print(" Could not stop Primary tunnel")
 
         self.primary_tunnel_process = None
         self.primary_public_url = None

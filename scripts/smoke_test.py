@@ -9,6 +9,8 @@ import os
 import re
 import secrets
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_GLOBS = ("zadoo_vnc/**/*.py", "zadoo_vnc/templates/*.html", "*.py", "*.md", "*.toml", "*.txt", ".env.example")
+SOURCE_GLOBS = ("zadoo_vnc/**/*.py", "zadoo_vnc/templates/*.html", "scripts/*.py", "*.py", "*.md", "*.toml", "*.txt", ".env.example")
 MOJIBAKE_RE = re.compile(r"[\u00c2\u00c3\u00e2\u00f0][^\x00-\x7f]+")
 
 
@@ -33,12 +35,12 @@ def _legacy_auth_strings():
 
 
 FORBIDDEN_SOURCE_STRINGS = (
-    "re_GF7",
-    "resend_api_key_default",
-    "email_to_default",
-    "iskssj07@gmail.com",
-    "Set-Clipboard -Value @\"\"",
-    "Popen('clip'",
+    "re_" + "GF7",
+    "resend_" + "api_key_default",
+    "email_" + "to_default",
+    "iskssj07" + "@gmail.com",
+    "Set-Clipboard" + " -Value @\"\"",
+    "Popen(" + "'clip'",
 ) + _legacy_auth_strings()
 
 
@@ -130,15 +132,13 @@ def source_files():
 def assert_imports() -> None:
     sys.path.insert(0, str(ROOT))
     test_auth_code = "SMOKE_" + secrets.token_hex(8).upper()
-    test_view_code = "VIEW_" + secrets.token_hex(8).upper()
+    temp_settings = tempfile.TemporaryDirectory(prefix="zadoo-smoke-")
     old_env = {
         key: os.environ.get(key)
         for key in (
-            "CODE_FULL",
-            "CODE_LIMITED",
-            "CODE_PARTIAL",
-            "CODE_LOCKDOWN",
-            "CUSTOM_PASSWORD",
+            "ZADOO_ACCESS_CODE",
+            "ZADOO_SETTINGS_PATH",
+            "ZADOO_SETTINGS_DIR",
             "ZADOO_ALLOW_QUERY_AUTH",
             "ZADOO_ALLOWED_ORIGINS",
             "ZADOO_AUTH_MAX_FAILURES",
@@ -148,10 +148,22 @@ def assert_imports() -> None:
             "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
             "ZADOO_ADAPTIVE_STREAM",
             "ZADOO_STREAM_START_PROFILE",
+            "ALERT_A",
+            "ALERT_B",
+            "ALERT_C",
+            "ALERT_D",
+            "ALERT_A_TITLE",
+            "ALERT_A_MESSAGE",
+            "ALERT_B_TITLE",
+            "ALERT_B_MESSAGE",
+            "ALERT_C_TITLE",
+            "ALERT_C_MESSAGE",
+            "ALERT_D_TITLE",
+            "ALERT_D_MESSAGE",
         )
     }
-    os.environ["CODE_FULL"] = test_auth_code
-    os.environ["CODE_LOCKDOWN"] = test_view_code
+    os.environ["ZADOO_ACCESS_CODE"] = test_auth_code
+    os.environ["ZADOO_SETTINGS_PATH"] = str(Path(temp_settings.name) / "config.json")
     os.environ["ZADOO_AUTH_MAX_FAILURES"] = "3"
     os.environ["ZADOO_AUTH_WINDOW_SECONDS"] = "60"
     os.environ["ZADOO_AUTH_LOCKOUT_SECONDS"] = "120"
@@ -159,16 +171,35 @@ def assert_imports() -> None:
     os.environ["ZADOO_CLIPBOARD_TEXT_MAX_BYTES"] = "8"
     os.environ["ZADOO_ADAPTIVE_STREAM"] = "1"
     os.environ["ZADOO_STREAM_START_PROFILE"] = "720p120"
-    for key in ("CODE_LIMITED", "CODE_PARTIAL", "CUSTOM_PASSWORD", "ZADOO_ALLOW_QUERY_AUTH", "ZADOO_ALLOWED_ORIGINS"):
+    for key in (
+        "ZADOO_ALLOW_QUERY_AUTH",
+        "ZADOO_ALLOWED_ORIGINS",
+        "ZADOO_SETTINGS_DIR",
+        "ALERT_A",
+        "ALERT_B",
+        "ALERT_C",
+        "ALERT_D",
+        "ALERT_A_TITLE",
+        "ALERT_A_MESSAGE",
+        "ALERT_B_TITLE",
+        "ALERT_B_MESSAGE",
+        "ALERT_C_TITLE",
+        "ALERT_C_MESSAGE",
+        "ALERT_D_TITLE",
+        "ALERT_D_MESSAGE",
+    ):
         os.environ.pop(key, None)
     import zadoo_vnc.config as config
     import zadoo_vnc.dependencies as deps
     import zadoo_vnc.screen_capture as screen_capture
+    import zadoo_vnc.settings as settings_mod
     from zadoo_vnc.assets import load_benchmark_html, load_host_controls_html, load_index_html, load_terminal_html
     from zadoo_vnc.server import VNCServer
     from websockets.datastructures import Headers
 
-    if not (deps.HAS_PYAUTOGUI and (deps.HAS_DXCAM or deps.HAS_BETTERCAM)):
+    settings_mod._STORE = None
+
+    if not (deps.HAS_PYAUTOGUI and deps.HAS_PIL):
         fail("core capture/input dependency flags are not usable")
 
     for name, loader in {
@@ -185,10 +216,36 @@ def assert_imports() -> None:
         if not path.exists() or path.stat().st_size <= 0:
             fail(f"asset missing or empty: {path}")
 
+    isolated_store = settings_mod.get_settings_store()
+    if isolated_store.configured():
+        fail("smoke settings store should start unconfigured")
+    if any(item.get("enabled") for item in isolated_store.public_view().get("alerts", {}).values()):
+        fail("settings store should not create default alert text")
+    access_record = settings_mod.hash_access_code("SMOKE-CODE")
+    if not settings_mod.verify_access_code("SMOKE-CODE", access_record):
+        fail("access-code verifier rejected the correct code")
+    if settings_mod.verify_access_code("wrong", access_record):
+        fail("access-code verifier accepted the wrong code")
     try:
-        server = VNCServer(6173, 0)
-        if server.port != 6173 or server.secondary_port != 0:
-            fail("VNCServer did not instantiate with expected ports")
+        settings_mod.hash_access_code("TOO-LONG-CODE")
+        fail("access-code hash accepted a code longer than 10 characters")
+    except ValueError:
+        pass
+    isolated_store.set_access_code("SMOKE")
+    external_store = settings_mod.SettingsStore(isolated_store.path)
+    external_data = external_store.load(reload=True)
+    external_data["setup_complete"] = True
+    external_data["permissions"] = {key: True for key in settings_mod.PERMISSION_KEYS}
+    time.sleep(0.02)
+    external_store.save(external_data)
+    if not all((isolated_store.load().get("permissions") or {}).values()):
+        fail("settings store did not reload changes saved by another process")
+    isolated_store.save(settings_mod.normalize_settings(None))
+
+    try:
+        server = VNCServer(6173)
+        if server.port != 6173:
+            fail("VNCServer did not instantiate with the fixed port")
         if not getattr(server, "adaptive_stream", None) or server.adaptive_stream.profile.name != "720p120":
             fail("adaptive stream did not select the default 720p120 startup profile")
         if server.current_fps != 120 or server.current_quality != 85:
@@ -201,6 +258,8 @@ def assert_imports() -> None:
             expected_methods.append("bettercam")
         if screen_capture.HAS_DXCAM:
             expected_methods.append("dxcam")
+        if screen_capture.HAS_PYAUTOGUI and screen_capture.HAS_PIL:
+            expected_methods.append("pyautogui")
         if methods != expected_methods:
             fail(f"available capture methods changed: {methods}, expected {expected_methods}")
 
@@ -284,7 +343,7 @@ def assert_imports() -> None:
                 fail(f"query auth returned {query_auth_response.status_code}, expected 400")
             try:
                 os.environ["ZADOO_ALLOW_QUERY_AUTH"] = "1"
-                compat_query_server = VNCServer(6176, 0)
+                compat_query_server = VNCServer(6176)
                 compat_query_response = await compat_query_server.process_request(f"/api/auth?code={test_auth_code}", headers)
                 if compat_query_response.status_code != 200:
                     fail(f"compat query auth returned {compat_query_response.status_code}, expected 200")
@@ -311,10 +370,21 @@ def assert_imports() -> None:
                 fail(f"auth route returned {auth_response.status_code}, expected 200")
             auth_payload = json.loads(auth_response.body.decode("utf-8"))
             csrf_token = auth_payload.get("csrf_token")
+            if auth_payload.get("mode") != "full":
+                fail(f"auth route returned mode={auth_payload.get('mode')}, expected full")
             cookie = cookie_header_from_set_cookie(auth_response.headers)
             if not cookie or "zadoo_auth=" not in cookie or not csrf_token:
                 fail("auth route did not set zadoo_auth cookie")
             headers["Cookie"] = cookie
+            query_access_headers = Headers()
+            query_access_headers["Host"] = "localhost:6173"
+            query_access_headers["X-Zadoo-Code"] = test_auth_code
+            query_access_response = await server.process_request("/api/auth?access=lockdown", query_access_headers)
+            if query_access_response.status_code != 200:
+                fail(f"query access auth returned {query_access_response.status_code}, expected 200")
+            query_access_payload = json.loads(query_access_response.body.decode("utf-8"))
+            if query_access_payload.get("mode") != "lockdown":
+                fail(f"query access auth returned mode={query_access_payload.get('mode')}, expected lockdown")
             ws_bad_origin_headers = Headers()
             ws_bad_origin_headers["Host"] = "localhost:6173"
             ws_bad_origin_headers["Origin"] = "https://evil.example"
@@ -324,7 +394,7 @@ def assert_imports() -> None:
             ws_bad_origin = await server.process_request("/video", ws_bad_origin_headers)
             if ws_bad_origin.status_code != 403:
                 fail(f"cross-origin websocket returned {ws_bad_origin.status_code}, expected 403")
-            throttled_server = VNCServer(6174, 0)
+            throttled_server = VNCServer(6174)
             bad_headers = Headers()
             bad_headers["Host"] = "localhost:6174"
             bad_headers["X-Forwarded-For"] = "203.0.113.10"
@@ -480,10 +550,14 @@ def assert_imports() -> None:
 
             view_auth_headers = Headers()
             view_auth_headers["Host"] = "localhost:6173"
-            view_auth_headers["X-Zadoo-Code"] = test_view_code
+            view_auth_headers["X-Zadoo-Code"] = test_auth_code
+            view_auth_headers["X-Zadoo-Access"] = "lockdown"
             view_auth_response = await server.process_request("/api/auth", view_auth_headers)
             if view_auth_response.status_code != 200:
                 fail(f"view auth returned {view_auth_response.status_code}, expected 200")
+            view_auth_payload = json.loads(view_auth_response.body.decode("utf-8"))
+            if view_auth_payload.get("mode") != "lockdown":
+                fail(f"view auth returned mode={view_auth_payload.get('mode')}, expected lockdown")
             view_ws_headers = Headers()
             view_ws_headers["Host"] = "localhost:6173"
             view_ws_headers["Cookie"] = cookie_header_from_set_cookie(view_auth_response.headers)
@@ -505,10 +579,153 @@ def assert_imports() -> None:
                 server.process_event = original_process_event
 
             class FakeSendWebSocket:
+                remote_address = ("smoke-send", 1)
                 def __init__(self):
                     self.sent = []
                 async def send(self, data):
                     self.sent.append(data)
+
+            alert_response = await server.process_request("/api/alert?code=A", csrf_headers)
+            if alert_response.status_code != 404:
+                fail(f"unset alert route returned {alert_response.status_code}, expected 404")
+
+            class FakeHTTPBodyRequest:
+                def __init__(self, path, headers, payload):
+                    self.path = path
+                    self.headers = headers
+                    self.body = json.dumps(payload).encode("utf-8")
+
+            async def post_json(path, payload):
+                local_headers = Headers()
+                local_headers["Host"] = "localhost:6173"
+                local_headers["Content-Type"] = "application/json"
+                return await server.process_request(object(), FakeHTTPBodyRequest(path, local_headers, payload))
+
+            settings_code = "SMOKE" + secrets.token_hex(2).upper()
+            no_permissions = {key: False for key in settings_mod.PERMISSION_KEYS}
+            full_permissions = {key: True for key in settings_mod.PERMISSION_KEYS}
+            setup_payload = {
+                "access_code": settings_code,
+                "email_to": "alerts@example.invalid",
+                "resend_api_key": "re_smoke_test",
+                "permissions": no_permissions,
+                "alerts": {
+                    "A": {"enabled": True, "title": "Smoke Alert", "message": "Settings-backed alert"},
+                    "B": {"enabled": False, "title": "", "message": ""},
+                    "C": {"enabled": False, "title": "", "message": ""},
+                    "D": {"enabled": False, "title": "", "message": ""},
+                },
+            }
+            setup_response = await post_json("/api/settings/save", setup_payload)
+            if setup_response.status_code != 200:
+                fail(f"settings save returned {setup_response.status_code}, expected 200: {setup_response.body!r}")
+            if not server._settings_store().verify_access_code(settings_code):
+                fail("settings access code did not verify after save")
+            if server._settings_store().verify_access_code("wrong"):
+                fail("settings access code accepted a wrong code")
+            if server._settings_store().get_resend_api_key() != "re_smoke_test":
+                fail("settings Resend key did not round-trip through storage")
+            public_settings = server._settings_store().public_view()
+            if public_settings.get("access_code") != settings_code:
+                fail("settings access code was not visible in the local settings view")
+
+            bad_settings_response = await post_json("/api/settings/save", {
+                **setup_payload,
+                "admin_code": "wrong",
+                "access_code": "",
+            })
+            if bad_settings_response.status_code != 401:
+                fail(f"settings edit with wrong admin code returned {bad_settings_response.status_code}, expected 401")
+
+            def auth_with_settings_code():
+                auth_headers = Headers()
+                auth_headers["Host"] = "localhost:6173"
+                auth_headers["X-Zadoo-Code"] = settings_code
+                return auth_headers
+
+            denied_auth_response = await server.process_request("/api/auth", auth_with_settings_code())
+            if denied_auth_response.status_code != 200:
+                fail("settings code authentication failed")
+            denied_payload = json.loads(denied_auth_response.body.decode("utf-8"))
+            if denied_payload.get("mode") != "custom" or any(denied_payload.get("permissions", {}).values()):
+                fail(f"settings auth payload did not use single permission matrix: {denied_payload}")
+            denied_ws_headers = Headers()
+            denied_ws_headers["Host"] = "localhost:6173"
+            denied_ws_headers["Cookie"] = cookie_header_from_set_cookie(denied_auth_response.headers)
+            recorded_actions = []
+            original_process_event = server.process_event
+            try:
+                server.process_event = lambda event, websocket=None: recorded_actions.append(event.get("action"))
+                denied_ws = FakeWebSocket(denied_ws_headers, [json.dumps({"action": "click", "x": 0.5, "y": 0.5})])
+                await server.video_stream_handler(denied_ws)
+                if recorded_actions:
+                    fail(f"settings disabled permissions processed control actions: {recorded_actions}")
+                if not any("Forbidden" in str(item) for item in denied_ws.sent):
+                    fail("settings disabled permissions did not report forbidden control action")
+            finally:
+                server.process_event = original_process_event
+
+            denied_terminal_response = await server.process_request("/terminal.html", denied_ws_headers)
+            if denied_terminal_response.status_code != 403:
+                fail(f"disabled terminal route returned {denied_terminal_response.status_code}, expected 403")
+            if server._is_ws_authorized("/ssh", denied_ws_headers):
+                fail("disabled terminal websocket was authorized")
+
+            allow_response = await post_json("/api/settings/save", {
+                **setup_payload,
+                "admin_code": settings_code,
+                "access_code": settings_code,
+                "permissions": full_permissions,
+            })
+            if allow_response.status_code != 200:
+                fail(f"settings permission update returned {allow_response.status_code}, expected 200")
+            allowed_auth_response = await server.process_request("/api/auth", auth_with_settings_code())
+            allowed_payload = json.loads(allowed_auth_response.body.decode("utf-8"))
+            if allowed_auth_response.status_code != 200 or not all(allowed_payload.get("permissions", {}).values()):
+                fail(f"settings allowed auth payload was wrong: {allowed_payload}")
+            allowed_cookie = cookie_header_from_set_cookie(allowed_auth_response.headers)
+            allowed_csrf = allowed_payload.get("csrf_token")
+            allowed_csrf_headers = Headers()
+            allowed_csrf_headers["Host"] = "localhost:6173"
+            allowed_csrf_headers["Cookie"] = allowed_cookie
+            allowed_csrf_headers["X-Zadoo-CSRF"] = allowed_csrf
+
+            allowed_ws_headers = Headers()
+            allowed_ws_headers["Host"] = "localhost:6173"
+            allowed_ws_headers["Cookie"] = allowed_cookie
+            allowed_terminal_response = await server.process_request("/terminal.html", allowed_ws_headers)
+            if allowed_terminal_response.status_code != 200:
+                fail(f"enabled terminal route returned {allowed_terminal_response.status_code}, expected 200")
+            if not server._is_ws_authorized("/ssh", allowed_ws_headers):
+                fail("enabled terminal websocket was not authorized")
+
+            recorded_actions = []
+            original_process_event = server.process_event
+            try:
+                server.process_event = lambda event, websocket=None: recorded_actions.append(event.get("action"))
+                allowed_ws = FakeWebSocket(allowed_ws_headers, [json.dumps({"action": "click", "x": 0.5, "y": 0.5})])
+                await server.video_stream_handler(allowed_ws)
+                if recorded_actions != ["click"]:
+                    fail(f"settings enabled permissions did not process allowed control action: {recorded_actions}")
+            finally:
+                server.process_event = original_process_event
+
+            alert_video_ws = FakeSendWebSocket()
+            alert_input_ws = FakeSendWebSocket()
+            server.video_clients = {alert_video_ws}
+            server.input_clients = {alert_input_ws}
+            alert_response = await server.process_request("/api/alert?code=A", allowed_csrf_headers)
+            if alert_response.status_code != 200:
+                fail(f"settings alert route returned {alert_response.status_code}, expected 200")
+            await asyncio.sleep(0.05)
+            for name, ws in {"video": alert_video_ws, "input": alert_input_ws}.items():
+                if not ws.sent:
+                    fail(f"settings alert route did not send to {name} websocket")
+                alert_payload = json.loads(ws.sent[-1])
+                if alert_payload.get("type") != "controller_alert" or not alert_payload.get("id"):
+                    fail(f"settings alert payload for {name} websocket was invalid: {alert_payload}")
+            server.video_clients = set()
+            server.input_clients = set()
 
             image_ws = FakeSendWebSocket()
             too_large_png = base64.b64encode(b"123456789").decode("ascii")
@@ -542,6 +759,11 @@ def assert_imports() -> None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        try:
+            settings_mod._STORE = None
+        except Exception:
+            pass
+        temp_settings.cleanup()
 
     ok("imports, dependency flags, templates, assets, server instantiation, and in-process routes")
 
@@ -582,9 +804,9 @@ def assert_live(base_url: str) -> None:
     if status != 403:
         fail(f"live unauthenticated public-url returned status={status}, expected 403")
 
-    live_auth_code = os.environ.get("ZADOO_SMOKE_AUTH_CODE") or os.environ.get("CODE_FULL")
+    live_auth_code = os.environ.get("ZADOO_SMOKE_AUTH_CODE") or os.environ.get("ZADOO_ACCESS_CODE")
     if not live_auth_code:
-        fail("live checks require CODE_FULL or ZADOO_SMOKE_AUTH_CODE because no hardcoded auth default exists")
+        fail("live checks require ZADOO_ACCESS_CODE or ZADOO_SMOKE_AUTH_CODE because no hardcoded auth default exists")
 
     legacy_url = base_url.rstrip("/") + "/api/auth"
     legacy_request = urllib.request.Request(legacy_url, headers={"X-Zadoo-Code": _legacy_auth_strings()[0]})
@@ -598,7 +820,8 @@ def assert_live(base_url: str) -> None:
         fail(f"live legacy auth returned status={legacy_status}, expected 401")
 
     auth_url = base_url.rstrip("/") + "/api/auth"
-    auth_request = urllib.request.Request(auth_url, headers={"X-Zadoo-Code": live_auth_code})
+    live_auth_headers = {"X-Zadoo-Code": live_auth_code}
+    auth_request = urllib.request.Request(auth_url, headers=live_auth_headers)
     try:
         with urllib.request.urlopen(auth_request, timeout=8) as response:
             auth_status = response.status

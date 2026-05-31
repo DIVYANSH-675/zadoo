@@ -217,7 +217,7 @@ def _read_directshow_moniker(moniker: Any, property_bag_type: Any) -> dict[str, 
     except Exception:
         return {}
     item: dict[str, Any] = {}
-    for prop, field in (("FriendlyName", "name"), ("Description", "description"), ("DevicePath", "device_path")):
+    for prop, field in (("FriendlyName", "name"), ("DevicePath", "device_path")):
         try:
             value = _clean_name(bag.Read(prop, pErrorLog=None))
             if value:

@@ -42,6 +42,7 @@
           try{
             const res = await fetch('/api/alert?code='+encodeURIComponent(code), {
               cache: 'no-store',
+              credentials: 'same-origin',
               headers: { 'X-Zadoo-CSRF': csrfToken() }
             });
             ok.textContent = res.ok ? ' Sent '+code : ' Failed ('+res.status+')';

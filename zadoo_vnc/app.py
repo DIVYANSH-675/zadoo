@@ -10,11 +10,15 @@ import platform
 import signal
 import subprocess
 import sys
+import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 
 from .config import _load_dotenv
 from .logging_utils import _log_fallback, _setup_logging_to_file
 from .network import get_local_ip
+from .settings import get_settings_store
 
 
 def configure_event_loop_policy():
@@ -68,7 +72,7 @@ def configure_logging():
 
 
 def install_startup_task():
-    task_name = "Windows Graphic Utility Startup"
+    task_name = "Zadoo"
     exe_path = sys.executable
     check_cmd = ["schtasks", "/query", "/tn", task_name]
     result = subprocess.run(check_cmd, capture_output=True, text=True)
@@ -103,6 +107,79 @@ def install_startup_task():
                 print(f"Startup task installation failed (exit code {exc.returncode}). Run as Administrator or set ZADOO_DISABLE_STARTUP_TASK=1.")
         except Exception:
             pass
+
+
+def _local_url(path="/"):
+    return f"http://127.0.0.1:6173{path}"
+
+
+def _local_server_running():
+    try:
+        with urllib.request.urlopen(_local_url("/api/settings/status"), timeout=0.6) as response:
+            return int(getattr(response, "status", 0) or 0) < 500
+    except Exception:
+        return False
+
+
+def _open_local_page(path="/"):
+    try:
+        webbrowser.open(_local_url(path))
+    except Exception:
+        pass
+
+
+def _zadoo_pids_on_port(port):
+    if os.name != "nt":
+        return []
+    command = (
+        f"$pids=(Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue | "
+        "Select-Object -ExpandProperty OwningProcess -Unique); "
+        "foreach($p in $pids){ "
+        "$proc=Get-CimInstance Win32_Process -Filter \"ProcessId=$p\" -ErrorAction SilentlyContinue; "
+        "if($proc){ [pscustomobject]@{ProcessId=$proc.ProcessId;CommandLine=$proc.CommandLine;ExecutablePath=$proc.ExecutablePath} } "
+        "} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            return []
+        import json
+
+        data = json.loads(result.stdout)
+        rows = data if isinstance(data, list) else [data]
+        pids = []
+        for row in rows:
+            cmd = str(row.get("CommandLine") or row.get("ExecutablePath") or "").lower()
+            pid = int(row.get("ProcessId") or 0)
+            if pid > 0 and ("zadoo" in cmd or "zadoo_vnc" in cmd):
+                pids.append(pid)
+        return pids
+    except Exception:
+        return []
+
+
+def _stop_existing_zadoo_on_port(port):
+    stopped = False
+    for pid in _zadoo_pids_on_port(port):
+        if pid == os.getpid():
+            continue
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            stopped = True
+        except Exception:
+            pass
+    return stopped
 
 
 class ProcessProtector:
@@ -142,34 +219,28 @@ class ProcessProtector:
         self.protected = False
 
 
-def _parse_port(value, default=None):
-    try:
-        port = int(str(value).strip())
-        if 1 <= port <= 65535:
-            return port
-    except Exception:
-        pass
-    return default
-
-
-def choose_web_port(desired_web_port=6173):
-    return _parse_port(os.environ.get("ZADOO_PORT"), desired_web_port)
-
-
-def choose_secondary_port(primary_port):
-    port = _parse_port(os.environ.get("ZADOO_SECONDARY_PORT"), None)
-    if port == primary_port:
-        print("Ignoring ZADOO_SECONDARY_PORT because it matches ZADOO_PORT")
-        return None
-    return port
-
-
 def main():
     configure_event_loop_policy()
     configure_stdout_encoding()
     maybe_hide_console()
     _load_dotenv()
     configure_logging()
+    args = {arg.lower() for arg in sys.argv[1:]}
+    if "--settings" in args:
+        from .settings_window import run_settings_window
+
+        run_settings_window()
+        return
+    if "--open" in args and not get_settings_store().configured():
+        from .settings_window import run_settings_window
+
+        run_settings_window()
+        return
+
+    if "--open" in args and _local_server_running():
+        print("Existing Zadoo instance detected; restarting it...")
+        _stop_existing_zadoo_on_port(6173)
+        time.sleep(0.8)
 
     disable_startup_task = os.environ.get("ZADOO_DISABLE_STARTUP_TASK", "").strip().lower() in {
         "1",
@@ -188,40 +259,46 @@ def main():
     }
     _protector = ProcessProtector() if use_process_protector else None
 
-    from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_PYAUTOGUI
+    from .dependencies import HAS_PIL, HAS_PYAUTOGUI
     from .screen_capture import ScreenCapturer
     from .server import VNCServer
     from .tunnel import CloudflareTunnelManager
 
-    if not (HAS_PYAUTOGUI and (HAS_DXCAM or HAS_BETTERCAM)):
-        print("Missing critical dependencies: pyautogui plus dxcam or bettercam are required")
+    if not (HAS_PYAUTOGUI and HAS_PIL):
+        print("Missing critical dependencies: pyautogui and Pillow are required")
         sys.exit(1)
 
     local_ip = get_local_ip()
-    desired_web_port = choose_web_port(6173)
-    secondary_port = choose_secondary_port(desired_web_port)
+    web_port = 6173
+    if _local_server_running():
+        print("Existing Zadoo instance detected; restarting it...")
+        _stop_existing_zadoo_on_port(web_port)
+    elif _zadoo_pids_on_port(web_port):
+        _stop_existing_zadoo_on_port(web_port)
 
-    use_tunnel = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
+    settings_store = get_settings_store()
+    setup_complete = settings_store.configured()
+    use_tunnel = setup_complete and os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() not in {"1", "true", "yes", "on"}
     tunnel_manager = None
     if use_tunnel:
-        tunnel_manager = CloudflareTunnelManager(primary_port=desired_web_port)
+        tunnel_manager = CloudflareTunnelManager(primary_port=web_port)
 
     print(f"\n{'=' * 60}")
     print("COMPLETE VNC WITH TUNNEL")
     print(f"System: {platform.system()} {platform.release()}")
-    print(f"Local: http://localhost:{desired_web_port}")
-    print(f"Network: http://{local_ip}:{desired_web_port}")
-    if secondary_port:
-        print(f"Secondary: http://localhost:{secondary_port}")
+    print(f"Local: http://localhost:{web_port}")
+    print(f"Network: http://{local_ip}:{web_port}")
     if use_tunnel and tunnel_manager:
-        print(f"Tunnel port: {desired_web_port}")
+        print(f"Tunnel port: {web_port}")
+    elif not setup_complete:
+        print("Tunnel disabled until first-launch setup is completed")
     print("To stop: Press Ctrl+C")
     print("=" * 60)
 
-    vnc_server = VNCServer(desired_web_port, secondary_port)
+    vnc_server = VNCServer(web_port)
     vnc_server.enable_tunnel = use_tunnel
     if tunnel_manager:
-        tunnel_manager.email_port = secondary_port or desired_web_port
+        tunnel_manager.email_port = web_port
         print(f"Email will include port: {tunnel_manager.email_port}")
         vnc_server.set_tunnel_manager(tunnel_manager)
         print("Tunnel will launch after the local server binds successfully...")
@@ -235,11 +312,14 @@ def main():
     capturer.start()
 
     try:
+        if "--open" in args:
+            threading = __import__("threading")
+            threading.Timer(1.2, lambda: _open_local_page("/")).start()
         asyncio.run(vnc_server.start_server())
     except OSError as e:
         err_no = getattr(e, "errno", None)
         if err_no == 10048:
-            print(f"Bind failed: port {vnc_server.port} is already in use. Set ZADOO_PORT to another port.")
+            print(f"Bind failed: fixed port {vnc_server.port} is already in use.")
         else:
             raise
     except (KeyboardInterrupt, SystemExit):

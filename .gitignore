@@ -8,7 +8,11 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+.build_envs/
+installer-output/
 *.egg-info/
+*.pfx
+*.p12
 stop_vnc.flag
 vnc_debug.log
 zadoo_run_*.err.log

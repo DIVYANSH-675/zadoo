@@ -15,13 +15,15 @@ from .input_control import InputControlMixin
 from .logging_utils import _log_fallback
 from .media import MediaMixin
 from .routes import RoutesMixin
+from .settings import DEFAULT_PERMISSIONS, get_settings_store
 from .streaming import AdaptiveStreamController, detect_encoder_capabilities
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
-    def __init__(self, port, secondary_port=None):
+    def __init__(self, port):
         self.port = port
-        self.secondary_port = secondary_port
+        self.settings_store = get_settings_store()
+        self.runtime_settings = self.settings_store.load()
         self.tunnel_manager = None
         self.enable_tunnel = True
         self.screen_capturer = None
@@ -39,9 +41,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.input_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_subscribers: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_broadcast_enabled = False
-        self.audio_thread = None
         self.audio_queue = queue.Queue(maxsize=10)
-        self.audio_running = False
         self.stop_event = None
         self.loop = None
         self.frame_ready_event = None
@@ -64,18 +64,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.mic_device_name = "System Default"
         # Typematic repeat state for non-modifier keys
         self._repeat_keys = {}
-        # Alert presets for host controls
-        self.alert_presets = {
-            'A': ("Heads up", "Please check this now."),
-            'B': ("Break", "Take a short break."),
-            'C': ("Call", "Join the call."),
-            'D': ("Stop", "Stop and review immediately."),
-        }
-        # Allow overriding alert presets from environment / .env
-        try:
-            self._load_alert_presets_from_env()
-        except Exception:
-            pass
+        # Alert presets are user-defined. Blank slots are disabled.
+        self.alert_presets = {}
+        self._load_alert_presets_from_settings()
         # Custom type-to-alert capture state
         self.custom_alert_active = False
         self.custom_alert_buf = []
@@ -83,13 +74,49 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._custom_alert_cooldown_until = 0.0
         self.auth_sessions = {}
         self._auth_failures = {}
-        self._runtime_auth_codes = {}
+        self._runtime_auth_code = ""
         self._runtime_auth_generated = False
         self._video_send_tasks = {}
         self._video_skipped_sends = 0
         self._servers = []
         self._hotkey_lock = threading.RLock()
         self.live_typing_text_by_client = {}
+
+    def _load_alert_presets_from_settings(self):
+        try:
+            settings = self.settings_store.load(reload=True)
+            self.runtime_settings = settings
+            presets = {}
+            for code, item in (settings.get("alerts") or {}).items():
+                if not isinstance(item, dict) or not item.get("enabled"):
+                    continue
+                title = str(item.get("title") or "").strip()
+                message = str(item.get("message") or "").strip()
+                if title or message:
+                    presets[str(code).upper()] = (title or "Alert", message)
+            self.alert_presets = presets
+            return presets
+        except Exception:
+            self.alert_presets = {}
+            return {}
+
+    def _settings_configured(self):
+        try:
+            return bool(self.settings_store.configured())
+        except Exception:
+            return False
+
+    def _profile_permissions(self, profile_id):
+        try:
+            settings = self.settings_store.load(reload=True)
+            profile = (settings.get("profiles") or {}).get(str(profile_id or ""))
+            if isinstance(profile, dict):
+                perms = dict(DEFAULT_PERMISSIONS)
+                perms.update({k: bool(v) for k, v in (profile.get("permissions") or {}).items() if k in perms})
+                return perms
+        except Exception:
+            pass
+        return dict(DEFAULT_PERMISSIONS)
 
     async def start_server(self):
         """Start WebSocket servers."""
@@ -115,15 +142,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         )
 
         servers = [primary_server]
-        if self.secondary_port:
-            secondary_server = await websockets.serve(
-                self.main_handler,
-                "0.0.0.0",
-                self.secondary_port,
-                process_request=self.process_request,
-                compression=None,
-            )
-            servers.append(secondary_server)
         self._servers = servers
 
         # Start host hotkey capture on server start (A/B/C/D)
@@ -135,7 +153,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             print(f" Keyboard hook failed to initialize: {e}")
         # If hook isn't active, start fallback poller
         try:
-            if not hook_started or not getattr(self, 'keyboard_hook_active', False):
+            if not hook_started or not getattr(self, 'keyboard_hook_active', False) or not getattr(self, '_alert_hotkeys_active', False):
                 _log_fallback("host_hotkeys", "poller", "keyboard_hook_inactive")
                 self.start_host_hotkey_poller()
                 print(" Fallback hotkey poller started (A/B/C/D)")
@@ -168,8 +186,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # Start cursor broadcasting task
         cursor_broadcast_task = asyncio.create_task(self.broadcast_cursor_position())
         
-        ports = ", ".join(str(port) for port in (self.port, self.secondary_port) if port)
-        print(f" VNC server running on port(s): {ports}")
+        print(f" VNC server running on port: {self.port}")
         print(" Video streaming started")
         
         # Keep servers running until stop() or task cancellation requests shutdown.

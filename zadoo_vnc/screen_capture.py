@@ -7,7 +7,7 @@ import os
 import threading
 import time
 
-from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_IMAGECODECS, HAS_PIL, Image, bettercam, dxcam, imagecodecs, np
+from .dependencies import HAS_BETTERCAM, HAS_DXCAM, HAS_IMAGECODECS, HAS_PIL, HAS_PYAUTOGUI, Image, bettercam, dxcam, imagecodecs, np, pyautogui
 from .logging_utils import _log_fallback
 
 
@@ -84,6 +84,10 @@ class ScreenCapturer(threading.Thread):
             "dx": "dxcam",
             "dx_cam": "dxcam",
             "dx-cam": "dxcam",
+            "pil": "pyautogui",
+            "pillow": "pyautogui",
+            "pyauto": "pyautogui",
+            "py_auto_gui": "pyautogui",
         }
         return aliases.get(method, method)
 
@@ -93,6 +97,8 @@ class ScreenCapturer(threading.Thread):
             methods.append("bettercam")
         if HAS_DXCAM:
             methods.append("dxcam")
+        if HAS_PYAUTOGUI and HAS_PIL:
+            methods.append("pyautogui")
         return methods
 
     def _preferred_capture_method(self):
@@ -256,6 +262,20 @@ class ScreenCapturer(threading.Thread):
                 _log_fallback("screen_capture.explicit_bettercam", "no_frame", str(exc), exc)
                 logging.exception("BetterCam explicit capture threw exception")
                 self._record_backend_failure("bettercam")
+                return None
+
+        if method == "pyautogui":
+            try:
+                frame = self._grab_screen_pyautogui()
+                if frame is not None:
+                    self.active_capture_method = "pyautogui"
+                else:
+                    self._record_backend_no_frame("pyautogui")
+                return frame
+            except Exception as exc:
+                _log_fallback("screen_capture.pyautogui", "no_frame", str(exc), exc)
+                logging.warning("PyAutoGUI capture failed", exc_info=True)
+                self._record_backend_failure("pyautogui")
                 return None
         
         logging.error("Screen capture method '%s' is unsupported.", method)
@@ -500,6 +520,23 @@ class ScreenCapturer(threading.Thread):
             self._disable_backend("bettercam", seconds=45)
             return None
 
+    def _grab_screen_pyautogui(self):
+        """Fallback capture using PyAutoGUI/Pillow."""
+        if not HAS_PYAUTOGUI or pyautogui is None:
+            return None
+        image = pyautogui.screenshot()
+        try:
+            if HAS_PIL and hasattr(image, "convert"):
+                image = image.convert("RGB")
+            if np is not None:
+                arr = np.array(image)
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    arr = arr[:, :, :3]
+                return arr
+        except Exception:
+            logging.debug("PyAutoGUI screenshot normalization failed", exc_info=True)
+        return image
+
     def _release_dxcam(self):
         cam = self.dxcam_camera
         self.dxcam_camera = None
@@ -628,6 +665,7 @@ class ScreenCapturer(threading.Thread):
         logging.debug("Checking available capture methods")
         logging.debug("HAS_DXCAM=%s dxcam_camera=%s", HAS_DXCAM, self.dxcam_camera is not None)
         logging.debug("HAS_BETTERCAM=%s bettercam_camera=%s", HAS_BETTERCAM, self.bettercam_camera is not None)
+        logging.debug("HAS_PYAUTOGUI=%s", HAS_PYAUTOGUI)
         logging.debug("Available capture methods: %s", methods)
         return methods
 
