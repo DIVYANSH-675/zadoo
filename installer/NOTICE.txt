@@ -1,0 +1,5 @@
+Zadoo Security Notice
+
+Zadoo lets a person with a valid access code and share link view this Windows PC and, depending on the profile you create, control mouse, keyboard, clipboard, audio, microphone, camera, terminal, snapshots, tunnel refresh, and remote alerts.
+
+Only install and run Zadoo on computers you own or are authorized to manage. Keep your access code and share links private. Revoke links from Zadoo Settings when they should no longer work.

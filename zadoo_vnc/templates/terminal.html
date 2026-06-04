@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Terminal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: #0c0c0c;
+    color: #cccccc;
+    font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  }
+
+  #term {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0c0c0c;
+  }
+
+  #terminal-load-error {
+    display: none;
+    padding: 12px;
+    white-space: pre-wrap;
+    color: #f48771;
+    background: #0c0c0c;
+    font: 14px Consolas, "Cascadia Mono", "Courier New", monospace;
+  }
+
+  .xterm {
+    width: 100%;
+    height: 100%;
+    padding: 0;
+  }
+
+  .xterm .xterm-viewport {
+    background: #0c0c0c !important;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .xterm .xterm-viewport::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  .xterm .xterm-screen {
+    background: #0c0c0c;
+  }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<div id="terminal-load-error">Terminal renderer failed to load.</div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+(function () {
+  const termEl = document.getElementById('term');
+  const errorEl = document.getElementById('terminal-load-error');
+
+  function showLoadError(message) {
+    termEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    errorEl.textContent = message || 'Terminal renderer failed to load.';
+  }
+
+  if (!window.Terminal || !window.FitAddon) {
+    showLoadError('Terminal renderer failed to load.');
+    return;
+  }
+
+  const term = new window.Terminal({
+    cols: 120,
+    rows: 34,
+    convertEol: false,
+    cursorBlink: true,
+    cursorStyle: 'block',
+    disableStdin: false,
+    drawBoldTextInBrightColors: true,
+    fontFamily: 'Consolas, "Cascadia Mono", "Courier New", monospace',
+    fontSize: 16,
+    fontWeight: 'normal',
+    fontWeightBold: 'bold',
+    letterSpacing: 0,
+    lineHeight: 1,
+    scrollback: 5000,
+    windowsMode: true,
+    theme: {
+      background: '#0c0c0c',
+      foreground: '#cccccc',
+      cursor: '#ffffff',
+      cursorAccent: '#0c0c0c',
+      selectionBackground: '#264f78',
+      black: '#0c0c0c',
+      red: '#c50f1f',
+      green: '#13a10e',
+      yellow: '#c19c00',
+      blue: '#0037da',
+      magenta: '#881798',
+      cyan: '#3a96dd',
+      white: '#cccccc',
+      brightBlack: '#767676',
+      brightRed: '#e74856',
+      brightGreen: '#16c60c',
+      brightYellow: '#f9f1a5',
+      brightBlue: '#3b78ff',
+      brightMagenta: '#b4009e',
+      brightCyan: '#61d6d6',
+      brightWhite: '#f2f2f2'
+    }
+  });
+
+  const fitAddon = new window.FitAddon.FitAddon();
+  let ws = null;
+  let lastCols = 0;
+  let lastRows = 0;
+  const pendingInput = [];
+
+  term.loadAddon(fitAddon);
+  term.open(termEl);
+  term.focus();
+
+  function fitAndReport(force) {
+    try {
+      fitAddon.fit();
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (force || term.cols !== lastCols || term.rows !== lastRows) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    } catch (_) {}
+  }
+
+  function sendInput(data) {
+    const normalized = String(data || '');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(normalized);
+    } else {
+      pendingInput.push(normalized);
+    }
+  }
+
+  function flushPendingInput() {
+    while (pendingInput.length && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(pendingInput.shift());
+    }
+  }
+
+  function focusTerminal() {
+    try { term.focus(); } catch (_) {}
+  }
+
+  function sendControlCode(key) {
+    if (!key || key.length !== 1) return false;
+    const code = key.toUpperCase().charCodeAt(0);
+    if (code < 65 || code > 90) return false;
+    sendInput(String.fromCharCode(code - 64));
+    return true;
+  }
+
+  async function pasteClipboardText() {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return;
+      const text = await navigator.clipboard.readText();
+      if (text) sendInput(text.replace(/\r?\n/g, '\r'));
+    } catch (_) {}
+  }
+
+  function connectShell() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ssh`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function () {
+      fitAndReport(true);
+      flushPendingInput();
+      focusTerminal();
+    };
+
+    ws.onmessage = function (event) {
+      let data = event.data;
+      if (data instanceof ArrayBuffer) {
+        data = new TextDecoder('utf-8').decode(new Uint8Array(data));
+      }
+      term.write(String(data || ''));
+    };
+
+    ws.onerror = function () {
+      term.write('\r\n\x1b[91mTerminal connection error.\x1b[0m\r\n');
+    };
+
+    ws.onclose = function () {
+      term.write('\r\n\x1b[90mTerminal disconnected.\x1b[0m\r\n');
+    };
+  }
+
+  term.attachCustomKeyEventHandler(function (event) {
+    if (!event || event.type !== 'keydown') return true;
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+      const key = String(event.key || '').toLowerCase();
+      if (event.shiftKey && key === 'c') {
+        try {
+          const selected = term.getSelection();
+          if (selected && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(selected).catch(function () {});
+          }
+        } catch (_) {}
+        event.preventDefault();
+        return false;
+      }
+      if ((event.shiftKey && key === 'v') || (!event.shiftKey && key === 'v')) {
+        pasteClipboardText();
+        event.preventDefault();
+        return false;
+      }
+      if (!event.shiftKey && sendControlCode(key)) {
+        event.preventDefault();
+        return false;
+      }
+    }
+    return true;
+  });
+
+  term.onData(sendInput);
+  termEl.addEventListener('pointerdown', function () { setTimeout(focusTerminal, 0); });
+  termEl.addEventListener('mousedown', function () { setTimeout(focusTerminal, 0); });
+  window.addEventListener('focus', focusTerminal);
+  window.addEventListener('resize', function () { fitAndReport(false); });
+  window.addEventListener('message', function (event) {
+    if (event.data && event.data.type === 'fit') {
+      fitAndReport(false);
+      focusTerminal();
+    } else if (event.data && event.data.type === 'focus') {
+      focusTerminal();
+    }
+  });
+
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(function () { fitAndReport(false); });
+    observer.observe(termEl);
+  }
+
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { fitAndReport(false); }).catch(function () {});
+  }
+
+  requestAnimationFrame(function () {
+    fitAndReport(false);
+    connectShell();
+  });
+})();
+</script>
+</body>
+</html>

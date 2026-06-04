@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zadoo-vnc"
+version = "1.0.0"
+description = "Windows-focused web VNC runtime with screen capture, input, clipboard, and Cloudflare tunnel support."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "websockets==15.0.1",
+  "mss==10.2.0",
+  "PyAutoGUI==0.9.54",
+  "Pillow==12.0.0",
+  "numpy==2.2.6",
+  "pyperclip==1.11.0",
+  "keyboard==0.13.5",
+  "pywin32==311; platform_system == 'Windows'",
+  "python-dotenv==1.2.1",
+  "pygrabber==0.2; platform_system == 'Windows'",
+  "av==16.1.0",
+]
+
+[project.optional-dependencies]
+media = ["sounddevice==0.5.2", "soundcard==0.4.6", "av==16.1.0"]
+email = ["resend==2.30.0"]
+perf = ["dxcam==0.3.0", "opencv-python==4.13.0.92", "fast-ctypes-screenshots==0.10", "bettercam==1.0.0", "imagecodecs==2026.3.6"]
+ssh = ["paramiko==4.0.0", "pywinpty==3.0.3; platform_system == 'Windows'"]
+
+[project.scripts]
+zadoo-vnc = "zadoo_vnc.app:main"
+
+[tool.setuptools]
+packages = ["zadoo_vnc"]
+
+[tool.setuptools.package-data]
+zadoo_vnc = ["templates/*.html"]

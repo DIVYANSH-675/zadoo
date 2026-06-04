@@ -1,0 +1,21 @@
+websockets==15.0.1
+mss==10.2.0
+PyAutoGUI==0.9.54
+Pillow==12.0.0
+numpy==2.2.6
+pyperclip==1.11.0
+keyboard==0.13.5
+pywin32==311; platform_system == "Windows"
+python-dotenv==1.2.1
+pygrabber==0.2; platform_system == "Windows"
+av==16.1.0
+fast-ctypes-screenshots==0.10
+opencv-python==4.13.0.92
+dxcam==0.3.0
+bettercam==1.0.0
+imagecodecs==2026.3.6
+sounddevice==0.5.2
+soundcard==0.4.6
+paramiko==4.0.0
+pywinpty==3.0.3; platform_system == "Windows"
+resend==2.30.0
