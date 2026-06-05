@@ -84,10 +84,10 @@ class RoutesMixin:
         "/api/list-mics": "mic",
         "/host-controls": "remote_alerts",
         "/api/alert": "remote_alerts",
-        "/api/local/credits": "view",
-        "/api/local/profile": "view",
-        "/api/local/topup-order": "view",
-        "/api/local/topup-verify": "view",
+        "/api/local/credits": "billing",
+        "/api/local/profile": "billing",
+        "/api/local/topup-order": "billing",
+        "/api/local/topup-verify": "billing",
     }
     CSRF_HTTP_FEATURES = {
         "advanced_video",
@@ -336,6 +336,10 @@ class RoutesMixin:
         session = self._session_for_headers(request_headers)
         if not isinstance(session, dict):
             return False
+        # Billing/top-up routes must work for any authenticated viewer even when out of
+        # credits — that's exactly when the user needs to add balance. No entitlement gate.
+        if feature == "billing":
+            return True
         # When the device is signed in (cloud mode) or setup is complete, the Zadoo
         # Settings permission matrix is the SINGLE source of truth for what a connected
         # viewer may do — unchecking a permission must actually disable it. Role/access

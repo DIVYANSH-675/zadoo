@@ -266,33 +266,36 @@ def main():
 
     settings_store = get_settings_store()
     setup_complete = settings_store.configured()
+    signed_in = bool(settings_store.get_device_token())
     tunnel_disabled_by_env = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() in {"1", "true", "yes", "on"}
     cloud_ready = False
     cloud_block_reason = ""
-    if setup_complete:
-        if not settings_store.get_device_token():
-            cloud_block_reason = "Tunnel disabled until Zadoo is signed in"
-        else:
-            try:
-                from .saas import ZadooCloudClient
+    # The tunnel / public link is gated on the device being SIGNED IN (cloud mode),
+    # NOT on the optional setup_complete flag. Otherwise a signed-in user who never
+    # saved settings would never get a public link.
+    if not signed_in:
+        cloud_block_reason = "Tunnel disabled until Zadoo is signed in"
+    else:
+        try:
+            from .saas import ZadooCloudClient
 
-                cloud_result = ZadooCloudClient(settings_store).entitlement()
-                entitlement = (cloud_result.get("entitlement") if isinstance(cloud_result, dict) else None) or {}
-                if not entitlement:
-                    entitlement = settings_store.load(reload=True).get("entitlement_cache") or {}
-                if entitlement.get("revoked"):
-                    cloud_block_reason = "Tunnel disabled because this device was revoked"
-                elif entitlement.get("allowed"):
-                    cloud_ready = True
-                else:
-                    cloud_block_reason = str(entitlement.get("reason") or (cloud_result.get("error") if isinstance(cloud_result, dict) else "") or "Tunnel disabled until billing is active")
-            except Exception as exc:
+            cloud_result = ZadooCloudClient(settings_store).entitlement()
+            entitlement = (cloud_result.get("entitlement") if isinstance(cloud_result, dict) else None) or {}
+            if not entitlement:
                 entitlement = settings_store.load(reload=True).get("entitlement_cache") or {}
-                if isinstance(entitlement, dict) and entitlement.get("allowed") and not entitlement.get("revoked"):
-                    cloud_ready = True
-                else:
-                    cloud_block_reason = str(exc) or "Tunnel disabled until entitlement can be checked"
-    use_tunnel = setup_complete and cloud_ready and not tunnel_disabled_by_env
+            if entitlement.get("revoked"):
+                cloud_block_reason = "Tunnel disabled because this device was revoked"
+            elif entitlement.get("allowed"):
+                cloud_ready = True
+            else:
+                cloud_block_reason = str(entitlement.get("reason") or (cloud_result.get("error") if isinstance(cloud_result, dict) else "") or "Tunnel disabled until billing is active")
+        except Exception as exc:
+            entitlement = settings_store.load(reload=True).get("entitlement_cache") or {}
+            if isinstance(entitlement, dict) and entitlement.get("allowed") and not entitlement.get("revoked"):
+                cloud_ready = True
+            else:
+                cloud_block_reason = str(exc) or "Tunnel disabled until entitlement can be checked"
+    use_tunnel = signed_in and cloud_ready and not tunnel_disabled_by_env
     tunnel_manager = None
     if use_tunnel:
         tunnel_manager = CloudflareTunnelManager(primary_port=web_port)

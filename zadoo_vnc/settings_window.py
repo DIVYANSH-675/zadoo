@@ -967,6 +967,14 @@ class ZadooSettingsWindow:
                 return
         except Exception:
             pass  # Don't block start on network error — let the runtime handle it
+        # If Zadoo is already running, do NOT relaunch it. Relaunching spawns a
+        # process that taskkill-/T's the existing runtime tree, which can close THIS
+        # Settings window if it was opened from the runtime. Just fetch the link.
+        if _local_server_running():
+            self.public_url_label.configure(text="Fetching public link…", foreground=MUTED)
+            self._set_status("Zadoo is already running — fetching the public link…")
+            self._begin_public_url_autopoll()
+            return
         try:
             subprocess.Popen(
                 _runtime_command(),
