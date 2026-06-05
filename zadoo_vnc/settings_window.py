@@ -268,6 +268,23 @@ class ZadooSettingsWindow:
         self.email_state.grid(row=4, column=0, sticky="w")
         form.columnconfigure(0, weight=1)
 
+        # ── Remote access (public link + start) ───────────────────────
+        self.public_url_frame = ttk.Frame(self.tab_access, style="Surface.TFrame")
+        self.public_url_frame.pack(fill="x", pady=(18, 0))
+        ttk.Label(self.public_url_frame, text="Public link", style="Surface.TLabel").pack(anchor="w")
+        url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
+        url_row.pack(fill="x", pady=(2, 6))
+        self.public_url_label = ttk.Label(url_row, text="Zadoo not running", style="Muted.TLabel",
+                                          font=("Segoe UI", 9), cursor="hand2")
+        self.public_url_label.pack(side=LEFT, fill="x", expand=True)
+        self.public_url_label.bind("<Button-1>", lambda _e: self._open_public_url())
+        self.start_btn = ttk.Button(url_row, text="Start", command=self.start_zadoo, style="Primary.TButton")
+        self.start_btn.pack(side=LEFT, padx=(6, 0))
+        ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(self.public_url_frame,
+                  text="Click Start to launch Zadoo — the public link appears here, then click it to open.",
+                  style="Muted.TLabel", font=("Segoe UI", 8)).pack(anchor="w")
+
     def _build_account_tab(self) -> None:
         self.tab_account = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
         self.tabs.add(self.tab_account, text="Account")
@@ -319,19 +336,6 @@ class ZadooSettingsWindow:
         ttk.Button(btn_row, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").pack(side=LEFT, padx=(8, 0))
         ttk.Button(btn_row, text="Check sign-in", command=self.poll_activation).pack(side=LEFT, padx=(8, 0))
 
-        # ── Public URL Container ──────────────────────────────────────
-        self.public_url_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
-        ttk.Label(self.public_url_frame, text="Public URL", style="Surface.TLabel").pack(anchor="w")
-
-        url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
-        url_row.pack(fill="x", pady=(2, 10))
-        self.public_url_label = ttk.Label(url_row, text="Zadoo not running", style="Muted.TLabel",
-                                          font=("Segoe UI", 9))
-        self.public_url_label.pack(side=LEFT, fill="x", expand=True)
-        self.open_url_btn = ttk.Button(url_row, text="Open", command=self._open_public_url, state="disabled")
-        self.open_url_btn.pack(side=LEFT, padx=(6, 0))
-        ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
-
         # ── Credits ───────────────────────────────────────────────────
         self.credits_card = ttk.LabelFrame(self.tab_account, text="Credits", style="Card.TLabelframe")
         self.credits_included_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
@@ -347,8 +351,9 @@ class ZadooSettingsWindow:
 
         credits_btns = ttk.Frame(self.credits_card, style="Surface.TFrame")
         credits_btns.pack(anchor="w", pady=(8, 0))
-        ttk.Button(credits_btns, text="Add Credits →", command=self._open_pricing,
+        ttk.Button(credits_btns, text="Add Balance →", command=self._add_balance,
                    style="Primary.TButton").pack(side=LEFT)
+        ttk.Button(credits_btns, text="Add Credits →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
         ttk.Button(credits_btns, text="Refresh Credits", command=self._refresh_credits).pack(side=LEFT, padx=(8, 0))
         ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
 
@@ -487,13 +492,11 @@ class ZadooSettingsWindow:
         self.profile_card.pack_forget()
         self.device_name_frame.pack_forget()
         self.signin_frame.pack_forget()
-        self.public_url_frame.pack_forget()
         self.credits_card.pack_forget()
 
         if is_signed_in:
             self.profile_card.pack(fill="x", pady=(0, 10))
             self.device_name_frame.pack(fill="x", pady=(0, 10))
-            self.public_url_frame.pack(fill="x", pady=(0, 10))
             self.credits_card.pack(fill="x", pady=(4, 0))
         else:
             self.device_name_frame.pack(fill="x", pady=(0, 10))
@@ -548,10 +551,8 @@ class ZadooSettingsWindow:
         total = int(credits.get("totalMinutesRemaining") or (included + wallet))
         plan = str(credits.get("planCode") or "")
 
-        # "Open" is available whenever the account has a recharge (remaining minutes / active plan).
         allowed_flag = entitlement.get("allowed", credits.get("allowed"))
         self._has_credits = bool(total > 0 or allowed_flag is True)
-        self.open_url_btn.configure(state="normal" if self._has_credits else "disabled")
 
         if credits:
             self.credits_included_label.configure(text=f"Included: {included} min")
@@ -622,69 +623,37 @@ class ZadooSettingsWindow:
             pass
 
     def _open_public_url(self) -> None:
-        # "Open" requires a recharge (remaining minutes / active plan).
-        if not self._has_credits:
-            messagebox.showinfo(
-                "No Credits",
-                "You have no remaining minutes.\n\nClick \"Add Credits →\" to recharge before starting a session."
-            )
-            return
-
-        # If a URL is already known, just open it.
+        # Clicking the public link opens it in the browser; if there's none yet, hint to Start.
         pub_url = str(self.data.get("public_url") or "").strip()
         if pub_url:
             webbrowser.open(pub_url)
-            return
+        elif not _local_server_running():
+            self._set_status("Zadoo is not running — click Start first.")
+        else:
+            self._set_status("Tunnel not ready yet — click Refresh in a moment.")
 
-        # No URL yet — Zadoo must be running to generate one. Offer to start it now
-        # so the user doesn't have to find a separate button.
-        if not _local_server_running():
-            if messagebox.askyesno(
-                "Start Zadoo?",
-                "Zadoo isn't running yet.\n\nStart it now? Once it's running, click Open again to get your public URL."
-            ):
-                self.start_zadoo()
+    def _begin_public_url_autopoll(self, attempts: int = 8) -> None:
+        """After Start, poll the runtime (read-only) until the public link appears."""
+        if attempts <= 0:
             return
-
-        # Running but no URL cached — generate one, then open it.
-        self._set_status("Generating public URL...")
         import threading
-        def _do_generate():
-            pub_url = self._fetch_or_generate_public_url()
+        def _poll():
+            url = ""
+            try:
+                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.5) as resp:
+                    status = json.loads(resp.read().decode("utf-8", "replace"))
+                    url = str(status.get("public_url") or "").strip()
+            except Exception:
+                pass
             def _update():
-                if pub_url:
-                    self.public_url_label.configure(text=pub_url, foreground=ACCENT)
-                    self._store_public_url(pub_url)
-                    self._set_status("Public URL ready.")
-                    webbrowser.open(pub_url)
+                if url:
+                    self.public_url_label.configure(text=url, foreground=ACCENT)
+                    self._store_public_url(url)
+                    self._set_status("Public link ready — click it to open.")
                 else:
-                    self._set_status("Zadoo is running but the tunnel isn't ready yet — try again in a moment.")
+                    self.root.after(2500, lambda: self._begin_public_url_autopoll(attempts - 1))
             self.root.after(0, _update)
-        threading.Thread(target=_do_generate, daemon=True).start()
-
-    def _fetch_or_generate_public_url(self) -> str:
-        """Return the live tunnel URL, asking the runtime to create one if needed."""
-        pub_url = ""
-        try:
-            with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.5) as resp:
-                status = json.loads(resp.read().decode("utf-8", "replace"))
-                pub_url = str(status.get("public_url") or "").strip()
-        except Exception:
-            pass
-        if pub_url:
-            return pub_url
-        # No URL yet — ask the runtime to (re)start the tunnel and report a fresh one.
-        try:
-            result = _post_local_json(
-                "/api/runtime/refresh-tunnel",
-                {"admin_code": self._admin_code()},
-                timeout=30.0,
-            )
-            if result.get("success"):
-                return str(result.get("public_url") or result.get("url") or "").strip()
-        except Exception:
-            pass
-        return ""
+        threading.Thread(target=_poll, daemon=True).start()
 
     def _refresh_public_url(self) -> None:
         # "Refresh" always rotates the tunnel to produce a brand-new public URL.
@@ -758,6 +727,10 @@ class ZadooSettingsWindow:
     def _open_pricing(self) -> None:
         base = str(self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).rstrip("/")
         webbrowser.open(f"{base}/pricing")
+
+    def _add_balance(self) -> None:
+        base = str(self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).rstrip("/")
+        webbrowser.open(f"{base}/dashboard/billing")
 
 
 
@@ -1001,7 +974,10 @@ class ZadooSettingsWindow:
                 close_fds=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            self.hide()
+            # Keep Settings open (do not hide). Show the public link as the tunnel comes up.
+            self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
+            self._set_status("Starting Zadoo… the public link will appear here shortly.")
+            self.root.after(3000, self._begin_public_url_autopoll)
         except Exception as exc:
             messagebox.showerror("Zadoo", f"Could not start Zadoo: {exc}")
 

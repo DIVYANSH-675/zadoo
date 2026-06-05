@@ -419,12 +419,24 @@ class RoutesMixin:
             print(" Access code source: environment")
 
     def _match_auth_code(self, code):
-        submitted = str(code or "").strip().upper()
+        submitted = str(code or "").strip()
         if not submitted:
             return False
         if self._settings_configured():
-            return self._settings_store().verify_access_code(str(code or "").strip())
-        return secrets.compare_digest(submitted, self._auth_code())
+            return self._settings_store().verify_access_code(submitted)
+        # Not configured yet: accept the env/runtime override code OR the configured
+        # access code (which defaults to ZADOO123) so the code shown in Settings works
+        # even before setup is explicitly completed.
+        if secrets.compare_digest(submitted.upper(), self._auth_code()):
+            return True
+        try:
+            store_code = str(self._settings_store().load().get("access_code_plain") or "").strip()
+        except Exception:
+            store_code = ""
+        return bool(store_code) and (
+            secrets.compare_digest(submitted, store_code)
+            or secrets.compare_digest(submitted.upper(), store_code.upper())
+        )
 
     def _requested_auth_role(self, path, request_headers):
         requested = self._header_get(request_headers, "X-Zadoo-Access", "")
