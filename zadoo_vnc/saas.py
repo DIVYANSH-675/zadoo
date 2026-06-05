@@ -142,6 +142,10 @@ class ZadooCloudClient:
         if isinstance(entitlement, dict):
             data = self.store.load()
             data["entitlement_cache"] = entitlement
+            # Set session_blocked flag for the tunnel/server to detect
+            allowed = bool(entitlement.get("allowed", True))
+            data["session_blocked"] = not allowed
+            data["session_block_reason"] = str(entitlement.get("reason") or "") if not allowed else ""
             self.store.save(data)
         return result
 
@@ -150,3 +154,31 @@ class ZadooCloudClient:
         if not token or not session_id:
             return {"success": True, "skipped": True}
         return self._request("POST", "/api/agent/session/end", {"sessionId": session_id}, token=token)
+
+    def fetch_profile(self) -> dict[str, Any]:
+        """Fetch user profile (name, email, avatar URL) from cloud and cache locally."""
+        token = self.store.get_device_token()
+        if not token:
+            return {"success": False, "error": "Device not signed in"}
+        result = self._request("GET", "/api/agent/profile", token=token)
+        if result.get("success"):
+            profile = result.get("profile") or {}
+            data = self.store.load()
+            data["user_name"] = str(profile.get("name") or "").strip()
+            data["user_email"] = str(profile.get("email") or "").strip()
+            data["user_image_url"] = str(profile.get("image") or "").strip()
+            self.store.save(data)
+        return result
+
+    def fetch_credits(self) -> dict[str, Any]:
+        """Fetch current credits balance from cloud and cache locally."""
+        token = self.store.get_device_token()
+        if not token:
+            return {"success": False, "error": "Device not signed in"}
+        result = self._request("GET", "/api/agent/credits", token=token)
+        if result.get("success"):
+            data = self.store.load()
+            data["credits_cache"] = result.get("credits") or {}
+            self.store.save(data)
+        return result
+

@@ -108,8 +108,8 @@ class ZadooSettingsWindow:
         self.cloud = ZadooCloudClient(self.store)
         self.root = Tk()
         self.root.title("Zadoo Settings")
-        self.root.geometry("780x560")
-        self.root.minsize(680, 500)
+        self.root.geometry("520x380")
+        self.root.minsize(520, 380)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.root.bind("<Unmap>", self._on_unmap)
@@ -129,10 +129,14 @@ class ZadooSettingsWindow:
         self.show_taskbar_var = tk.BooleanVar(value=False)
         self._activation_poll_after: str | None = None
         self._activation_poll_deadline = 0.0
+        # Account tab avatar image reference (prevent GC)
+        self._avatar_photo: tk.PhotoImage | None = None
 
         self._build_style()
         self._build_ui()
         self.reload()
+        if self.store.get_device_token():
+            self._fetch_latest_account_details_async(show_status=False)
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -211,32 +215,44 @@ class ZadooSettingsWindow:
         self.state_label = ttk.Label(header, text="", style="Muted.TLabel")
         self.state_label.pack(side=RIGHT)
 
+        # Build tabs (but do not pack immediately, will be packed dynamically in reload())
         self.tabs = ttk.Notebook(outer)
-        self.tabs.pack(fill=BOTH, expand=True, pady=(10, 8))
         self._build_access_tab()
         self._build_account_tab()
         self._build_permissions_tab()
         self._build_alert_tab()
         self._build_runtime_tab()
 
-        footer = ttk.Frame(outer, style="Root.TFrame")
-        footer.pack(fill="x")
-        self.status_label = ttk.Label(footer, text="", style="Status.TLabel")
+        # Build welcome frame (but do not pack immediately)
+        self.signin_welcome_frame = ttk.Frame(outer, style="Root.TFrame")
+        card = ttk.Frame(self.signin_welcome_frame, style="Surface.TFrame", padding=30)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        ttk.Label(card, text="Welcome to Zadoo", style="Title.TLabel", font=("Segoe UI", 18, "bold")).pack(pady=(0, 10))
+        ttk.Label(card, text="Please sign in to activate and link this device.", style="Surface.TLabel", font=("Segoe UI", 10)).pack(pady=(0, 20))
+        ttk.Button(card, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").pack(pady=10)
+        
+        self.welcome_status_label = ttk.Label(card, text="", style="Surface.TLabel", font=("Segoe UI", 9), foreground=ACCENT)
+        self.welcome_status_label.pack(pady=(10, 0))
+
+        # Build footer (but do not pack immediately)
+        self.footer = ttk.Frame(outer, style="Root.TFrame")
+        self.status_label = ttk.Label(self.footer, text="", style="Status.TLabel")
         self.status_label.pack(side=LEFT, fill="x", expand=True)
-        ttk.Button(footer, text="Hide", command=self.hide).pack(side=RIGHT, padx=(6, 0))
-        ttk.Button(footer, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
-        ttk.Button(footer, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
-        ttk.Button(footer, text="Save", command=self.save, style="Primary.TButton").pack(side=RIGHT)
+        ttk.Button(self.footer, text="Hide", command=self.hide).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(self.footer, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(self.footer, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(self.footer, text="Save", command=self.save, style="Primary.TButton").pack(side=RIGHT)
 
     def _access_code_validator(self, value: str) -> bool:
         return len(value or "") <= ACCESS_CODE_MAX_LENGTH
 
     def _build_access_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
-        self.tabs.add(tab, text="Access")
+        self.tab_access = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tabs.add(self.tab_access, text="Access")
         validator = (self.root.register(self._access_code_validator), "%P")
 
-        form = ttk.Frame(tab, style="Surface.TFrame")
+        form = ttk.Frame(self.tab_access, style="Surface.TFrame")
         form.pack(fill="x")
         ttk.Label(form, text=f"Access code ({ACCESS_CODE_MAX_LENGTH} chars max)", style="Surface.TLabel").grid(row=0, column=0, sticky="w")
         self.access_code = ttk.Entry(form, validate="key", validatecommand=validator)
@@ -260,48 +276,105 @@ class ZadooSettingsWindow:
         form.columnconfigure(0, weight=1)
 
     def _build_account_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
-        self.tabs.add(tab, text="Account")
-        form = ttk.Frame(tab, style="Surface.TFrame")
-        form.pack(fill="x")
-        ttk.Label(form, text="Cloud API URL", style="Surface.TLabel").grid(row=0, column=0, sticky="w")
-        self.cloud_api_base = ttk.Entry(form)
-        self.cloud_api_base.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 10))
+        self.tab_account = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tabs.add(self.tab_account, text="Account")
 
-        ttk.Label(form, text="Device name", style="Surface.TLabel").grid(row=2, column=0, sticky="w")
-        self.device_name = ttk.Entry(form)
-        self.device_name.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(2, 10))
+        # ── Profile card ──────────────────────────────────────────────
+        self.profile_card = ttk.LabelFrame(self.tab_account, text="Signed-in account", style="Card.TLabelframe")
 
-        ttk.Label(form, text="Browser sign-in code", style="Surface.TLabel").grid(row=4, column=0, sticky="w")
-        self.activation_code = ttk.Entry(form, state="readonly")
-        self.activation_code.grid(row=5, column=0, sticky="ew", pady=(2, 10))
-        ttk.Button(form, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").grid(row=5, column=1, padx=(8, 0), sticky="ew")
-        ttk.Button(form, text="Check sign-in", command=self.poll_activation).grid(row=5, column=2, padx=(8, 0), sticky="ew")
+        avatar_frame = ttk.Frame(self.profile_card, style="Surface.TFrame")
+        avatar_frame.pack(side=LEFT, padx=(0, 12))
+        self.avatar_label = tk.Label(
+            avatar_frame, bg=SURFACE, width=5, height=2,
+            relief="flat", font=("Segoe UI", 12, "bold"), fg=ACCENT
+        )
+        self.avatar_label.pack()
 
-        self.account_state = ttk.Label(form, text="", style="Surface.TLabel")
-        self.account_state.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self.billing_state = ttk.Label(form, text="", style="Surface.TLabel")
-        self.billing_state.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        ttk.Button(form, text="Refresh Entitlement", command=self.refresh_entitlement).grid(row=8, column=0, sticky="w", pady=(12, 0))
-        ttk.Button(form, text="Copy Sign-in Code", command=self.copy_activation_code).grid(row=8, column=1, sticky="w", pady=(12, 0), padx=(8, 0))
-        form.columnconfigure(0, weight=1)
+        info_frame = ttk.Frame(self.profile_card, style="Surface.TFrame")
+        info_frame.pack(side=LEFT, fill="x", expand=True)
+        self.profile_name_label = ttk.Label(info_frame, text="Not signed in", style="Surface.TLabel",
+                                             font=("Segoe UI", 10, "bold"))
+        self.profile_name_label.pack(anchor="w")
+        self.profile_email_label = ttk.Label(info_frame, text="", style="Muted.TLabel",
+                                              font=("Segoe UI", 9))
+        self.profile_email_label.pack(anchor="w")
+        self.account_state = ttk.Label(info_frame, text="", style="Muted.TLabel",
+                                       font=("Segoe UI", 8))
+        self.account_state.pack(anchor="w")
+
+        ttk.Button(self.profile_card, text="Sign Out", command=self.sign_out).pack(side=RIGHT, padx=(0, 4))
+
+        # ── Device name container ─────────────────────────────────────
+        self.device_name_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
+        ttk.Label(self.device_name_frame, text="Device name", style="Surface.TLabel").pack(anchor="w")
+        self.device_name = ttk.Entry(self.device_name_frame)
+        self.device_name.pack(fill="x", pady=(2, 10))
+
+        # ── Sign-in Container ─────────────────────────────────────────
+        self.signin_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
+        ttk.Label(self.signin_frame, text="Sign in to your Zadoo account to start using this device.",
+                  style="Surface.TLabel", font=("Segoe UI", 10, "bold"), foreground=ACCENT).pack(anchor="w", pady=(5, 10))
+
+        code_row = ttk.Frame(self.signin_frame, style="Surface.TFrame")
+        code_row.pack(fill="x")
+        ttk.Label(code_row, text="Browser sign-in code", style="Surface.TLabel").pack(anchor="w")
+        
+        btn_row = ttk.Frame(code_row, style="Surface.TFrame")
+        btn_row.pack(fill="x", pady=(2, 10))
+        self.activation_code = ttk.Entry(btn_row, state="readonly")
+        self.activation_code.pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(btn_row, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").pack(side=LEFT, padx=(8, 0))
+        ttk.Button(btn_row, text="Check sign-in", command=self.poll_activation).pack(side=LEFT, padx=(8, 0))
+
+        # ── Public URL Container ──────────────────────────────────────
+        self.public_url_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
+        ttk.Label(self.public_url_frame, text="Public URL", style="Surface.TLabel").pack(anchor="w")
+
+        url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
+        url_row.pack(fill="x", pady=(2, 10))
+        self.public_url_label = ttk.Label(url_row, text="Zadoo not running", style="Muted.TLabel",
+                                          font=("Segoe UI", 9))
+        self.public_url_label.pack(side=LEFT, fill="x", expand=True)
+        self.open_url_btn = ttk.Button(url_row, text="Open", command=self._open_public_url, state="disabled")
+        self.open_url_btn.pack(side=LEFT, padx=(6, 0))
+        ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
+
+        # ── Credits ───────────────────────────────────────────────────
+        self.credits_card = ttk.LabelFrame(self.tab_account, text="Credits", style="Card.TLabelframe")
+        self.credits_included_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
+        self.credits_included_label.pack(anchor="w")
+        self.credits_wallet_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
+        self.credits_wallet_label.pack(anchor="w")
+        self.credits_total_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel",
+                                             font=("Segoe UI", 9, "bold"))
+        self.credits_total_label.pack(anchor="w", pady=(2, 6))
+        self.billing_state = ttk.Label(self.credits_card, text="", style="Muted.TLabel",
+                                       font=("Segoe UI", 8))
+        self.billing_state.pack(anchor="w")
+
+        credits_btns = ttk.Frame(self.credits_card, style="Surface.TFrame")
+        credits_btns.pack(anchor="w", pady=(8, 0))
+        ttk.Button(credits_btns, text="Add Credits →", command=self._open_pricing,
+                   style="Primary.TButton").pack(side=LEFT)
+        ttk.Button(credits_btns, text="Refresh Credits", command=self._refresh_credits).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
 
     def _build_runtime_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
-        self.tabs.add(tab, text="Runtime")
-        card = ttk.LabelFrame(tab, text="Windows behavior", style="Card.TLabelframe")
+        self.tab_runtime = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tabs.add(self.tab_runtime, text="Runtime")
+        card = ttk.LabelFrame(self.tab_runtime, text="Windows behavior", style="Card.TLabelframe")
         card.pack(fill="x")
         ttk.Checkbutton(card, text="Start Zadoo when Windows starts", variable=self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
         ttk.Checkbutton(card, text="Keep Settings visible on taskbar when minimized", variable=self.show_taskbar_var).grid(row=1, column=0, sticky="w", pady=4)
         ttk.Button(card, text="Apply Startup", command=self.apply_startup).grid(row=2, column=0, sticky="w", pady=(12, 0))
-        self.runtime_state = ttk.Label(tab, text="", style="Surface.TLabel")
+        self.runtime_state = ttk.Label(self.tab_runtime, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
 
     def _build_permissions_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
-        self.tabs.add(tab, text="Permissions")
+        self.tab_permissions = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tabs.add(self.tab_permissions, text="Permissions")
 
-        perms = ttk.LabelFrame(tab, text="Allowed controls for this password", style="Card.TLabelframe")
+        perms = ttk.LabelFrame(self.tab_permissions, text="Allowed controls for this password", style="Card.TLabelframe")
         perms.pack(fill=BOTH, expand=True)
         for index, key in enumerate(PERMISSION_KEYS):
             var = tk.BooleanVar(value=False)
@@ -317,15 +390,15 @@ class ZadooSettingsWindow:
                 pady=6,
             )
 
-        actions = ttk.Frame(tab, style="Surface.TFrame")
+        actions = ttk.Frame(self.tab_permissions, style="Surface.TFrame")
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Allow All", command=self.allow_all_permissions).pack(side=LEFT)
         ttk.Button(actions, text="Clear All", command=self.clear_permissions).pack(side=LEFT, padx=(6, 0))
 
     def _build_alert_tab(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=12, style="Surface.TFrame")
-        self.tabs.add(tab, text="Alerts")
-        alert_tabs = ttk.Notebook(tab)
+        self.tab_alerts = ttk.Frame(self.tabs, padding=12, style="Surface.TFrame")
+        self.tabs.add(self.tab_alerts, text="Alerts")
+        alert_tabs = ttk.Notebook(self.tab_alerts)
         alert_tabs.pack(fill=BOTH, expand=True)
         for code in ("A", "B", "C", "D"):
             frame = ttk.Frame(alert_tabs, padding=16, style="Surface.TFrame")
@@ -349,12 +422,17 @@ class ZadooSettingsWindow:
     def reload(self) -> None:
         self.data = self.store.load(reload=True)
         self.saved_access_code = str(self.data.get("access_code_plain") or "")
-        self._load_access_values()
+        is_signed_in = bool(self.store.get_device_token())
         self._load_account_values()
-        self._load_permission_values()
-        self._load_alert_values()
-        self._load_runtime_values()
-        self.state_label.configure(text="Configured" if self._setup_complete() else "First launch setup required")
+        if is_signed_in:
+            self._load_access_values()
+            self._load_permission_values()
+            self._load_alert_values()
+            self._load_runtime_values()
+        if is_signed_in:
+            self.state_label.configure(text="Configured" if self._setup_complete() else "Ready")
+        else:
+            self.state_label.configure(text="")
 
     def _load_access_values(self) -> None:
         self.access_code.delete(0, END)
@@ -367,32 +445,272 @@ class ZadooSettingsWindow:
         self.email_state.configure(text="Email configured" if has_email and has_key else "Email not Set")
 
     def _load_account_values(self) -> None:
+        # Check signed in state
+        is_signed_in = bool(self.store.get_device_token())
+
+        # Adjust window controls, tabs, and footer visibility dynamically based on sign in status
+        if is_signed_in:
+            self.signin_welcome_frame.pack_forget()
+            self.tabs.pack(fill=BOTH, expand=True, pady=(10, 8))
+            self.footer.pack(fill="x")
+
+            # Insert tabs only if not already present (guard against duplicate insert errors)
+            existing_tabs = list(self.tabs.tabs())
+            ordered = [
+                (self.tab_access, "Access"),
+                (self.tab_account, "Account"),
+                (self.tab_permissions, "Permissions"),
+                (self.tab_alerts, "Alerts"),
+                (self.tab_runtime, "Runtime"),
+            ]
+            for idx, (tab_widget, label) in enumerate(ordered):
+                tab_id = str(tab_widget)
+                if tab_id not in existing_tabs:
+                    self.tabs.insert(idx, tab_widget, text=label)
+
+            self.root.minsize(680, 500)
+            if self.root.winfo_width() < 680:
+                self.root.geometry("780x560")
+        else:
+            self.tabs.pack_forget()
+            self.footer.pack_forget()
+            self.signin_welcome_frame.pack(fill=BOTH, expand=True, pady=(10, 8))
+
+            self.root.minsize(520, 380)
+            if self.root.winfo_width() > 540:
+                self.root.geometry("520x380")
+
+            # Check if there is an active activation process running
+            activation = self.data.get("activation") or {}
+            code = str(activation.get("code") or "")
+            if code:
+                self.welcome_status_label.configure(text=f"Waiting for browser sign-in approval...")
+                if not self._activation_poll_after and self._activation_poll_deadline == 0.0:
+                    self._activation_poll_deadline = time.time() + 900
+                    self._schedule_activation_poll()
+            else:
+                self.welcome_status_label.configure(text="")
+
+        # Show/Hide account tab components dynamically
+        self.profile_card.pack_forget()
+        self.device_name_frame.pack_forget()
+        self.signin_frame.pack_forget()
+        self.public_url_frame.pack_forget()
+        self.credits_card.pack_forget()
+
+        if is_signed_in:
+            self.profile_card.pack(fill="x", pady=(0, 10))
+            self.device_name_frame.pack(fill="x", pady=(0, 10))
+            self.public_url_frame.pack(fill="x", pady=(0, 10))
+            self.credits_card.pack(fill="x", pady=(4, 0))
+        else:
+            self.device_name_frame.pack(fill="x", pady=(0, 10))
+            self.signin_frame.pack(fill="x", pady=(0, 10))
+
+        # Profile card details
+        name = str(self.data.get("user_name") or "").strip()
+        email = str(self.data.get("user_email") or "").strip()
+        workspace = str(self.data.get("workspace_id") or "")
+        device = str(self.data.get("device_id") or "")
+
+        if is_signed_in:
+            display_name = name or email or "Active Account"
+            self.profile_name_label.configure(text=display_name)
+            self.profile_email_label.configure(text=email if name else "")
+            self._load_avatar_async(str(self.data.get("user_image_url") or ""), display_name)
+        else:
+            self.profile_name_label.configure(text="Not signed in")
+            self.profile_email_label.configure(text="")
+            self.avatar_label.configure(text="?", image="")
+            self._avatar_photo = None
+
+        self.account_state.configure(
+            text=(f"Workspace {workspace[:8]}  ·  Device {device[:8]}" if workspace and device else "")
+        )
+
+        # Device name field
         cloud = (self.data.get("cloud") or {}) if "cloud" in self.data else self.data
-        for entry, value in (
-            (self.cloud_api_base, cloud.get("cloud_api_base") or self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE),
-            (self.device_name, cloud.get("device_name") or self.data.get("device_name") or ""),
-        ):
-            entry.delete(0, END)
-            entry.insert(0, str(value or ""))
+        self.device_name.delete(0, END)
+        self.device_name.insert(0, str(cloud.get("device_name") or self.data.get("device_name") or ""))
+
+        # Activation code
         activation = self.data.get("activation") or {}
         code = str(activation.get("code") or "")
         self.activation_code.configure(state="normal")
         self.activation_code.delete(0, END)
         self.activation_code.insert(0, code)
         self.activation_code.configure(state="readonly")
-        workspace = str(self.data.get("workspace_id") or "")
-        device = str(self.data.get("device_id") or "")
-        self.account_state.configure(
-            text=(f"Connected: workspace {workspace[:8]} device {device[:8]}" if workspace and device else "Not signed in")
-        )
-        billing = self.data.get("billing_status") or {}
-        entitlement = self.data.get("entitlement_cache") or {}
-        if billing or entitlement:
-            allowed = entitlement.get("allowed", billing.get("allowed"))
-            reason = entitlement.get("reason") or billing.get("reason") or ""
-            self.billing_state.configure(text=f"Billing: {'Allowed' if allowed else 'Blocked'} {reason}".strip())
+
+        # Public URL
+        pub_url = str(self.data.get("public_url") or "").strip()
+        if pub_url:
+            self.public_url_label.configure(text=pub_url, foreground=ACCENT)
+            self.open_url_btn.configure(state="normal")
         else:
-            self.billing_state.configure(text="Billing: not checked")
+            self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
+            self.open_url_btn.configure(state="disabled")
+
+        # Credits
+        credits = self.data.get("credits_cache") or {}
+        entitlement = self.data.get("entitlement_cache") or {}
+        included = int(credits.get("includedMinutesRemaining") or 0)
+        wallet = int(credits.get("walletMinutes") or 0)
+        total = int(credits.get("totalMinutesRemaining") or (included + wallet))
+        plan = str(credits.get("planCode") or "")
+        if credits:
+            self.credits_included_label.configure(text=f"Included: {included} min")
+            self.credits_wallet_label.configure(text=f"Wallet: {wallet} min")
+            self.credits_total_label.configure(text=f"Total remaining: {total} min{(' · ' + plan) if plan else ''}")
+        else:
+            self.credits_included_label.configure(text="Credits not loaded")
+            self.credits_wallet_label.configure(text="")
+            self.credits_total_label.configure(text="")
+
+        allowed = entitlement.get("allowed", credits.get("allowed"))
+        reason = entitlement.get("reason") or credits.get("reason") or ""
+        if allowed is not None:
+            self.billing_state.configure(
+                text=f"{'✓ Active' if allowed else '✗ Blocked'}{': ' + reason if reason else ''}",
+                foreground=(ACCENT if allowed else DANGER)
+            )
+        else:
+            self.billing_state.configure(text="", foreground=MUTED)
+
+    def _load_avatar_async(self, image_url: str, name: str) -> None:
+        """Download avatar in background thread, fall back to initials canvas."""
+        initials = "".join(p[0].upper() for p in name.split() if p)[:2] or "?"
+        self.avatar_label.configure(text=initials, image="")
+        self._avatar_photo = None
+        if not image_url:
+            return
+
+        def _do_load():
+            try:
+                import io
+                import tempfile
+                from PIL import Image, ImageTk
+                import urllib.request as _ur
+                req = _ur.Request(image_url, headers={"User-Agent": "ZadooDesktop/1.0"})
+                with _ur.urlopen(req, timeout=5) as resp:
+                    data = resp.read()
+                img = Image.open(io.BytesIO(data)).resize((48, 48), Image.LANCZOS)
+                # Circular crop
+                mask = Image.new("L", (48, 48), 0)
+                from PIL import ImageDraw
+                ImageDraw.Draw(mask).ellipse((0, 0, 47, 47), fill=255)
+                img.putalpha(mask)
+                photo = ImageTk.PhotoImage(img)
+                def _set():
+                    try:
+                        self._avatar_photo = photo
+                        self.avatar_label.configure(image=photo, text="")
+                    except Exception:
+                        pass
+                self.root.after(0, _set)
+            except Exception:
+                pass  # Keep initials fallback
+
+        import threading
+        threading.Thread(target=_do_load, daemon=True).start()
+
+    def _open_public_url(self) -> None:
+        pub_url = str(self.data.get("public_url") or "").strip()
+        if pub_url:
+            webbrowser.open(pub_url)
+        else:
+            messagebox.showinfo(
+                "Zadoo Not Running",
+                "Zadoo is not running yet.\n\nClick \"Start Zadoo\" first, then Refresh to get your public URL."
+            )
+
+    def _refresh_public_url(self) -> None:
+        self._set_status("Checking Zadoo status...")
+        import threading
+        def _do_refresh():
+            pub_url = ""
+            server_running = False
+            try:
+                # Query the live server directly for the real-time URL
+                with urllib.request.urlopen(
+                    _local_url("/api/runtime/status"), timeout=1.5
+                ) as resp:
+                    import json as _json
+                    status = _json.loads(resp.read().decode("utf-8", "replace"))
+                    server_running = bool(status.get("running"))
+                    pub_url = str(status.get("public_url") or "").strip()
+            except Exception:
+                pass
+            # If live server didn't give a URL, fall back to JSON cache
+            if not pub_url:
+                try:
+                    data = self.store.load(reload=True)
+                    pub_url = str(data.get("public_url") or "").strip()
+                except Exception:
+                    pass
+            def _update():
+                if pub_url:
+                    self.public_url_label.configure(text=pub_url, foreground=ACCENT)
+                    self.open_url_btn.configure(state="normal")
+                    self._set_status("Public URL ready.")
+                    # Also save it to the local store for next time
+                    try:
+                        data = self.store.load(reload=True)
+                        data["public_url"] = pub_url
+                        self.store.save(data)
+                        self.data = data
+                    except Exception:
+                        pass
+                elif server_running:
+                    self.public_url_label.configure(text="Waiting for tunnel...", foreground=MUTED)
+                    self.open_url_btn.configure(state="disabled")
+                    self._set_status("Zadoo is running but tunnel not ready yet — try again in a moment.")
+                else:
+                    self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
+                    self.open_url_btn.configure(state="disabled")
+                    self._set_status("Zadoo is not running — click Start Zadoo first.")
+            self.root.after(0, _update)
+        threading.Thread(target=_do_refresh, daemon=True).start()
+
+    def _refresh_credits(self) -> None:
+        self._fetch_latest_account_details_async(show_status=True)
+
+    def _fetch_latest_account_details_async(self, show_status: bool = False) -> None:
+        if show_status:
+            self._set_status("Refreshing account info...")
+        import threading
+        def _do_fetch():
+            fetched_profile = False
+            fetched_credits = False
+            try:
+                r = self.cloud.fetch_profile()
+                if r.get("success"):
+                    fetched_profile = True
+            except Exception:
+                pass
+            try:
+                r = self.cloud.fetch_credits()
+                if r.get("success"):
+                    fetched_credits = True
+            except Exception:
+                pass
+            def _done():
+                try:
+                    self.reload()
+                    if show_status:
+                        if fetched_profile and fetched_credits:
+                            self._set_status("Account info updated.")
+                        else:
+                            self._set_status("Partial refresh — check your internet connection.")
+                except Exception:
+                    pass
+            self.root.after(0, _done)
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _open_pricing(self) -> None:
+        base = str(self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).rstrip("/")
+        webbrowser.open(f"{base}/pricing")
+
+
 
     def _load_runtime_values(self) -> None:
         self.autostart_var.set(bool(self.data.get("autostart_enabled", True)))
@@ -436,7 +754,6 @@ class ZadooSettingsWindow:
             "admin_code": self.saved_access_code or self.access_code.get().strip(),
             "access_code": self.access_code.get().strip(),
             "email_to": self.email_to.get().strip(),
-            "cloud_api_base": self.cloud_api_base.get().strip().rstrip("/"),
             "device_name": self.device_name.get().strip(),
             "autostart_enabled": bool(self.autostart_var.get()),
             "show_settings_in_taskbar": bool(self.show_taskbar_var.get()),
@@ -505,14 +822,21 @@ class ZadooSettingsWindow:
 
     def _save_cloud_fields_only(self) -> None:
         data = self.store.load(reload=True)
-        data["cloud_api_base"] = self.cloud_api_base.get().strip().rstrip("/") or DEFAULT_CLOUD_API_BASE
         data["device_name"] = self.device_name.get().strip() or data.get("device_name") or "Windows PC"
         self.store.save(data)
         self.data = data
 
     def start_activation(self) -> None:
         try:
+            # Auto-populate device name from hostname if not set
+            import platform as _platform
+            data = self.store.load(reload=True)
+            if not data.get("device_name"):
+                data["device_name"] = _platform.node() or "Windows PC"
+                self.store.save(data)
+                self.data = data
             self._save_cloud_fields_only()
+            self.welcome_status_label.configure(text="Opening browser...")
             result = self.cloud.start_activation()
             self.reload()
             if result.get("success"):
@@ -521,11 +845,12 @@ class ZadooSettingsWindow:
                     webbrowser.open(connect_url)
                 self._activation_poll_deadline = time.time() + 900
                 self._schedule_activation_poll()
-                self._set_status("Browser sign-in opened")
+                self.welcome_status_label.configure(text="Browser opened — please sign in then come back here.")
             else:
-                self._set_status(str(result.get("error") or "Activation failed"))
+                err = str(result.get("error") or "Activation failed")
+                self.welcome_status_label.configure(text=f"Error: {err}")
         except Exception as exc:
-            self._set_status(str(exc) or "Activation failed")
+            self.welcome_status_label.configure(text=str(exc) or "Activation failed")
 
     def _schedule_activation_poll(self, delay_ms: int = 2500) -> None:
         try:
@@ -542,18 +867,31 @@ class ZadooSettingsWindow:
     def poll_activation(self, auto: bool = False) -> None:
         try:
             result = self.cloud.poll_activation()
-            self.reload()
             if result.get("status") == "claimed":
                 self._activation_poll_deadline = 0.0
-                self._set_status("Device signed in")
+                # Fetch profile + credits then do one final reload
+                import threading
+                def _post_signin():
+                    try:
+                        self.cloud.fetch_profile()
+                        self.cloud.fetch_credits()
+                    except Exception:
+                        pass
+                    self.root.after(0, lambda: (self.reload(), self._set_status("Signed in ✓")))
+                threading.Thread(target=_post_signin, daemon=True).start()
             elif result.get("status") == "pending":
-                self._set_status("Waiting for browser approval")
+                if not auto:
+                    self.welcome_status_label.configure(text="Still waiting — please complete sign-in in the browser.")
                 if auto and time.time() < self._activation_poll_deadline:
                     self._schedule_activation_poll()
             else:
-                self._set_status(str(result.get("error") or "Activation check failed"))
+                err = str(result.get("error") or "Activation check failed")
+                if not auto:
+                    self.welcome_status_label.configure(text=f"Error: {err}")
         except Exception as exc:
-            self._set_status(str(exc) or "Activation check failed")
+            if not auto:
+                self.welcome_status_label.configure(text=str(exc) or "Check failed")
+
 
     def refresh_entitlement(self) -> None:
         try:
@@ -566,6 +904,30 @@ class ZadooSettingsWindow:
                 self._set_status(str(result.get("error") or "Entitlement refresh failed"))
         except Exception as exc:
             self._set_status(str(exc) or "Entitlement refresh failed")
+
+    def sign_out(self) -> None:
+        """Clear device token and all cached user data, return to welcome screen."""
+        if not messagebox.askyesno(
+            "Sign Out",
+            "Are you sure you want to sign out?\n\nThis will unlink this device from your Zadoo account.",
+            icon="warning",
+        ):
+            return
+        try:
+            # Clear token + profile cache
+            self.store.clear_device_token()
+            data = self.store.load(reload=True)
+            data["user_name"] = ""
+            data["user_email"] = ""
+            data["user_image_url"] = ""
+            data["credits_cache"] = {}
+            data["entitlement_cache"] = {}
+            data["activation"] = {}
+            self.store.save(data)
+        except Exception as exc:
+            self._set_status(f"Sign out error: {exc}")
+            return
+        self.reload()
 
     def copy_activation_code(self) -> None:
         code = self.activation_code.get().strip()
@@ -601,22 +963,23 @@ class ZadooSettingsWindow:
             self._set_status(str(exc) or "Could not stop Zadoo")
 
     def start_zadoo(self) -> None:
-        if not self._setup_complete():
-            if not self.save():
-                return
         if not self.store.get_device_token():
             self._set_status("Sign in to Zadoo first")
             return
+        # Try to check entitlement but don't block start if the check itself fails
         try:
             result = self.cloud.entitlement()
-            self.reload()
-            entitlement = (result.get("entitlement") if isinstance(result, dict) else None) or (self.store.load(reload=True).get("entitlement_cache") or {})
-            if not bool(entitlement.get("allowed")) or bool(entitlement.get("revoked")):
+            entitlement = (result.get("entitlement") if isinstance(result, dict) else None) or {}
+            self.reload()  # refresh UI with latest entitlement
+            if entitlement.get("revoked"):
+                self._set_status(str(entitlement.get("reason") or "Device is revoked"))
+                return
+            # Only hard-block if we know for sure they are blocked AND they have no minutes
+            if entitlement.get("allowed") is False and not result.get("success", True):
                 self._set_status(str(entitlement.get("reason") or result.get("error") or "Billing blocked"))
                 return
-        except Exception as exc:
-            self._set_status(str(exc) or "Could not refresh entitlement")
-            return
+        except Exception:
+            pass  # Don't block start on network error — let the runtime handle it
         try:
             subprocess.Popen(
                 _runtime_command(),

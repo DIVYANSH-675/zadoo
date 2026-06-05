@@ -177,6 +177,17 @@ def _default_data() -> dict[str, Any]:
         "billing_status": {},
         "autostart_enabled": True,
         "show_settings_in_taskbar": False,
+        # User profile (fetched from cloud after sign-in)
+        "user_name": "",
+        "user_email": "",
+        "user_image_url": "",
+        # Credits cache (fetched from cloud)
+        "credits_cache": {},
+        # Live public URL reported by tunnel
+        "public_url": "",
+        # Session blocked flag (set by heartbeat when credits exhausted)
+        "session_blocked": False,
+        "session_block_reason": "",
     }
 
 
@@ -204,6 +215,14 @@ def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
     base["billing_status"] = base.get("billing_status") if isinstance(base.get("billing_status"), dict) else {}
     base["autostart_enabled"] = bool(base.get("autostart_enabled", True))
     base["show_settings_in_taskbar"] = bool(base.get("show_settings_in_taskbar", False))
+    # New profile / credits / session fields
+    base["user_name"] = str(base.get("user_name") or "").strip()
+    base["user_email"] = str(base.get("user_email") or "").strip()
+    base["user_image_url"] = str(base.get("user_image_url") or "").strip()
+    base["credits_cache"] = base.get("credits_cache") if isinstance(base.get("credits_cache"), dict) else {}
+    base["public_url"] = str(base.get("public_url") or "").strip()
+    base["session_blocked"] = bool(base.get("session_blocked", False))
+    base["session_block_reason"] = str(base.get("session_block_reason") or "").strip()
     permissions_source = raw_data.get("permissions") if "permissions" in raw_data else None
     base["permissions"] = _clean_permissions(permissions_source)
     alerts = _empty_alerts()

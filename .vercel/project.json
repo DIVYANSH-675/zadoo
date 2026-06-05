@@ -1,0 +1,16 @@
+{
+  "projectId": "prj_1Ai41kQLQQKg13R8NhuBeQ8orrFf",
+  "orgId": "team_wMYabkx37LAXo7on925y3QjZ",
+  "projectName": "zadoo-web",
+  "settings": {
+    "createdAt": 1780259834909,
+    "framework": "nextjs",
+    "devCommand": null,
+    "installCommand": "npm ci",
+    "buildCommand": "npm run build",
+    "outputDirectory": null,
+    "rootDirectory": null,
+    "directoryListing": false,
+    "nodeVersion": "24.x"
+  }
+}

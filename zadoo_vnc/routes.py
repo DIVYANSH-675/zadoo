@@ -83,6 +83,10 @@ class RoutesMixin:
         "/api/list-mics": "mic",
         "/host-controls": "remote_alerts",
         "/api/alert": "remote_alerts",
+        "/api/local/credits": "view",
+        "/api/local/profile": "view",
+        "/api/local/topup-order": "view",
+        "/api/local/topup-verify": "view",
     }
     CSRF_HTTP_FEATURES = {
         "advanced_video",
@@ -695,7 +699,71 @@ class RoutesMixin:
             self.screen_capturer.fps = value
         return value
 
+    async def _proxy_cloud_get(self, cloud_path: str, request_headers=None):
+        """Forward a GET to the cloud API using the device token, return JSON response."""
+        import urllib.error
+        try:
+            store = self._settings_store()
+            token = store.get_device_token()
+            if not token:
+                return self._json_response({"success": False, "error": "Device not signed in"}, http.HTTPStatus.UNAUTHORIZED)
+            base = str(store.load().get("cloud_api_base") or "https://zadoo-web.vercel.app").strip().rstrip("/")
+            url = base + cloud_path
+            headers_out = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            # Forward visitor IP so cloud can detect region
+            for hdr in ("CF-Connecting-IP", "X-Forwarded-For", "cf-ipcountry", "x-vercel-ip-country"):
+                val = self._header_get(request_headers, hdr, None) if request_headers else None
+                if val:
+                    headers_out[hdr] = str(val)
+            req = urllib.request.Request(url, headers=headers_out, method="GET")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read()
+            return self._json_response(json.loads(raw.decode("utf-8", "replace")))
+        except urllib.error.HTTPError as exc:
+            try:
+                data = json.loads(exc.read().decode("utf-8", "replace"))
+            except Exception:
+                data = {"success": False, "error": str(exc)}
+            return self._json_response(data, http.HTTPStatus(exc.code) if exc.code in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY)
+        except Exception as exc:
+            return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.BAD_GATEWAY)
+
+    async def _proxy_cloud_post(self, cloud_path: str, request_body, request_headers=None):
+        """Forward a POST to the cloud API using the device token, return JSON response."""
+        import urllib.error
+        try:
+            store = self._settings_store()
+            token = store.get_device_token()
+            if not token:
+                return self._json_response({"success": False, "error": "Device not signed in"}, http.HTTPStatus.UNAUTHORIZED)
+            base = str(store.load().get("cloud_api_base") or "https://zadoo-web.vercel.app").strip().rstrip("/")
+            url = base + cloud_path
+            body_bytes = request_body if isinstance(request_body, (bytes, bytearray)) else (request_body or b"")
+            headers_out = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            # Forward visitor IP headers for region detection
+            for hdr in ("CF-Connecting-IP", "X-Forwarded-For", "cf-ipcountry", "x-vercel-ip-country"):
+                val = self._header_get(request_headers, hdr, None) if request_headers else None
+                if val:
+                    headers_out[hdr] = str(val)
+            req = urllib.request.Request(url, data=body_bytes, headers=headers_out, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read()
+            return self._json_response(json.loads(raw.decode("utf-8", "replace")))
+        except urllib.error.HTTPError as exc:
+            try:
+                data = json.loads(exc.read().decode("utf-8", "replace"))
+            except Exception:
+                data = {"success": False, "error": str(exc)}
+            return self._json_response(data, http.HTTPStatus(exc.code) if exc.code in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY)
+        except Exception as exc:
+            return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.BAD_GATEWAY)
+
     async def process_request(self, *args, **kwargs):
+
         """Process HTTP requests - compatible with websockets v10-v15.
 
         Accepts either (path, request_headers) or a single ServerConnection object.
@@ -1041,6 +1109,14 @@ class RoutesMixin:
                     headers=headers,
                     body=err,
                 )
+        elif route_path == "/api/local/credits":
+            return await self._proxy_cloud_get("/api/agent/credits", request_headers)
+        elif route_path == "/api/local/profile":
+            return await self._proxy_cloud_get("/api/agent/profile", request_headers)
+        elif route_path == "/api/local/topup-order":
+            return await self._proxy_cloud_post("/api/agent/wallet/topup-order", request_body, request_headers)
+        elif route_path == "/api/local/topup-verify":
+            return await self._proxy_cloud_post("/api/agent/wallet/topup-verify", request_body, request_headers)
         elif route_path == "/brand-header.png":
             return self._png_file_response(BRAND_HEADER_IMAGE_PATH, "Header image not found")
         elif route_path == "/trigger-icon.png":

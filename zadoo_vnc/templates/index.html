@@ -2202,6 +2202,89 @@
             .deck-action span { font-size: 9px; }
         }
     </style>
+    <style id="credit-system-style">
+        /* ─── CREDIT SYSTEM ─────────────────────────────────────────── */
+        .credit-banner {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 9500;
+            background: linear-gradient(90deg, #78350f, #92400e);
+            border-bottom: 2px solid #f59e0b; color: #fef3c7;
+            padding: 9px 16px; display: flex; align-items: center; gap: 12px;
+            font-size: 13px; font-weight: 600;
+            cursor: move; user-select: none;
+            transform: translateY(-100%);
+            transition: transform 0.4s cubic-bezier(0.25,0.8,0.25,1);
+        }
+        .credit-banner.visible { transform: translateY(0); }
+        .credit-banner .cb-icon { font-size: 16px; flex-shrink: 0; }
+        .credit-banner .cb-msg { flex: 1; }
+        .credit-banner .cb-add {
+            background: #f59e0b; color: #1c1917; border: none;
+            border-radius: 6px; padding: 5px 12px; font-size: 12px;
+            font-weight: 700; cursor: pointer; flex-shrink: 0;
+        }
+        .credit-banner .cb-add:hover { background: #fbbf24; }
+        .credit-timer {
+            position: fixed; top: 44px; left: 16px; z-index: 9400;
+            background: rgba(0,0,0,0.88); backdrop-filter: blur(8px);
+            border: 1.5px solid rgba(0,212,255,0.4); border-radius: 10px;
+            padding: 7px 14px; color: #00d4ff;
+            font-size: 22px; font-weight: 700; font-family: 'Courier New', monospace;
+            cursor: move; user-select: none; display: none; align-items: center; gap: 8px;
+        }
+        .credit-timer.visible { display: flex; }
+        .credit-timer.danger { color: #ef4444; border-color: #ef4444; animation: timer-pulse 1s ease infinite; }
+        @keyframes timer-pulse {
+            0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+        }
+        .payment-panel {
+            position: fixed; left: -360px; top: 0; height: 100vh; width: 360px;
+            background: #0d0f13; border-right: 1px solid #1f2937;
+            box-shadow: 8px 0 32px rgba(0,0,0,0.6); z-index: 9000;
+            transition: left 0.35s cubic-bezier(0.25,0.8,0.25,1);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .payment-panel.open { left: 0; }
+        .payment-panel-header {
+            background: #151922; border-bottom: 1px solid #1f2937;
+            padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
+        }
+        .payment-panel-header h3 { color: #e2e8f0; font-size: 15px; font-weight: 700; margin: 0; }
+        .pp-close { background: none; border: none; color: #6b7280; font-size: 20px; cursor: pointer; padding: 0 4px; }
+        .pp-close:hover { color: #e2e8f0; }
+        .payment-panel-body { flex: 1; overflow-y: auto; padding: 20px 16px; }
+        .pp-label { color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; display: block; }
+        .pp-amount-row { display: flex; align-items: center; border: 1.5px solid #334155; border-radius: 8px; overflow: hidden; margin-bottom: 12px; background: #0f172a; }
+        .pp-currency { padding: 10px 10px 10px 12px; color: #00d4ff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
+        .pp-amount-input { flex: 1; background: none; border: none; outline: none; color: #f1f5f9; font-size: 18px; font-weight: 700; padding: 10px 12px 10px 0; font-family: 'Courier New', monospace; }
+        .pp-slider { width: 100%; margin: 8px 0 16px; accent-color: #00d4ff; cursor: pointer; }
+        .pp-slider-labels { display: flex; justify-content: space-between; color: #6b7280; font-size: 11px; margin-bottom: 16px; }
+        .pp-preview { background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.18); border-radius: 8px; padding: 10px 14px; color: #e2e8f0; font-size: 14px; margin-bottom: 20px; text-align: center; }
+        .pp-preview strong { color: #00d4ff; font-size: 18px; }
+        .pp-pay-btn { width: 100%; padding: 13px; background: linear-gradient(135deg,#18bfa6,#0d8f7d); border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; transition: opacity 0.2s; }
+        .pp-pay-btn:hover { opacity: 0.9; }
+        .pp-pay-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pp-status { text-align: center; padding: 8px 0; font-size: 13px; }
+        .pp-status.success { color: #34d399; }
+        .pp-status.error { color: #f87171; }
+        .payment-strip { position: fixed; left: 0; top: 0; height: 100vh; width: 28px; background: #0d0f13; border-right: 1px solid #1f2937; z-index: 8999; display: none; align-items: center; justify-content: center; cursor: pointer; color: #6b7280; font-size: 18px; }
+        .payment-strip:hover { color: #00d4ff; background: #111827; }
+        .controls-locked-overlay { position: fixed; inset: 0; z-index: 8500; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 16px; pointer-events: none; }
+        .controls-locked-overlay.visible { display: flex; pointer-events: auto; }
+        .clo-msg { background: rgba(0,0,0,0.85); border: 1px solid #ef4444; border-radius: 12px; padding: 24px 32px; color: #fca5a5; font-size: 15px; font-weight: 600; text-align: center; max-width: 360px; }
+        .clo-btn { background: #ef4444; color: white; border: none; border-radius: 8px; padding: 10px 24px; font-weight: 700; font-size: 14px; cursor: pointer; margin-top: 12px; }
+        .clo-btn:hover { background: #dc2626; }
+        .session-end-overlay { position: fixed; inset: 0; z-index: 9900; background: rgba(0,0,0,0.92); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 20px; }
+        .session-end-overlay.visible { display: flex; }
+        .seo-box { background: #0d0f13; border: 1px solid #1f2937; border-radius: 16px; padding: 40px 48px; text-align: center; max-width: 400px; }
+        .seo-box h2 { color: #f1f5f9; margin: 0 0 8px; font-size: 24px; }
+        .seo-box p { color: #94a3b8; margin: 0 0 24px; }
+        .seo-box .seo-add { width: 100%; padding: 13px; margin-bottom: 10px; background: linear-gradient(135deg,#18bfa6,#0d8f7d); border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+        .seo-box .seo-close { width: 100%; padding: 10px; background: none; border: 1px solid #334155; border-radius: 8px; color: #94a3b8; font-size: 13px; cursor: pointer; }
+        .sidebar-footer { position: sticky; bottom: 0; padding: 8px 12px; background: linear-gradient(0deg,#1c1c1e 80%,transparent); border-top: 1px solid #2a3344; margin-top: auto; }
+        .credits-btn { background: linear-gradient(135deg,rgba(16,185,129,0.12),rgba(0,212,255,0.08)) !important; border-color: rgba(16,185,129,0.4) !important; color: #34d399 !important; }
+        .credits-remaining-badge { margin-left: auto; font-size: 10px; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    </style>
     <style id="kb-style">
         /* Keyboard Popup Overlay */
         .kb-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;z-index:10000;overflow:auto;padding:10px}
@@ -2889,6 +2972,14 @@
                     </div>
                 </div>
                 <div id="sidebar-advanced" class="sidebar-advanced" style="display: none;"></div>
+            </div>
+            <!-- Credits button footer -->
+            <div class="sidebar-footer">
+                <button class="sidebar-btn deck-action credits-btn" style="width:100%;justify-content:flex-start;gap:8px;" onclick="togglePaymentPanel()" title="Add Credits">
+                    <svg class="ti btn-icon" aria-hidden="true" style="flex-shrink:0"><use href="#ti-wallet"></use></svg>
+                    <span class="btn-label" style="flex:1">Add Credits</span>
+                    <span class="credits-remaining-badge" id="sidebarCreditsBadge"></span>
+                </button>
             </div>
         </div>
         
@@ -6431,5 +6522,207 @@
             });
         })();
     </script>
+
+    <!-- ═══ CREDIT SYSTEM ═══════════════════════════════════════════ -->
+    <div id="creditBanner" class="credit-banner" role="alert">
+        <span class="cb-icon">&#x26A0;</span>
+        <span class="cb-msg" id="creditBannerMsg">Low balance</span>
+        <button class="cb-add" onclick="openPaymentPanel()">Add Credits</button>
+    </div>
+    <div id="creditTimer" class="credit-timer">
+        <span class="ct-icon">&#x23F1;</span>
+        <span id="creditTimerText">10:00</span>
+    </div>
+    <div id="paymentPanel" class="payment-panel">
+        <div class="payment-panel-header">
+            <h3>Add Session Credits</h3>
+            <button class="pp-close" onclick="collapsePaymentPanel()">&#8249;</button>
+        </div>
+        <div class="payment-panel-body">
+            <label class="pp-label">Amount (min Rs.200)</label>
+            <div class="pp-amount-row">
+                <span class="pp-currency" id="ppCurrencySymbol">Rs.</span>
+                <input type="number" id="ppAmountInput" class="pp-amount-input" min="200" max="10000" value="500" step="50" oninput="onTopupAmountInput(this.value)" />
+            </div>
+            <input type="range" id="ppSlider" class="pp-slider" min="200" max="5000" value="500" step="50" oninput="onTopupSliderInput(this.value)" />
+            <div class="pp-slider-labels"><span>Rs.200</span><span>Rs.5,000</span></div>
+            <div class="pp-preview">You get: <strong id="ppMinutesPreview">5</strong> minutes</div>
+            <button class="pp-pay-btn" id="ppPayBtn" onclick="initiateTopup()">Pay Rs.500 via Razorpay</button>
+            <div id="ppStatus" class="pp-status"></div>
+        </div>
+    </div>
+    <div id="paymentStrip" class="payment-strip" onclick="openPaymentPanel()">&#x25B6;</div>
+    <div id="controlsLockedOverlay" class="controls-locked-overlay">
+        <div class="clo-msg">
+            Session credits exhausted. Controls disabled.<br><br>Screen sharing continues for 5 more minutes.
+            <button class="clo-btn" onclick="openPaymentPanel()">Add Credits to Resume</button>
+        </div>
+    </div>
+    <div id="sessionEndOverlay" class="session-end-overlay">
+        <div class="seo-box">
+            <h2>Session Ended</h2>
+            <p>Your session time has run out.</p>
+            <button class="seo-add" onclick="openPaymentPanel()">Add Credits</button>
+            <button class="seo-close" onclick="window.location.reload()">Reconnect</button>
+        </div>
+    </div>
+
+    <script id="credit-system-js">
+    (function(){
+        var WARN=30*60,TMRSECS=10*60,G1=0,G2=-5*60,GEND=-10*60;
+        var secs=null,ticker=null,locked=false,pOnce=false,paid=false,rT=null,ppRate=1;
+        function eid(id){return document.getElementById(id);}
+        var banner=eid("creditBanner"),banMsg=eid("creditBannerMsg"),
+            timer=eid("creditTimer"),tmrTxt=eid("creditTimerText"),
+            panel=eid("paymentPanel"),strip=eid("paymentStrip"),
+            clo=eid("controlsLockedOverlay"),seo=eid("sessionEndOverlay"),
+            ppSlider=eid("ppSlider"),ppAmt=eid("ppAmountInput"),ppPrev=eid("ppMinutesPreview"),
+            ppBtn=eid("ppPayBtn"),ppSt=eid("ppStatus"),badge=eid("sidebarCreditsBadge");
+        function pad(n){return n<10?"0"+n:""+n;}
+        function fmt(s){var neg=s<0,a=Math.abs(s),m=Math.floor(a/60),sc=a%60;return(neg?"-":"")+pad(m)+":"+pad(sc);}
+        function fmtM(s){return Math.max(0,Math.round(Math.abs(s)/60))+" min";}
+        function tick(){if(secs!==null){secs--;render();}}
+        function render(){
+            if(secs===null)return;
+            if(secs<=WARN&&banner){banner.classList.add("visible");}
+            if(banMsg)banMsg.textContent="Low balance: "+fmtM(secs)+" remaining";
+            if(secs<=TMRSECS&&timer){timer.classList.add("visible");}
+            if(tmrTxt)tmrTxt.textContent=fmt(secs);
+            if(timer){if(secs<0)timer.classList.add("danger");else timer.classList.remove("danger");}
+            if(secs<=G1&&!pOnce){pOnce=true;openPaymentPanel();}
+            if(secs<=G2&&!locked){locked=true;lockCtrl();}
+            if(secs<=GEND){endSess();}
+        }
+        function lockCtrl(){
+            if(clo)clo.classList.add("visible");
+            var sc=document.querySelector("canvas,#screen,video");
+            if(sc)sc.style.pointerEvents="none";
+            document.querySelectorAll(".sidebar-btn:not(.credits-btn)").forEach(function(b){b.disabled=true;});
+        }
+        function unlockCtrl(){
+            locked=false;pOnce=false;
+            if(clo)clo.classList.remove("visible");
+            var sc=document.querySelector("canvas,#screen,video");
+            if(sc)sc.style.pointerEvents="";
+            document.querySelectorAll(".sidebar-btn").forEach(function(b){b.disabled=false;});
+        }
+        function endSess(){if(ticker){clearInterval(ticker);ticker=null;}if(seo)seo.classList.add("visible");}
+        window.openPaymentPanel=function(){if(panel)panel.classList.add("open");if(strip)strip.style.display="none";if(rT){clearTimeout(rT);rT=null;}};
+        window.collapsePaymentPanel=function(){
+            if(panel)panel.classList.remove("open");
+            if(strip)strip.style.display="flex";
+            if(secs!==null&&secs<=G1&&!paid){
+                if(rT)clearTimeout(rT);
+                rT=setTimeout(function(){openPaymentPanel();},60000);
+            }
+        };
+        window.togglePaymentPanel=function(){if(panel&&panel.classList.contains("open"))collapsePaymentPanel();else openPaymentPanel();};
+        window.onTopupAmountInput=function(v){
+            var n=Math.max(200,parseInt(v)||200);
+            if(ppSlider)ppSlider.value=Math.min(n,5000);
+            if(ppPrev)ppPrev.textContent=Math.floor(n*ppRate);
+            if(ppBtn)ppBtn.textContent="Pay Rs."+n+" via Razorpay";
+        };
+        window.onTopupSliderInput=function(v){
+            if(ppAmt)ppAmt.value=v;
+            if(ppPrev)ppPrev.textContent=Math.floor(parseInt(v)*ppRate);
+            if(ppBtn)ppBtn.textContent="Pay Rs."+v+" via Razorpay";
+        };
+        function setC(mins){
+            var ns=Math.round(mins*60);
+            if(secs===null||ns>secs)secs=ns;
+            if(!ticker)ticker=setInterval(tick,1000);
+            render();
+        }
+        function poll(){
+            fetch("/api/local/credits").then(function(r){return r.json();}).then(function(d){
+                if(d&&d.credits&&typeof d.credits.totalMinutesRemaining==="number"){
+                    setC(d.credits.totalMinutesRemaining);
+                }
+            }).catch(function(){});
+        }
+        poll();
+        setInterval(poll,30000);
+        var origP=window._processServerMessage;
+        window._processServerMessage=function(data){
+            if(origP)origP(data);
+            try{if(data&&data.entitlement&&typeof data.entitlement.minutesRemaining==="number")setC(data.entitlement.minutesRemaining);}catch(ex){}
+        };
+        window.initiateTopup=async function(){
+            if(ppBtn)ppBtn.disabled=true;
+            if(ppSt){ppSt.textContent="";ppSt.className="pp-status";}
+            var amt=parseInt(ppAmt?ppAmt.value:500)||200;
+            try{
+                if(!window.Razorpay){
+                    await new Promise(function(res,rej){
+                        var s=document.createElement("script");
+                        s.src="https://checkout.razorpay.com/v1/checkout.js";
+                        s.onload=res;s.onerror=rej;document.head.appendChild(s);
+                    });
+                }
+                var resp=await fetch("/api/local/topup-order",{
+                    method:"POST",headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({amountRupees:amt})
+                });
+                var od=await resp.json();
+                if(!od.success)throw new Error(od.error||"Order failed");
+                ppRate=od.minutesGranted/amt;
+                new window.Razorpay({
+                    key:od.razorpayKeyId,amount:od.order.amount,currency:od.order.currency,
+                    order_id:od.order.id,name:"Zadoo Credits",description:od.minutesGranted+" min",
+                    theme:{color:"#18bfa6"},
+                    handler:async function(rsp){
+                        if(ppSt)ppSt.textContent="Verifying...";
+                        try{
+                            var vresp=await fetch("/api/local/topup-verify",{
+                                method:"POST",headers:{"Content-Type":"application/json"},
+                                body:JSON.stringify({
+                                    paymentId:od.paymentId,
+                                    razorpay_payment_id:rsp.razorpay_payment_id,
+                                    razorpay_order_id:rsp.razorpay_order_id,
+                                    razorpay_signature:rsp.razorpay_signature
+                                })
+                            });
+                            var vd=await vresp.json();
+                            if(!vd.success)throw new Error(vd.error||"Verify failed");
+                            paid=true;
+                            secs=Math.round(vd.totalMinutesRemaining*60);
+                            pOnce=false;unlockCtrl();render();
+                            if(ppSt){ppSt.textContent="Added "+vd.minutesGranted+" min!";ppSt.className="pp-status success";}
+                            if(ppBtn)ppBtn.disabled=false;
+                            setTimeout(function(){collapsePaymentPanel();},5000);
+                        }catch(ex){
+                            if(ppSt){ppSt.textContent=ex.message||"Verify failed";ppSt.className="pp-status error";}
+                            if(ppBtn)ppBtn.disabled=false;
+                        }
+                    },
+                    modal:{ondismiss:function(){if(ppBtn)ppBtn.disabled=false;}}
+                }).open();
+            }catch(ex){
+                if(ppSt){ppSt.textContent=ex.message||"Failed";ppSt.className="pp-status error";}
+                if(ppBtn)ppBtn.disabled=false;
+            }
+        };
+        function drg(el){
+            if(!el)return;
+            var ox=0,oy=0,sx=0,sy=0,on=false;
+            el.addEventListener("mousedown",function(e){
+                if(e.target.tagName==="BUTTON")return;
+                on=true;ox=e.clientX;oy=e.clientY;
+                var r=el.getBoundingClientRect();sx=r.left;sy=r.top;
+                el.style.transition="none";e.preventDefault();
+            });
+            document.addEventListener("mousemove",function(e){
+                if(!on)return;
+                el.style.left=(sx+e.clientX-ox)+"px";
+                el.style.top=(sy+e.clientY-oy)+"px";
+                el.style.right="auto";el.style.bottom="auto";
+            });
+            document.addEventListener("mouseup",function(){if(on){on=false;el.style.transition="";}});
+        }
+        drg(banner);drg(timer);
+    })();
+    </script>
+
 </body>
 </html>

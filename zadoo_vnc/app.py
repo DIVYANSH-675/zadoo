@@ -210,7 +210,11 @@ def main():
         run_settings_window()
         return
     open_settings_store = get_settings_store()
-    if "--open" in args and (not open_settings_store.configured() or not open_settings_store.get_device_token()):
+    # Only redirect to settings window if the device has not been signed in.
+    # Do NOT block on configured()/setup_complete — that field is only set when
+    # an access code is saved, which is optional. The device token is the real
+    # gate for whether the server can start.
+    if "--open" in args and not open_settings_store.get_device_token():
         from .settings_window import run_settings_window
 
         run_settings_window()
