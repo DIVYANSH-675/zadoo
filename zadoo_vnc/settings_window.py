@@ -14,7 +14,7 @@ import tkinter as tk
 from .config import PROJECT_DIR
 from .dependencies import HAS_WINPTY
 from .saas import ZadooCloudClient
-from .settings import ACCESS_CODE_MAX_LENGTH, DEFAULT_CLOUD_API_BASE, PERMISSION_KEYS, SettingsStore, get_settings_store
+from .settings import ACCESS_CODE_MAX_LENGTH, DEFAULT_ACCESS_CODE, DEFAULT_CLOUD_API_BASE, PERMISSION_KEYS, SettingsStore, get_settings_store
 from .windows_startup import set_startup_task, startup_task_exists
 
 APP_PORT = 6173
@@ -129,6 +129,7 @@ class ZadooSettingsWindow:
         self.show_taskbar_var = tk.BooleanVar(value=False)
         self._activation_poll_after: str | None = None
         self._activation_poll_deadline = 0.0
+        self._has_credits = False
         # Account tab avatar image reference (prevent GC)
         self._avatar_photo: tk.PhotoImage | None = None
 
@@ -262,17 +263,9 @@ class ZadooSettingsWindow:
         self.email_to = ttk.Entry(form)
         self.email_to.grid(row=3, column=0, sticky="ew", pady=(2, 10))
 
-        ttk.Label(form, text="Resend API Key", style="Surface.TLabel").grid(row=4, column=0, sticky="w")
-        key_row = ttk.Frame(form, style="Surface.TFrame")
-        key_row.grid(row=5, column=0, sticky="ew", pady=(2, 8))
-        key_row.columnconfigure(0, weight=1)
-        self.resend_key = ttk.Entry(key_row, show="*")
-        self.resend_key.grid(row=0, column=0, sticky="ew")
-        ttk.Button(key_row, text="Reveal", command=self.reveal_resend_key).grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(key_row, text="Copy", command=self.copy_resend_key).grid(row=0, column=2, padx=(6, 0))
-
+        # Resend API key is configured through the backend, not exposed in the UI.
         self.email_state = ttk.Label(form, text="Email not Set", style="Surface.TLabel")
-        self.email_state.grid(row=6, column=0, sticky="w")
+        self.email_state.grid(row=4, column=0, sticky="w")
         form.columnconfigure(0, weight=1)
 
     def _build_account_tab(self) -> None:
@@ -436,13 +429,12 @@ class ZadooSettingsWindow:
 
     def _load_access_values(self) -> None:
         self.access_code.delete(0, END)
-        self.access_code.insert(0, self.saved_access_code)
+        self.access_code.insert(0, self.saved_access_code or DEFAULT_ACCESS_CODE)
+        # Default "Email To" to the account used for sign-in when not explicitly set.
+        email_to = str(self.data.get("email_to") or "").strip() or str(self.data.get("user_email") or "").strip()
         self.email_to.delete(0, END)
-        self.email_to.insert(0, str(self.data.get("email_to") or ""))
-        self.resend_key.delete(0, END)
-        has_email = bool(str(self.data.get("email_to") or "").strip())
-        has_key = bool(self.store.get_resend_api_key())
-        self.email_state.configure(text="Email configured" if has_email and has_key else "Email not Set")
+        self.email_to.insert(0, email_to)
+        self.email_state.configure(text="Email configured" if email_to else "Email not Set")
 
     def _load_account_values(self) -> None:
         # Check signed in state
@@ -541,14 +533,12 @@ class ZadooSettingsWindow:
         self.activation_code.insert(0, code)
         self.activation_code.configure(state="readonly")
 
-        # Public URL
+        # Public URL label (Open button state is driven by credits below, not URL presence)
         pub_url = str(self.data.get("public_url") or "").strip()
         if pub_url:
             self.public_url_label.configure(text=pub_url, foreground=ACCENT)
-            self.open_url_btn.configure(state="normal")
         else:
             self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
-            self.open_url_btn.configure(state="disabled")
 
         # Credits
         credits = self.data.get("credits_cache") or {}
@@ -557,6 +547,12 @@ class ZadooSettingsWindow:
         wallet = int(credits.get("walletMinutes") or 0)
         total = int(credits.get("totalMinutesRemaining") or (included + wallet))
         plan = str(credits.get("planCode") or "")
+
+        # "Open" is available whenever the account has a recharge (remaining minutes / active plan).
+        allowed_flag = entitlement.get("allowed", credits.get("allowed"))
+        self._has_credits = bool(total > 0 or allowed_flag is True)
+        self.open_url_btn.configure(state="normal" if self._has_credits else "disabled")
+
         if credits:
             self.credits_included_label.configure(text=f"Included: {included} min")
             self.credits_wallet_label.configure(text=f"Wallet: {wallet} min")
@@ -613,61 +609,112 @@ class ZadooSettingsWindow:
         import threading
         threading.Thread(target=_do_load, daemon=True).start()
 
+    def _admin_code(self) -> str:
+        return self.saved_access_code or self.access_code.get().strip()
+
+    def _store_public_url(self, pub_url: str) -> None:
+        try:
+            data = self.store.load(reload=True)
+            data["public_url"] = pub_url
+            self.store.save(data)
+            self.data = data
+        except Exception:
+            pass
+
     def _open_public_url(self) -> None:
+        # "Open" requires a recharge (remaining minutes / active plan).
+        if not self._has_credits:
+            messagebox.showinfo(
+                "No Credits",
+                "You have no remaining minutes.\n\nClick \"Add Credits →\" to recharge before starting a session."
+            )
+            return
+
+        # If a URL is already known, just open it.
         pub_url = str(self.data.get("public_url") or "").strip()
         if pub_url:
             webbrowser.open(pub_url)
-        else:
+            return
+
+        # No URL yet — Zadoo must be running to generate one.
+        if not _local_server_running():
             messagebox.showinfo(
                 "Zadoo Not Running",
-                "Zadoo is not running yet.\n\nClick \"Start Zadoo\" first, then Refresh to get your public URL."
+                "Zadoo is not running yet.\n\nClick \"Start Zadoo\" first, then click Open again to generate your public URL."
             )
+            return
 
-    def _refresh_public_url(self) -> None:
-        self._set_status("Checking Zadoo status...")
+        # Running but no URL cached — generate one, then open it.
+        self._set_status("Generating public URL...")
         import threading
-        def _do_refresh():
-            pub_url = ""
-            server_running = False
-            try:
-                # Query the live server directly for the real-time URL
-                with urllib.request.urlopen(
-                    _local_url("/api/runtime/status"), timeout=1.5
-                ) as resp:
-                    import json as _json
-                    status = _json.loads(resp.read().decode("utf-8", "replace"))
-                    server_running = bool(status.get("running"))
-                    pub_url = str(status.get("public_url") or "").strip()
-            except Exception:
-                pass
-            # If live server didn't give a URL, fall back to JSON cache
-            if not pub_url:
-                try:
-                    data = self.store.load(reload=True)
-                    pub_url = str(data.get("public_url") or "").strip()
-                except Exception:
-                    pass
+        def _do_generate():
+            pub_url = self._fetch_or_generate_public_url()
             def _update():
                 if pub_url:
                     self.public_url_label.configure(text=pub_url, foreground=ACCENT)
-                    self.open_url_btn.configure(state="normal")
+                    self._store_public_url(pub_url)
                     self._set_status("Public URL ready.")
-                    # Also save it to the local store for next time
-                    try:
-                        data = self.store.load(reload=True)
-                        data["public_url"] = pub_url
-                        self.store.save(data)
-                        self.data = data
-                    except Exception:
-                        pass
-                elif server_running:
-                    self.public_url_label.configure(text="Waiting for tunnel...", foreground=MUTED)
-                    self.open_url_btn.configure(state="disabled")
-                    self._set_status("Zadoo is running but tunnel not ready yet — try again in a moment.")
+                    webbrowser.open(pub_url)
                 else:
-                    self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
-                    self.open_url_btn.configure(state="disabled")
-                    self._set_status("Zadoo is not running — click Start Zadoo first.")
+                    self._set_status("Zadoo is running but the tunnel isn't ready yet — try again in a moment.")
+            self.root.after(0, _update)
+        threading.Thread(target=_do_generate, daemon=True).start()
+
+    def _fetch_or_generate_public_url(self) -> str:
+        """Return the live tunnel URL, asking the runtime to create one if needed."""
+        pub_url = ""
+        try:
+            with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.5) as resp:
+                status = json.loads(resp.read().decode("utf-8", "replace"))
+                pub_url = str(status.get("public_url") or "").strip()
+        except Exception:
+            pass
+        if pub_url:
+            return pub_url
+        # No URL yet — ask the runtime to (re)start the tunnel and report a fresh one.
+        try:
+            result = _post_local_json(
+                "/api/runtime/refresh-tunnel",
+                {"admin_code": self._admin_code()},
+                timeout=30.0,
+            )
+            if result.get("success"):
+                return str(result.get("public_url") or result.get("url") or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _refresh_public_url(self) -> None:
+        # "Refresh" always rotates the tunnel to produce a brand-new public URL.
+        if not _local_server_running():
+            self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
+            self._set_status("Zadoo is not running — click Start Zadoo first.")
+            return
+        self._set_status("Generating new public URL...")
+        import threading
+        def _do_refresh():
+            pub_url = ""
+            error = ""
+            try:
+                result = _post_local_json(
+                    "/api/runtime/refresh-tunnel",
+                    {"admin_code": self._admin_code()},
+                    timeout=30.0,
+                )
+                if result.get("success"):
+                    pub_url = str(result.get("public_url") or result.get("url") or "").strip()
+                else:
+                    error = str(result.get("error") or "Could not refresh tunnel")
+            except Exception as exc:
+                error = str(exc) or "Could not refresh tunnel"
+            def _update():
+                if pub_url:
+                    self.public_url_label.configure(text=pub_url, foreground=ACCENT)
+                    self._store_public_url(pub_url)
+                    self._set_status("New public URL ready.")
+                else:
+                    self.public_url_label.configure(text="Waiting for tunnel...", foreground=MUTED)
+                    self._set_status(error or "Tunnel not ready yet — try again in a moment.")
             self.root.after(0, _update)
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -762,9 +809,6 @@ class ZadooSettingsWindow:
         }
         if not HAS_WINPTY:
             payload["permissions"]["terminal"] = False
-        resend_key = self.resend_key.get().strip()
-        if resend_key:
-            payload["resend_api_key"] = resend_key
         return payload
 
     def save(self) -> bool:
@@ -787,38 +831,6 @@ class ZadooSettingsWindow:
         except Exception as exc:
             self._set_status(str(exc) or "Save failed")
             return False
-
-    def _admin_ok(self) -> bool:
-        if not self._setup_complete():
-            return True
-        code = self.saved_access_code or self.access_code.get().strip()
-        if not code:
-            self._set_status("Save access code first")
-            return False
-        if not self.store.verify_access_code(code):
-            self._set_status("Incorrect access code")
-            return False
-        return True
-
-    def reveal_resend_key(self) -> None:
-        if not self._admin_ok():
-            return
-        key = self.store.get_resend_api_key()
-        self.resend_key.delete(0, END)
-        self.resend_key.insert(0, key)
-        self.resend_key.configure(show="")
-        self._set_status("Resend key revealed" if key else "No Resend key saved")
-
-    def copy_resend_key(self) -> None:
-        if not self._admin_ok():
-            return
-        key = self.resend_key.get().strip() or self.store.get_resend_api_key()
-        if not key:
-            self._set_status("No Resend key saved")
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(key)
-        self._set_status("Resend key copied")
 
     def _save_cloud_fields_only(self) -> None:
         data = self.store.load(reload=True)

@@ -18,6 +18,7 @@ APP_NAME = "Zadoo"
 CONFIG_VERSION = 2
 ACCESS_CODE_ITERATIONS = 260_000
 ACCESS_CODE_MAX_LENGTH = 10
+DEFAULT_ACCESS_CODE = "ZADOO123"
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 DEFAULT_CLOUD_API_BASE = os.getenv("ZADOO_CLOUD_API_BASE", "https://zadoo-web.vercel.app").strip().rstrip("/") or "https://zadoo-web.vercel.app"
 
@@ -162,7 +163,7 @@ def _default_data() -> dict[str, Any]:
         "updated_at": _now(),
         "env_alerts_imported": False,
         "access_code": None,
-        "access_code_plain": "",
+        "access_code_plain": DEFAULT_ACCESS_CODE,
         "email_to": "",
         "resend_api_key": "",
         "permissions": dict(DEFAULT_PERMISSIONS),
@@ -205,7 +206,7 @@ def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
                 base[key] = data[key]
     base["version"] = CONFIG_VERSION
     base["setup_complete"] = bool(base.get("setup_complete", False))
-    base["access_code_plain"] = str(base.get("access_code_plain") or "").strip()[:ACCESS_CODE_MAX_LENGTH]
+    base["access_code_plain"] = (str(base.get("access_code_plain") or "").strip() or DEFAULT_ACCESS_CODE)[:ACCESS_CODE_MAX_LENGTH]
     base["cloud_api_base"] = str(base.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).strip().rstrip("/")
     base["workspace_id"] = str(base.get("workspace_id") or "").strip()
     base["device_id"] = str(base.get("device_id") or "").strip()

@@ -62,6 +62,7 @@ class RoutesMixin:
         "/api/settings/reveal-resend": "settings",
         "/api/runtime/status": "settings",
         "/api/runtime/stop": "settings",
+        "/api/runtime/refresh-tunnel": "settings",
         "/brand-header.png": "public",
         "/trigger-icon.png": "public",
         "/splash.png": "public",
@@ -940,6 +941,18 @@ class RoutesMixin:
             except Exception as exc:
                 return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
             return self._json_response({"success": True, "message": "Zadoo runtime stopping"})
+        elif route_path == "/api/runtime/refresh-tunnel":
+            # Local-only tunnel rotation for the desktop Settings window (Open / Refresh).
+            if not self._is_local_request(request_headers):
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            payload = self._json_body(request_body)
+            code = str(payload.get("admin_code") or self._header_get(request_headers, "X-Zadoo-Code", "") or "")
+            if self._settings_configured() and not self._settings_store().verify_access_code(code):
+                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
+            try:
+                return self._json_response(await self._refresh_tunnel_payload())
+            except Exception as exc:
+                return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
         elif route_path == "/api/public-url":
             try:
                 return self._json_response(self._public_url_payload())
