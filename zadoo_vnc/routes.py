@@ -316,6 +316,10 @@ class RoutesMixin:
         return self._feature_allowed_for_headers(request_headers, feature)
 
     def _is_ws_action_authorized(self, websocket, action):
+        # During the post-zero grace lock (≈ -5 to -10 min), only screen-view actions are
+        # allowed — mouse / keyboard / clipboard / everything else is disabled.
+        if getattr(self, "_grace_block_controls", False) and str(action) not in self.VIEW_ACTIONS:
+            return False
         return self._is_ws_action_authorized_for_headers(self._headers_for_websocket(websocket), action)
 
     async def _send_ws_forbidden(self, websocket, action):

@@ -6571,7 +6571,7 @@
     <script id="credit-system-js">
     (function(){
         var WARN=30*60,TMRSECS=10*60,G1=0,G2=-5*60,GEND=-10*60;
-        var secs=null,ticker=null,locked=false,pOnce=false,paid=false,rT=null,ppRate=1;
+        var secs=null,ticker=null,locked=false,pOnce=false,paid=false,rT=null,ppRate=1,lastGraceMin=-1;
         function eid(id){return document.getElementById(id);}
         var banner=eid("creditBanner"),banMsg=eid("creditBannerMsg"),
             timer=eid("creditTimer"),tmrTxt=eid("creditTimerText"),
@@ -6591,6 +6591,11 @@
             if(tmrTxt)tmrTxt.textContent=fmt(secs);
             if(timer){if(secs<0)timer.classList.add("danger");else timer.classList.remove("danger");}
             if(secs<=G1&&!pOnce){pOnce=true;openPaymentPanel();}
+            // Re-open the payment sidebar at the start of every grace minute (0 .. -10).
+            if(secs<=0&&secs>GEND){
+                var gm=Math.floor((-secs)/60);
+                if(gm!==lastGraceMin){lastGraceMin=gm;if(!paid)openPaymentPanel();}
+            }
             if(secs<=G2&&!locked){locked=true;lockCtrl();}
             if(secs<=GEND){endSess();}
         }
@@ -6631,7 +6636,12 @@
         };
         function setC(mins){
             var ns=Math.round(mins*60);
-            if(secs===null||ns>secs)secs=ns;
+            // Initialize once; afterwards only bump UP on a real top-up (positive balance).
+            // At 0 balance, do NOT reset — let the grace countdown continue into negative
+            // territory (otherwise the 30s poll keeps snapping the timer back to 0).
+            if(secs===null||(ns>0&&ns>secs))secs=ns;
+            // Balance restored (top-up via app or website) → release the grace lock.
+            if(ns>0&&(locked||pOnce)){lastGraceMin=-1;unlockCtrl();}
             if(!ticker)ticker=setInterval(tick,1000);
             render();
         }

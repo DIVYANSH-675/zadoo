@@ -589,31 +589,83 @@ class MediaMixin:
             pass
 
     async def _cloud_remote_session_heartbeat(self, websocket, session_id):
+        # Grace policy once the balance reaches 0 (heartbeat reports allowed=False):
+        #   minute 0..5  → full control kept; client shows "add credit" banner + payment panel
+        #   minute 5..10 → controls locked (screen-share only); payment panel keeps prompting
+        #   minute 10    → session ends
+        GRACE_LOCK_AFTER = 5
+        GRACE_END_AFTER = 10
         try:
             from .saas import ZadooCloudClient
 
             client = ZadooCloudClient(self.settings_store)
+            grace_minutes = 0
+            in_grace = False
             while True:
                 await asyncio.sleep(60)
-                result = await asyncio.to_thread(client.session_heartbeat, session_id, 1)
-                entitlement = result.get("entitlement") if isinstance(result, dict) else None
-                if isinstance(entitlement, dict) and entitlement.get("allowed") is False:
+                if not in_grace:
+                    result = await asyncio.to_thread(client.session_heartbeat, session_id, 1)
+                    entitlement = result.get("entitlement") if isinstance(result, dict) else None
+                    allowed = entitlement.get("allowed") if isinstance(entitlement, dict) else None
+                    if allowed is False:
+                        # Balance just hit zero — begin the local grace window.
+                        in_grace = True
+                        grace_minutes = 1
+                        self._grace_block_controls = False
+                        await self._send_grace(websocket, grace_minutes, False)
+                    continue
+                # In grace: the cloud has already ended the session record, so stop billing
+                # and instead watch the workspace entitlement for a top-up that resumes us.
+                recharged = False
+                try:
+                    ent = await asyncio.to_thread(client.entitlement)
+                    e = ent.get("entitlement") if isinstance(ent, dict) else None
+                    recharged = bool(isinstance(e, dict) and e.get("allowed") and not e.get("revoked"))
+                except Exception:
+                    recharged = False
+                if recharged:
+                    in_grace = False
+                    grace_minutes = 0
+                    self._grace_block_controls = False
                     try:
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "error": entitlement.get("reason") or "Entitlement blocked",
-                        }))
+                        cs = await asyncio.to_thread(self._cloud_start_remote_session)
+                        if isinstance(cs, dict) and cs.get("sessionId"):
+                            session_id = cs.get("sessionId")
+                    except Exception:
+                        pass
+                    await self._send_grace(websocket, 0, False, recharged=True)
+                    continue
+                grace_minutes += 1
+                if grace_minutes >= GRACE_END_AFTER:
+                    self._grace_block_controls = False
+                    try:
+                        await websocket.send(json.dumps({"type": "error", "error": "Session ended — out of credits"}))
                     except Exception:
                         pass
                     try:
-                        await websocket.close(code=1008, reason="Entitlement blocked")
+                        await websocket.close(code=1008, reason="Out of credits")
                     except Exception:
                         pass
                     return
+                locked = grace_minutes >= GRACE_LOCK_AFTER
+                self._grace_block_controls = locked
+                await self._send_grace(websocket, grace_minutes, locked)
         except asyncio.CancelledError:
+            self._grace_block_controls = False
             raise
         except Exception:
             return
+
+    async def _send_grace(self, websocket, grace_minutes, controls_locked, recharged=False):
+        try:
+            await websocket.send(json.dumps({
+                "type": "grace",
+                "graceMinutes": int(grace_minutes),
+                "controlsLocked": bool(controls_locked),
+                "recharged": bool(recharged),
+            }))
+        except Exception:
+            pass
 
     async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol, path=None):
         mic_log = logging.getLogger("mic")
@@ -711,6 +763,8 @@ class MediaMixin:
             if isinstance(cloud_start, dict):
                 cloud_session_id = cloud_start.get("sessionId")
             if cloud_session_id:
+                # Fresh session with credit — clear any stale grace lock.
+                self._grace_block_controls = False
                 cloud_heartbeat_task = asyncio.create_task(self._cloud_remote_session_heartbeat(websocket, cloud_session_id))
             self._apply_stream_profile("client_connected")
             await self._send_stream_status(websocket)
