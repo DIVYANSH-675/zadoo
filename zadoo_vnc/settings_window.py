@@ -636,12 +636,14 @@ class ZadooSettingsWindow:
             webbrowser.open(pub_url)
             return
 
-        # No URL yet — Zadoo must be running to generate one.
+        # No URL yet — Zadoo must be running to generate one. Offer to start it now
+        # so the user doesn't have to find a separate button.
         if not _local_server_running():
-            messagebox.showinfo(
-                "Zadoo Not Running",
-                "Zadoo is not running yet.\n\nClick \"Start Zadoo\" first, then click Open again to generate your public URL."
-            )
+            if messagebox.askyesno(
+                "Start Zadoo?",
+                "Zadoo isn't running yet.\n\nStart it now? Once it's running, click Open again to get your public URL."
+            ):
+                self.start_zadoo()
             return
 
         # Running but no URL cached — generate one, then open it.
