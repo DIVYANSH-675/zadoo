@@ -4942,6 +4942,7 @@
                 if (t.closest('#kb-overlay')) return true;
                 if (t.closest('#webcam-container')) return true;
                 if (t.closest('#sidebar-trigger')) return true;
+                if (t.closest('#paymentPanel') || t.closest('.payment-panel')) return true;
             } catch (_) { }
             return false;
         }

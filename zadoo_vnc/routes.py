@@ -333,14 +333,24 @@ class RoutesMixin:
             return True
         if feature == "settings":
             return self._is_local_request(request_headers)
-        if not self._settings_configured():
-            return self._role_allows(self._role_for_headers(request_headers), feature)
         session = self._session_for_headers(request_headers)
         if not isinstance(session, dict):
             return False
-        if not self._cloud_entitlement_allows():
+        # When the device is signed in (cloud mode) or setup is complete, the Zadoo
+        # Settings permission matrix is the SINGLE source of truth for what a connected
+        # viewer may do — unchecking a permission must actually disable it. Role/access
+        # level only applies in legacy mode (not signed in and not configured).
+        if self._settings_configured() or self._has_device_token():
+            if not self._cloud_entitlement_allows():
+                return False
+            return self._settings_permission_allows(feature)
+        return self._role_allows(session.get("role"), feature)
+
+    def _has_device_token(self):
+        try:
+            return bool(self._settings_store().get_device_token())
+        except Exception:
             return False
-        return self._settings_permission_allows(feature)
 
     def _cloud_entitlement_allows(self):
         try:
@@ -762,16 +772,22 @@ class RoutesMixin:
                 val = self._header_get(request_headers, hdr, None) if request_headers else None
                 if val:
                     headers_out[hdr] = str(val)
-            req = urllib.request.Request(url, data=body_bytes, headers=headers_out, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                raw = resp.read()
-            return self._json_response(json.loads(raw.decode("utf-8", "replace")))
-        except urllib.error.HTTPError as exc:
+            def _do_request():
+                req = urllib.request.Request(url, data=body_bytes, headers=headers_out, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        return int(resp.getcode() or 200), resp.read()
+                except urllib.error.HTTPError as exc:
+                    return int(exc.code or 502), exc.read()
+            # Run the blocking HTTP call off the event loop so the tunnel/server stays responsive.
+            loop = asyncio.get_running_loop()
+            status, raw = await loop.run_in_executor(None, _do_request)
             try:
-                data = json.loads(exc.read().decode("utf-8", "replace"))
+                data = json.loads((raw or b"").decode("utf-8", "replace"))
             except Exception:
-                data = {"success": False, "error": str(exc)}
-            return self._json_response(data, http.HTTPStatus(exc.code) if exc.code in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY)
+                data = {"success": False, "error": "Upstream returned a non-JSON response"}
+            http_status = http.HTTPStatus(status) if status in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY
+            return self._json_response(data, http_status)
         except Exception as exc:
             return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.BAD_GATEWAY)
 
