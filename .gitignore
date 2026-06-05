@@ -35,3 +35,4 @@ web/
 web/node_modules/
 web/.next/
 web/prisma/migrations/
+.vercel

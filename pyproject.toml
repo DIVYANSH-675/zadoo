@@ -7,7 +7,7 @@ name = "zadoo-vnc"
 version = "1.0.0"
 description = "Windows-focused web VNC runtime with screen capture, input, clipboard, and Cloudflare tunnel support."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 dependencies = [
   "websockets==15.0.1",
   "mss==10.2.0",
@@ -36,3 +36,6 @@ packages = ["zadoo_vnc"]
 
 [tool.setuptools.package-data]
 zadoo_vnc = ["templates/*.html"]
+
+[tool.vercel]
+entrypoint = "zadoo_vnc/app.py"
