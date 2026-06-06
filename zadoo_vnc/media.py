@@ -568,7 +568,12 @@ class MediaMixin:
 
             result = ZadooCloudClient(self.settings_store).start_session(self._cloud_public_url())
             if isinstance(result, dict) and result.get("success") is False:
-                if int(result.get("status_code") or 0) in {401, 402, 403}:
+                status = int(result.get("status_code") or 0)
+                if status == 402:
+                    # Out of credits: let the operator CONNECT (to see the screen + pay)
+                    # under the grace/lock policy, rather than hard-closing.
+                    return {"success": True, "no_credits": True}
+                if status in {401, 403}:
                     return result
                 if self._cloud_cached_entitlement_allowed():
                     return {"success": True, "skipped": True, "offline_grace": True, "error": result.get("error")}
@@ -588,11 +593,13 @@ class MediaMixin:
         except Exception:
             pass
 
-    async def _cloud_remote_session_heartbeat(self, websocket, session_id):
+    async def _cloud_remote_session_heartbeat(self, websocket, session_id, start_in_grace=False):
         # Grace policy once the balance reaches 0 (heartbeat reports allowed=False):
         #   minute 0..5  → full control kept; client shows "add credit" banner + payment panel
         #   minute 5..10 → controls locked (screen-share only); payment panel keeps prompting
         #   minute 10    → session ends
+        # start_in_grace=True means we connected with zero credits and run the grace
+        # policy from the start (no billing session until a top-up resumes us).
         GRACE_LOCK_AFTER = 5
         GRACE_END_AFTER = 10
         try:
@@ -600,7 +607,10 @@ class MediaMixin:
 
             client = ZadooCloudClient(self.settings_store)
             grace_minutes = 0
-            in_grace = False
+            in_grace = bool(start_in_grace)
+            if in_grace:
+                self._grace_block_controls = False
+                await self._send_grace(websocket, 0, False)
             while True:
                 await asyncio.sleep(60)
                 if not in_grace:
@@ -766,6 +776,13 @@ class MediaMixin:
                 # Fresh session with credit — clear any stale grace lock.
                 self._grace_block_controls = False
                 cloud_heartbeat_task = asyncio.create_task(self._cloud_remote_session_heartbeat(websocket, cloud_session_id))
+            elif isinstance(cloud_start, dict) and cloud_start.get("no_credits"):
+                # Connected with zero credits — run the grace policy from the start so the
+                # operator can see the screen + pay, then it locks/ends if unpaid (and
+                # resumes automatically on top-up).
+                cloud_heartbeat_task = asyncio.create_task(
+                    self._cloud_remote_session_heartbeat(websocket, None, start_in_grace=True)
+                )
             self._apply_stream_profile("client_connected")
             await self._send_stream_status(websocket)
             # Keep connection alive and handle any incoming messages

@@ -1018,7 +1018,8 @@ class ZadooSettingsWindow:
         if not self.store.get_device_token():
             self._set_status("Sign in to Zadoo first")
             return
-        # Try to check entitlement but don't block start if the check itself fails
+        # Zadoo STARTS regardless of remaining credits (billing is enforced inside the
+        # session via the grace/lock + payment panel). Only a revoked device is blocked.
         try:
             result = self.cloud.entitlement()
             entitlement = (result.get("entitlement") if isinstance(result, dict) else None) or {}
@@ -1026,22 +1027,10 @@ class ZadooSettingsWindow:
             if entitlement.get("revoked"):
                 self._set_status(str(entitlement.get("reason") or "Device is revoked"))
                 return
-            # Hard-block only when the cloud RESPONDED and says we're not allowed
-            # (a successful response with allowed:false = genuinely blocked).
-            if entitlement.get("allowed") is False and result.get("success"):
-                self._set_status(str(entitlement.get("reason") or result.get("error") or "Billing blocked"))
-                return
         except Exception:
-            pass  # network error — fall through to the cached check below
-        # Belt-and-suspenders: if the last-known entitlement says NOT allowed (e.g. 0
-        # balance) or revoked, don't start even if the live check failed. Prevents the
-        # app from starting on an exhausted/revoked balance.
-        cache = self.data.get("entitlement_cache") or {}
-        if cache.get("revoked"):
-            self._set_status(str(cache.get("reason") or "Device is revoked"))
-            return
-        if cache.get("allowed") is False:
-            self._set_status(str(cache.get("reason") or "Out of credits — add balance to start"))
+            pass  # network error — let the runtime start anyway
+        if (self.data.get("entitlement_cache") or {}).get("revoked"):
+            self._set_status("Device is revoked")
             return
         # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
         # fresh tunnel/public link is created. We use the graceful stop endpoint (not
