@@ -90,7 +90,6 @@ def _find_icon() -> str:
     candidates = [
         Path(getattr(sys, "_MEIPASS", "")) / "app_icon.ico",
         Path(sys.executable).with_name("app_icon.ico"),
-        Path(r"C:\Users\divya\Real\app_icon.ico"),
         PROJECT_DIR / "app_icon.ico",
     ]
     for path in candidates:
@@ -582,18 +581,21 @@ class ZadooSettingsWindow:
         else:
             self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
 
-        # Credits
+        # Credits — heartbeat updates entitlement_cache (not credits_cache), so fall
+        # back to entitlement_cache values to avoid a stale display.
         credits = self.data.get("credits_cache") or {}
         entitlement = self.data.get("entitlement_cache") or {}
-        included = int(credits.get("includedMinutesRemaining") or 0)
-        wallet = int(credits.get("walletMinutes") or 0)
+        included = int(credits.get("includedMinutesRemaining")
+                       or entitlement.get("includedMinutesRemaining") or 0)
+        wallet = int(credits.get("walletMinutes")
+                     or entitlement.get("walletMinutesRemaining") or 0)
         total = int(credits.get("totalMinutesRemaining") or (included + wallet))
-        plan = str(credits.get("planCode") or "")
+        plan = str(credits.get("planCode") or entitlement.get("planCode") or "")
 
         allowed_flag = entitlement.get("allowed", credits.get("allowed"))
         self._has_credits = bool(total > 0 or allowed_flag is True)
 
-        if credits:
+        if credits or entitlement:
             self.credits_included_label.configure(text=f"Included: {included} min")
             self.credits_wallet_label.configure(text=f"Wallet: {wallet} min")
             self.credits_total_label.configure(text=f"Total remaining: {total} min{(' · ' + plan) if plan else ''}")
@@ -672,16 +674,23 @@ class ZadooSettingsWindow:
             self._set_status("Tunnel not ready yet — click Refresh in a moment.")
 
     def _begin_public_url_autopoll(self, attempts: int = 8) -> None:
-        """After Start, poll the runtime (read-only) until the public link appears."""
+        """After Start, poll the runtime until the public link appears — or until the
+        runtime tells us the tunnel is disabled (then show WHY instead of hanging)."""
         if attempts <= 0:
             return
         import threading
         def _poll():
             url = ""
+            block_reason = ""
+            tunnel_enabled = True
+            running = False
             try:
-                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.5) as resp:
+                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=3.0) as resp:
                     status = json.loads(resp.read().decode("utf-8", "replace"))
+                    running = True
                     url = str(status.get("public_url") or "").strip()
+                    tunnel_enabled = bool(status.get("tunnel_enabled", True))
+                    block_reason = str(status.get("tunnel_block_reason") or "").strip()
             except Exception:
                 pass
             def _update():
@@ -689,6 +698,14 @@ class ZadooSettingsWindow:
                     self.public_url_label.configure(text=url, foreground=ACCENT)
                     self._store_public_url(url)
                     self._set_status("Public link ready — click it to open.")
+                elif running and not tunnel_enabled:
+                    # Runtime is up but the tunnel is off (billing/sign-in/etc) — stop hanging.
+                    msg = block_reason or "Tunnel is disabled."
+                    self.public_url_label.configure(text=msg, foreground=DANGER)
+                    self._set_status(msg + "  Fix it, then click Start again.")
+                elif attempts <= 1:
+                    self.public_url_label.configure(text="Tunnel not ready — click Refresh", foreground=MUTED)
+                    self._set_status("Tunnel is taking longer than expected. Click Refresh, or Stop and Start again.")
                 else:
                     self.root.after(2500, lambda: self._begin_public_url_autopoll(attempts - 1))
             self.root.after(0, _update)
@@ -1000,8 +1017,9 @@ class ZadooSettingsWindow:
             if entitlement.get("revoked"):
                 self._set_status(str(entitlement.get("reason") or "Device is revoked"))
                 return
-            # Only hard-block if we know for sure they are blocked AND they have no minutes
-            if entitlement.get("allowed") is False and not result.get("success", True):
+            # Hard-block only when the cloud RESPONDED and says we're not allowed
+            # (a successful response with allowed:false = genuinely blocked).
+            if entitlement.get("allowed") is False and result.get("success"):
                 self._set_status(str(entitlement.get("reason") or result.get("error") or "Billing blocked"))
                 return
         except Exception:

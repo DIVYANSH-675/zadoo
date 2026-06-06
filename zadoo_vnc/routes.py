@@ -9,6 +9,7 @@ import logging
 import os
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 from http.cookies import SimpleCookie
@@ -597,13 +598,20 @@ class RoutesMixin:
         csrf_token = secrets.token_urlsafe(32)
         session_payload = {"role": role, "expires_at": expires_at, "csrf": csrf_token}
         sessions[token] = session_payload
+        # Mark cookies Secure when served over the HTTPS tunnel (but NOT for plain
+        # http://localhost, where a Secure cookie would be rejected by the browser).
+        try:
+            xfproto = str(self._header_get(request_headers, "X-Forwarded-Proto", "") or "").lower()
+            secure = "Secure; " if (not self._is_local_request(request_headers) or xfproto == "https") else ""
+        except Exception:
+            secure = ""
         auth_cookie = (
             f"{self.AUTH_COOKIE_NAME}={token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
-            "HttpOnly; SameSite=Lax"
+            f"{secure}HttpOnly; SameSite=Lax"
         )
         csrf_cookie = (
             f"{self.CSRF_COOKIE_NAME}={csrf_token}; Path=/; Max-Age={self.AUTH_TTL_SECONDS}; "
-            "SameSite=Lax"
+            f"{secure}SameSite=Lax"
         )
         payload = {"success": True, "mode": role, "expires_in": self.AUTH_TTL_SECONDS, "csrf_token": csrf_token}
         if permissions is not None:
@@ -965,6 +973,7 @@ class RoutesMixin:
                 "running": True,
                 "port": getattr(self, "port", 6173),
                 "tunnel_enabled": bool(getattr(self, "enable_tunnel", False)),
+                "tunnel_block_reason": str(getattr(self, "tunnel_block_reason", "") or ""),
                 "public_url": (self.tunnel_manager.get_current_url() if self.tunnel_manager else None),
             })
         elif route_path == "/api/runtime/stop":
@@ -975,9 +984,18 @@ class RoutesMixin:
             if self._settings_configured() and not self._settings_store().verify_access_code(code):
                 return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
             try:
-                self.stop()
+                self.stop()  # graceful: signals stop_event, closes the listeners
             except Exception as exc:
                 return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+            # Guarantee the process actually exits and frees port 6173, even if some
+            # cleanup hangs — Stop must truly stop. Graceful shutdown gets ~1.5s first.
+            def _force_exit():
+                try:
+                    time.sleep(1.5)
+                except Exception:
+                    pass
+                os._exit(0)
+            threading.Thread(target=_force_exit, daemon=True).start()
             return self._json_response({"success": True, "message": "Zadoo runtime stopping"})
         elif route_path == "/api/runtime/refresh-tunnel":
             # Local-only tunnel rotation for the desktop Settings window (Open / Refresh).
@@ -1165,9 +1183,24 @@ class RoutesMixin:
         elif route_path == "/api/local/profile":
             return await self._proxy_cloud_get("/api/agent/profile", request_headers)
         elif route_path == "/api/local/topup-order":
-            return await self._proxy_cloud_post("/api/agent/wallet/topup-order", request_body, request_headers)
+            # Body isn't read off the WS HTTP parser, so accept params from the query
+            # string (client sends them there) and forward as JSON to the cloud.
+            body = self._json_body(request_body) or {}
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query or "")
+            for k in ("amountRupees", "amountDollars", "amountMinor"):
+                if k in q and k not in body:
+                    try:
+                        body[k] = int(q[k][0])
+                    except Exception:
+                        pass
+            return await self._proxy_cloud_post("/api/agent/wallet/topup-order", json.dumps(body).encode("utf-8"), request_headers)
         elif route_path == "/api/local/topup-verify":
-            return await self._proxy_cloud_post("/api/agent/wallet/topup-verify", request_body, request_headers)
+            body = self._json_body(request_body) or {}
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query or "")
+            for k in ("paymentId", "razorpay_payment_id", "razorpay_order_id", "razorpay_signature"):
+                if k in q and k not in body:
+                    body[k] = q[k][0]
+            return await self._proxy_cloud_post("/api/agent/wallet/topup-verify", json.dumps(body).encode("utf-8"), request_headers)
         elif route_path == "/brand-header.png":
             return self._png_file_response(BRAND_HEADER_IMAGE_PATH, "Header image not found")
         elif route_path == "/trigger-icon.png":
@@ -1303,8 +1336,10 @@ class RoutesMixin:
 
     async def _refresh_tunnel_payload(self):
         if not self.tunnel_manager:
-            print(" No tunnel manager available")
-            return {"success": False, "error": "No tunnel manager available"}
+            reason = str(getattr(self, "tunnel_block_reason", "") or "")
+            # Tell the user the real reason (e.g. billing blocked / not signed in)
+            # instead of a generic internal error.
+            return {"success": False, "error": reason or "Tunnel is not active. Restart Zadoo after fixing billing/sign-in."}
 
         print(" Refreshing tunnel...")
         loop = asyncio.get_running_loop()

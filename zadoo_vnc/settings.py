@@ -58,6 +58,42 @@ def settings_path() -> Path:
     return Path(override).expanduser().resolve() if override else settings_dir() / "config.json"
 
 
+# Single source of truth for the agent version reported to the cloud.
+APP_VERSION = "1.0.0"
+
+
+def machine_id() -> str:
+    """Stable per-machine identifier (Windows MachineGuid), with a persisted UUID fallback.
+
+    Used so re-activating the same physical PC reuses one device record instead of
+    creating duplicates.
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                value, _ = winreg.QueryValueEx(key, "MachineGuid")
+                if str(value or "").strip():
+                    return str(value).strip()
+        except Exception:
+            pass
+    try:
+        import uuid
+
+        path = settings_dir() / "machine_id"
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        generated = str(uuid.uuid4())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated, encoding="utf-8")
+        return generated
+    except Exception:
+        return ""
+
+
 def _now() -> float:
     return time.time()
 

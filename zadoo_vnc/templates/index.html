@@ -6671,10 +6671,7 @@
                         s.onload=res;s.onerror=rej;document.head.appendChild(s);
                     });
                 }
-                var resp=await fetch("/api/local/topup-order",{
-                    method:"POST",headers:{"Content-Type":"application/json"},
-                    body:JSON.stringify({amountRupees:amt})
-                });
+                var resp=await fetch("/api/local/topup-order?amountRupees="+encodeURIComponent(amt),{method:"POST"});
                 var od=await resp.json();
                 if(!od.success)throw new Error(od.error||"Order failed");
                 ppRate=od.minutesGranted/amt;
@@ -6685,15 +6682,7 @@
                     handler:async function(rsp){
                         if(ppSt)ppSt.textContent="Verifying...";
                         try{
-                            var vresp=await fetch("/api/local/topup-verify",{
-                                method:"POST",headers:{"Content-Type":"application/json"},
-                                body:JSON.stringify({
-                                    paymentId:od.paymentId,
-                                    razorpay_payment_id:rsp.razorpay_payment_id,
-                                    razorpay_order_id:rsp.razorpay_order_id,
-                                    razorpay_signature:rsp.razorpay_signature
-                                })
-                            });
+                            var vresp=await fetch("/api/local/topup-verify?paymentId="+encodeURIComponent(od.paymentId)+"&razorpay_payment_id="+encodeURIComponent(rsp.razorpay_payment_id)+"&razorpay_order_id="+encodeURIComponent(rsp.razorpay_order_id)+"&razorpay_signature="+encodeURIComponent(rsp.razorpay_signature),{method:"POST"});
                             var vd=await vresp.json();
                             if(!vd.success)throw new Error(vd.error||"Verify failed");
                             paid=true;

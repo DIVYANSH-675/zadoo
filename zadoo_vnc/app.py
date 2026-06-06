@@ -318,6 +318,11 @@ def main():
 
     vnc_server = VNCServer(web_port)
     vnc_server.enable_tunnel = use_tunnel
+    # Surface WHY the tunnel is off so the Settings window can show it instead of
+    # hanging forever on "Starting Zadoo…".
+    vnc_server.tunnel_block_reason = "" if use_tunnel else (
+        cloud_block_reason or ("Tunnel disabled by ZADOO_DISABLE_TUNNEL" if tunnel_disabled_by_env else "Tunnel disabled")
+    )
     if tunnel_manager:
         tunnel_manager.email_port = web_port
         print(f"Email will include port: {tunnel_manager.email_port}")

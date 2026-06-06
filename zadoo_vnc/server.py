@@ -12,6 +12,46 @@ import websockets
 
 from .tunnel import CloudflareTunnelManager
 
+
+def _patch_websockets_allow_post() -> None:
+    """websockets only parses GET handshakes and REJECTS request bodies, so every POST
+    API route (runtime/stop, refresh-tunnel, local/topup-*) is dropped before reaching
+    process_request. Patch the HTTP request parser to accept any method and tolerate a
+    body (left in the stream; the connection is closed right after the HTTP response)."""
+    try:
+        from websockets import http11
+    except Exception:
+        return
+    if getattr(http11.Request, "_zadoo_post_patched", False):
+        return
+
+    @classmethod
+    def _lenient_parse(cls, read_line):  # mirrors http11.Request.parse, but lenient
+        try:
+            request_line = yield from http11.parse_line(read_line)
+        except EOFError as exc:
+            raise EOFError("connection closed while reading HTTP request line") from exc
+        try:
+            _method, raw_path, protocol = request_line.split(b" ", 2)
+        except ValueError:
+            raise ValueError(f"invalid HTTP request line: {http11.d(request_line)}") from None
+        if protocol != b"HTTP/1.1":
+            raise ValueError(f"unsupported protocol; expected HTTP/1.1: {http11.d(request_line)}")
+        # Lenient: accept any method (GET/POST/...), unlike upstream which requires GET.
+        path = raw_path.decode("ascii", "surrogateescape")
+        headers = yield from http11.parse_headers(read_line)
+        if "Transfer-Encoding" in headers:
+            raise NotImplementedError("transfer codings aren't supported")
+        # Lenient: tolerate a Content-Length body (upstream raises). We don't read it
+        # here; routes that need POST data read it from the query string instead.
+        return cls(path, headers)
+
+    try:
+        http11.Request.parse = _lenient_parse
+        http11.Request._zadoo_post_patched = True
+    except Exception:
+        pass
+
 from .input_control import InputControlMixin
 from .logging_utils import _log_fallback
 from .media import MediaMixin
@@ -122,6 +162,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
     async def start_server(self):
         """Start WebSocket servers."""
+        _patch_websockets_allow_post()  # allow POST API routes through the WS HTTP parser
         # Capture the running event loop for cross-thread broadcasts
         try:
             self.loop = asyncio.get_running_loop()

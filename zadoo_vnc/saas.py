@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .settings import DEFAULT_CLOUD_API_BASE, SettingsStore, get_settings_store
+from .settings import APP_VERSION, DEFAULT_CLOUD_API_BASE, SettingsStore, get_settings_store, machine_id
 
 
 class ZadooCloudClient:
@@ -53,8 +53,9 @@ class ZadooCloudClient:
         data = self.store.load(reload=True)
         payload = {
             "deviceName": data.get("device_name") or platform.node() or "Windows PC",
+            "machineId": machine_id(),
             "platform": platform.system().lower() or "windows",
-            "version": "1.0.0",
+            "version": APP_VERSION,
         }
         result = self._request("POST", "/api/agent/activate/start", payload)
         if result.get("success"):
@@ -109,7 +110,7 @@ class ZadooCloudClient:
         token = self.store.get_device_token()
         if not token:
             return {"success": False, "error": "Device is not activated"}
-        result = self._request("POST", "/api/agent/heartbeat", {"publicUrl": public_url or "", "version": "1.0.0"}, token=token)
+        result = self._request("POST", "/api/agent/heartbeat", {"publicUrl": public_url or "", "version": APP_VERSION}, token=token)
         if result.get("success"):
             data = self.store.load()
             data["entitlement_cache"] = result.get("entitlement") or {}
