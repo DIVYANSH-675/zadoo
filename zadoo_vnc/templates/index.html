@@ -6579,6 +6579,7 @@
             clo=eid("controlsLockedOverlay"),seo=eid("sessionEndOverlay"),
             ppSlider=eid("ppSlider"),ppAmt=eid("ppAmountInput"),ppPrev=eid("ppMinutesPreview"),
             ppBtn=eid("ppPayBtn"),ppSt=eid("ppStatus"),badge=eid("sidebarCreditsBadge");
+        if(strip)strip.style.display="none";  // arrow hidden until last 10 min / Add Credits
         function pad(n){return n<10?"0"+n:""+n;}
         function fmt(s){var neg=s<0,a=Math.abs(s),m=Math.floor(a/60),sc=a%60;return(neg?"-":"")+pad(m)+":"+pad(sc);}
         function fmtM(s){return Math.max(0,Math.round(Math.abs(s)/60))+" min";}
@@ -6590,14 +6591,16 @@
             if(secs<=TMRSECS&&timer){timer.classList.add("visible");}
             if(tmrTxt)tmrTxt.textContent=fmt(secs);
             if(timer){if(secs<0)timer.classList.add("danger");else timer.classList.remove("danger");}
-            if(secs<=G1&&!pOnce){pOnce=true;openPaymentPanel();}
-            // Re-open the payment sidebar at the start of every grace minute (0 .. -10).
-            if(secs<=0&&secs>GEND){
-                var gm=Math.floor((-secs)/60);
-                if(gm!==lastGraceMin){lastGraceMin=gm;if(!paid)openPaymentPanel();}
-            }
+            updatePayVisibility();
             if(secs<=G2&&!locked){locked=true;lockCtrl();}
             if(secs<=GEND){endSess();}
+        }
+        // The ▶ arrow only appears in the last 10 minutes (incl. grace), or when the
+        // panel is opened from the sidebar's "Add Credits". Never auto-opens the panel.
+        function updatePayVisibility(){
+            var inLast10=(secs!==null&&secs<=TMRSECS);
+            var open=panel&&panel.classList.contains("open");
+            if(strip)strip.style.display=(inLast10&&!open)?"flex":"none";
         }
         function lockCtrl(){
             if(clo)clo.classList.add("visible");
@@ -6616,11 +6619,8 @@
         window.openPaymentPanel=function(){if(panel)panel.classList.add("open");if(strip)strip.style.display="none";if(rT){clearTimeout(rT);rT=null;}};
         window.collapsePaymentPanel=function(){
             if(panel)panel.classList.remove("open");
-            if(strip)strip.style.display="flex";
-            if(secs!==null&&secs<=G1&&!paid){
-                if(rT)clearTimeout(rT);
-                rT=setTimeout(function(){openPaymentPanel();},60000);
-            }
+            if(rT){clearTimeout(rT);rT=null;}
+            updatePayVisibility();
         };
         window.togglePaymentPanel=function(){if(panel&&panel.classList.contains("open"))collapsePaymentPanel();else openPaymentPanel();};
         window.onTopupAmountInput=function(v){
