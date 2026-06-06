@@ -37,7 +37,8 @@ PERMISSION_KEYS = (
     "remote_alerts",
 )
 
-DEFAULT_PERMISSIONS = {key: False for key in PERMISSION_KEYS}
+# Default: everything allowed except the shell/terminal (opt-in for safety).
+DEFAULT_PERMISSIONS = {key: (key != "terminal") for key in PERMISSION_KEYS}
 
 
 def _program_data_dir() -> Path:

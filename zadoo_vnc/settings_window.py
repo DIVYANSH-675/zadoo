@@ -280,6 +280,7 @@ class ZadooSettingsWindow:
         self.public_url_label.bind("<Button-1>", lambda _e: self._open_public_url())
         self.start_btn = ttk.Button(url_row, text="Start", command=self.start_zadoo, style="Primary.TButton")
         self.start_btn.pack(side=LEFT, padx=(6, 0))
+        ttk.Button(url_row, text="Stop", command=self.stop_zadoo).pack(side=LEFT, padx=(6, 0))
         ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
         ttk.Label(self.public_url_frame,
                   text="Click Start to launch Zadoo — the public link appears here, then click it to open.",
@@ -368,16 +369,54 @@ class ZadooSettingsWindow:
         self.runtime_state = ttk.Label(self.tab_runtime, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
 
+    def _ensure_check_images(self) -> None:
+        """Build a green ✓ 'checked' indicator and an empty 'unchecked' box (cached)."""
+        if getattr(self, "_chk_on", None) is not None or getattr(self, "_chk_images_failed", False):
+            return
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            size = 18
+            off = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            on = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            doff, don = ImageDraw.Draw(off), ImageDraw.Draw(on)
+            try:
+                doff.rounded_rectangle([1, 1, size - 2, size - 2], radius=4, outline="#9aa6b5", width=2)
+                don.rounded_rectangle([1, 1, size - 2, size - 2], radius=4, fill=ACCENT, outline=ACCENT_DARK, width=1)
+            except Exception:
+                doff.rectangle([1, 1, size - 2, size - 2], outline="#9aa6b5", width=2)
+                don.rectangle([1, 1, size - 2, size - 2], fill=ACCENT, outline=ACCENT_DARK, width=1)
+            # white checkmark
+            don.line([(4, 9), (8, 13)], fill="#ffffff", width=2)
+            don.line([(8, 13), (14, 5)], fill="#ffffff", width=2)
+            self._chk_off = ImageTk.PhotoImage(off)
+            self._chk_on = ImageTk.PhotoImage(on)
+        except Exception:
+            self._chk_off = None
+            self._chk_on = None
+            self._chk_images_failed = True
+
     def _build_permissions_tab(self) -> None:
         self.tab_permissions = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
         self.tabs.add(self.tab_permissions, text="Permissions")
 
         perms = ttk.LabelFrame(self.tab_permissions, text="Allowed controls for this password", style="Card.TLabelframe")
         perms.pack(fill=BOTH, expand=True)
+        self._ensure_check_images()
         for index, key in enumerate(PERMISSION_KEYS):
             var = tk.BooleanVar(value=False)
             self.permission_vars[key] = var
-            button = ttk.Checkbutton(perms, text=PERMISSION_LABELS.get(key, key), variable=var)
+            if self._chk_on is not None:
+                # Custom green ✓ indicator (the themed glyph rendered like an ✗).
+                button = tk.Checkbutton(
+                    perms, text="  " + PERMISSION_LABELS.get(key, key), variable=var,
+                    image=self._chk_off, selectimage=self._chk_on, indicatoron=False,
+                    compound="left", bg=SURFACE, activebackground=SURFACE, selectcolor=SURFACE,
+                    fg=TEXT, activeforeground=TEXT, font=("Segoe UI", 9),
+                    borderwidth=0, highlightthickness=0, relief="flat",
+                    offrelief="flat", overrelief="flat", anchor="w", cursor="hand2",
+                )
+            else:
+                button = ttk.Checkbutton(perms, text=PERMISSION_LABELS.get(key, key), variable=var)
             if key == "terminal" and not HAS_WINPTY:
                 button.configure(state="disabled")
             button.grid(
