@@ -576,7 +576,9 @@ class RoutesMixin:
             return self._json_response({"success": False, "error": "Invalid code"}, http.HTTPStatus.UNAUTHORIZED)
         role = None
         permissions = None
-        if self._settings_configured():
+        # In cloud mode (signed in) or once configured, the Settings permission matrix is
+        # authoritative — return it so the viewer disables/greys the matching controls.
+        if self._settings_configured() or self._has_device_token():
             role = "custom"
             permissions = self._settings_permissions()
         else:

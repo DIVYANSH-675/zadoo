@@ -967,14 +967,21 @@ class ZadooSettingsWindow:
                 return
         except Exception:
             pass  # Don't block start on network error — let the runtime handle it
-        # If Zadoo is already running, do NOT relaunch it. Relaunching spawns a
-        # process that taskkill-/T's the existing runtime tree, which can close THIS
-        # Settings window if it was opened from the runtime. Just fetch the link.
+        # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
+        # fresh tunnel/public link is created. We use the graceful stop endpoint (not
+        # taskkill /T), so this Settings window is never tree-killed.
         if _local_server_running():
-            self.public_url_label.configure(text="Fetching public link…", foreground=MUTED)
-            self._set_status("Zadoo is already running — fetching the public link…")
-            self._begin_public_url_autopoll()
+            self.public_url_label.configure(text="Restarting Zadoo…", foreground=MUTED)
+            self._set_status("Restarting Zadoo to refresh the public link…")
+            try:
+                _post_local_json("/api/runtime/stop", {"admin_code": self._admin_code()})
+            except Exception:
+                pass
+            self.root.after(3000, self._launch_runtime)
             return
+        self._launch_runtime()
+
+    def _launch_runtime(self) -> None:
         try:
             subprocess.Popen(
                 _runtime_command(),
@@ -985,7 +992,7 @@ class ZadooSettingsWindow:
             # Keep Settings open (do not hide). Show the public link as the tunnel comes up.
             self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
             self._set_status("Starting Zadoo… the public link will appear here shortly.")
-            self.root.after(3000, self._begin_public_url_autopoll)
+            self.root.after(3500, lambda: self._begin_public_url_autopoll(20))
         except Exception as exc:
             messagebox.showerror("Zadoo", f"Could not start Zadoo: {exc}")
 
