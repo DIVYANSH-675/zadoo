@@ -1200,7 +1200,32 @@ class RoutesMixin:
             for k in ("paymentId", "razorpay_payment_id", "razorpay_order_id", "razorpay_signature"):
                 if k in q and k not in body:
                     body[k] = q[k][0]
-            return await self._proxy_cloud_post("/api/agent/wallet/topup-verify", json.dumps(body).encode("utf-8"), request_headers)
+            resp = await self._proxy_cloud_post("/api/agent/wallet/topup-verify", json.dumps(body).encode("utf-8"), request_headers)
+            # On a successful top-up, reflect it INSTANTLY instead of waiting up to 60s
+            # for the next heartbeat: unblock controls, clear the blocked flag, and
+            # refresh the entitlement cache in the background.
+            try:
+                vd = json.loads((getattr(resp, "body", b"") or b"").decode("utf-8", "replace"))
+                if isinstance(vd, dict) and vd.get("success"):
+                    self._grace_block_controls = False
+                    try:
+                        data = self._settings_store().load(reload=True)
+                        data["session_blocked"] = False
+                        data["session_block_reason"] = ""
+                        self._settings_store().save(data)
+                    except Exception:
+                        pass
+
+                    def _refresh_entitlement():
+                        try:
+                            from .saas import ZadooCloudClient
+                            ZadooCloudClient(self._settings_store()).entitlement()
+                        except Exception:
+                            pass
+                    threading.Thread(target=_refresh_entitlement, daemon=True).start()
+            except Exception:
+                pass
+            return resp
         elif route_path == "/brand-header.png":
             return self._png_file_response(BRAND_HEADER_IMAGE_PATH, "Header image not found")
         elif route_path == "/trigger-icon.png":

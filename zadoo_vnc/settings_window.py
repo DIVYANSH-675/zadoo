@@ -5,6 +5,7 @@ import subprocess
 import sys
 import json
 import time
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -57,10 +58,18 @@ def _local_server_running() -> bool:
 
 
 def _post_local_json(path: str, payload: dict, timeout: float = 1.5) -> dict:
+    # IMPORTANT: send NO request body. The runtime's websockets-based HTTP server can't
+    # read POST bodies, so the admin code travels in the X-Zadoo-Code header (and any
+    # other params in the query string). A body would stall the request.
+    code = str(payload.get("admin_code") or "")
+    extras = {k: v for k, v in (payload or {}).items() if k != "admin_code" and v is not None}
+    url = _local_url(path)
+    if extras:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(extras)
     request = urllib.request.Request(
-        _local_url(path),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Zadoo-Code": str(payload.get("admin_code") or "")},
+        url,
+        data=None,
+        headers={"X-Zadoo-Code": code},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -1023,7 +1032,17 @@ class ZadooSettingsWindow:
                 self._set_status(str(entitlement.get("reason") or result.get("error") or "Billing blocked"))
                 return
         except Exception:
-            pass  # Don't block start on network error — let the runtime handle it
+            pass  # network error — fall through to the cached check below
+        # Belt-and-suspenders: if the last-known entitlement says NOT allowed (e.g. 0
+        # balance) or revoked, don't start even if the live check failed. Prevents the
+        # app from starting on an exhausted/revoked balance.
+        cache = self.data.get("entitlement_cache") or {}
+        if cache.get("revoked"):
+            self._set_status(str(cache.get("reason") or "Device is revoked"))
+            return
+        if cache.get("allowed") is False:
+            self._set_status(str(cache.get("reason") or "Out of credits — add balance to start"))
+            return
         # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
         # fresh tunnel/public link is created. We use the graceful stop endpoint (not
         # taskkill /T), so this Settings window is never tree-killed.
