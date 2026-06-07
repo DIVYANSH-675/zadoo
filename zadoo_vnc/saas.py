@@ -122,6 +122,14 @@ class ZadooCloudClient:
             self.store.save(data)
         return result
 
+    def go_offline(self) -> dict[str, Any]:
+        """Tell the cloud this device is stopping so the dashboard shows it Offline
+        immediately (clears the public URL) instead of waiting for heartbeats to lapse."""
+        token = self.store.get_device_token()
+        if not token:
+            return {"success": True, "skipped": True}
+        return self._request("POST", "/api/agent/heartbeat", {"offline": True}, token=token, timeout=3.0)
+
     def start_session(self, public_url: str | None = None) -> dict[str, Any]:
         token = self.store.get_device_token()
         if not token:

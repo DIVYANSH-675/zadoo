@@ -347,10 +347,9 @@ class ZadooSettingsWindow:
 
         # ── Credits ───────────────────────────────────────────────────
         self.credits_card = ttk.LabelFrame(self.tab_account, text="Credits", style="Card.TLabelframe")
-        # Refresh icon — pulls the latest balance from the cloud (e.g. after a recharge).
-        credits_top = ttk.Frame(self.credits_card, style="Surface.TFrame")
-        credits_top.pack(fill="x", pady=(0, 4))
-        ttk.Button(credits_top, text="⟳  Refresh", command=self._refresh_credits).pack(side=RIGHT)
+        # Icon-only refresh (loads latest balance) floated at the top-right so it does NOT
+        # push the credit lines down / disturb the layout.
+        ttk.Button(self.credits_card, text="⟳", width=3, command=self._refresh_credits).place(relx=1.0, x=-4, y=2, anchor="ne")
         self.credits_included_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
         self.credits_included_label.pack(anchor="w")
         self.credits_wallet_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
@@ -469,7 +468,7 @@ class ZadooSettingsWindow:
             title = StringVar(value="")
             message = StringVar(value="")
             self.alert_vars[code] = {"enabled": enabled, "title": title, "message": message}
-            ttk.Checkbutton(frame, text="Enabled", variable=enabled).pack(anchor="w", pady=(0, 10))
+            self._check_button(frame, "Enabled", enabled).pack(anchor="w", pady=(0, 10))
             ttk.Label(frame, text="Title", style="Surface.TLabel").pack(anchor="w")
             ttk.Entry(frame, textvariable=title).pack(fill="x", pady=(2, 8))
             ttk.Label(frame, text="Message", style="Surface.TLabel").pack(anchor="w")

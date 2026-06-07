@@ -274,6 +274,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 from .saas import ZadooCloudClient
 
                 client = ZadooCloudClient(self.settings_store)
+                seen_url = False
                 while self._cloud_heartbeat_active:
                     public_url = None
                     try:
@@ -284,7 +285,11 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                         client.heartbeat(public_url)
                     except Exception:
                         pass
-                    time.sleep(60)
+                    if public_url:
+                        seen_url = True
+                    # Heartbeat quickly until the tunnel URL first appears (so the website
+                    # link syncs within seconds of startup), then settle to once a minute.
+                    time.sleep(60 if seen_url else 5)
             finally:
                 self._cloud_heartbeat_active = False
 

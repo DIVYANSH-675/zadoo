@@ -1033,8 +1033,15 @@ class RoutesMixin:
             # Guarantee the process actually exits and frees port 6173, even if some
             # cleanup hangs — Stop must truly stop. Graceful shutdown gets ~1.5s first.
             def _force_exit():
+                # Best-effort: tell the cloud we're going offline so the website clears
+                # the public link immediately (don't wait for heartbeats to lapse).
                 try:
-                    time.sleep(1.5)
+                    from .saas import ZadooCloudClient
+                    ZadooCloudClient(self._settings_store()).go_offline()
+                except Exception:
+                    pass
+                try:
+                    time.sleep(1.0)
                 except Exception:
                     pass
                 os._exit(0)
@@ -1418,6 +1425,18 @@ class RoutesMixin:
 
         current_port = self.tunnel_manager.current_port
         print(f" New tunnel URL: {url}")
+        # Push the new URL to the cloud right away so the website link stays in sync
+        # instead of waiting up to a minute for the next heartbeat.
+        def _sync_url(u):
+            try:
+                from .saas import ZadooCloudClient
+                ZadooCloudClient(self._settings_store()).heartbeat(u)
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_sync_url, args=(url,), daemon=True).start()
+        except Exception:
+            pass
         return {
             "success": True,
             "url": url,
