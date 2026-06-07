@@ -337,9 +337,8 @@ def main():
     capturer.start()
 
     try:
-        if "--open" in args:
-            threading = __import__("threading")
-            threading.Timer(1.2, lambda: _open_local_page("/")).start()
+        # Do NOT auto-open the local viewer in a browser. The machine is reachable only
+        # via its public link (shown in Settings); localhost is not a usable entry point.
         asyncio.run(vnc_server.start_server())
     except OSError as e:
         err_no = getattr(e, "errno", None)

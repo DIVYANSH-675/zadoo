@@ -163,6 +163,7 @@ def assert_imports() -> None:
         )
     }
     os.environ["ZADOO_ACCESS_CODE"] = test_auth_code
+    os.environ["ZADOO_ALLOW_DIRECT_ACCESS"] = "1"  # tests drive the viewer locally (no tunnel)
     os.environ["ZADOO_SETTINGS_PATH"] = str(Path(temp_settings.name) / "config.json")
     os.environ["ZADOO_AUTH_MAX_FAILURES"] = "3"
     os.environ["ZADOO_AUTH_WINDOW_SECONDS"] = "60"

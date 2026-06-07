@@ -238,6 +238,41 @@ class RoutesMixin:
             return False
         return host.startswith("127.")
 
+    def _is_tunnel_request(self, request_headers):
+        """True if the request arrived through the Cloudflare tunnel (public link).
+        Cloudflare adds CF-Connecting-IP / CF-Ray; direct localhost/LAN access has neither."""
+        try:
+            if self._header_get(request_headers, "CF-Connecting-IP", ""):
+                return True
+            if self._header_get(request_headers, "CF-Ray", ""):
+                return True
+            xff = str(self._header_get(request_headers, "X-Forwarded-For", "") or "").strip()
+            if xff and not xff.startswith(("127.", "::1", "localhost")):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _public_only_response(self):
+        body = (
+            "<!doctype html><html><head><meta charset='utf-8'><title>Zadoo</title>"
+            "<style>body{font-family:Segoe UI,system-ui,sans-serif;background:#0f1115;color:#e8eef5;"
+            "display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;text-align:center}"
+            "div{max-width:420px;padding:28px}h1{font-size:20px;margin:0 0 10px}p{color:#9aa6b5;line-height:1.6}</style>"
+            "</head><body><div><h1>Open via your public link</h1>"
+            "<p>This machine isn't accessible directly on localhost. "
+            "Use the public Zadoo link shown in the Settings window.</p></div></body></html>"
+        )
+        headers = Headers()
+        headers["Content-Type"] = "text/html; charset=utf-8"
+        headers["Cache-Control"] = "no-store"
+        return WSResponse(
+            status_code=int(http.HTTPStatus.FORBIDDEN),
+            reason_phrase=http.HTTPStatus.FORBIDDEN.phrase,
+            headers=headers,
+            body=body.encode("utf-8"),
+        )
+
     def _settings_store(self):
         store = getattr(self, "settings_store", None)
         if store is None:
@@ -854,6 +889,14 @@ class RoutesMixin:
 
         if not self._request_origin_allowed(request_headers):
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+
+        # Public-link-only: the machine is reachable ONLY through its Cloudflare tunnel.
+        # Direct localhost/LAN access (typing localhost:6173 or ip:6173) is refused for
+        # everything except the local admin API used by the Settings window.
+        is_admin_route = route_path.startswith("/api/runtime/") or route_path.startswith("/api/settings/")
+        if (not is_admin_route and not self._is_tunnel_request(request_headers)
+                and not self._env_enabled("ZADOO_ALLOW_DIRECT_ACCESS", "0")):
+            return self._public_only_response()
 
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:

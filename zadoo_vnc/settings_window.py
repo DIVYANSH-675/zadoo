@@ -347,6 +347,10 @@ class ZadooSettingsWindow:
 
         # ── Credits ───────────────────────────────────────────────────
         self.credits_card = ttk.LabelFrame(self.tab_account, text="Credits", style="Card.TLabelframe")
+        # Refresh icon — pulls the latest balance from the cloud (e.g. after a recharge).
+        credits_top = ttk.Frame(self.credits_card, style="Surface.TFrame")
+        credits_top.pack(fill="x", pady=(0, 4))
+        ttk.Button(credits_top, text="⟳  Refresh", command=self._refresh_credits).pack(side=RIGHT)
         self.credits_included_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
         self.credits_included_label.pack(anchor="w")
         self.credits_wallet_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
@@ -363,7 +367,6 @@ class ZadooSettingsWindow:
         ttk.Button(credits_btns, text="Add Balance →", command=self._add_balance,
                    style="Primary.TButton").pack(side=LEFT)
         ttk.Button(credits_btns, text="Add Credits →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(credits_btns, text="Refresh Credits", command=self._refresh_credits).pack(side=LEFT, padx=(8, 0))
         ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
 
     def _build_runtime_tab(self) -> None:
@@ -371,8 +374,8 @@ class ZadooSettingsWindow:
         self.tabs.add(self.tab_runtime, text="Runtime")
         card = ttk.LabelFrame(self.tab_runtime, text="Windows behavior", style="Card.TLabelframe")
         card.pack(fill="x")
-        ttk.Checkbutton(card, text="Start Zadoo when Windows starts", variable=self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Checkbutton(card, text="Keep Settings visible on taskbar when minimized", variable=self.show_taskbar_var).grid(row=1, column=0, sticky="w", pady=4)
+        self._check_button(card, "Start Zadoo when Windows starts", self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
+        self._check_button(card, "Keep Settings visible on taskbar when minimized", self.show_taskbar_var).grid(row=1, column=0, sticky="w", pady=4)
         ttk.Button(card, text="Apply Startup", command=self.apply_startup).grid(row=2, column=0, sticky="w", pady=(12, 0))
         self.runtime_state = ttk.Label(self.tab_runtime, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
@@ -402,6 +405,20 @@ class ZadooSettingsWindow:
             self._chk_off = None
             self._chk_on = None
             self._chk_images_failed = True
+
+    def _check_button(self, parent, text, var):
+        """A checkbox that shows a green ✓ (not the themed ✗) when on."""
+        self._ensure_check_images()
+        if getattr(self, "_chk_on", None) is not None:
+            return tk.Checkbutton(
+                parent, text="  " + text, variable=var,
+                image=self._chk_off, selectimage=self._chk_on, indicatoron=False,
+                compound="left", bg=SURFACE, activebackground=SURFACE, selectcolor=SURFACE,
+                fg=TEXT, activeforeground=TEXT, font=("Segoe UI", 9),
+                borderwidth=0, highlightthickness=0, relief="flat",
+                offrelief="flat", overrelief="flat", anchor="w", cursor="hand2",
+            )
+        return ttk.Checkbutton(parent, text=text, variable=var)
 
     def _build_permissions_tab(self) -> None:
         self.tab_permissions = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
