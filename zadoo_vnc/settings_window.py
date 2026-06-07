@@ -937,14 +937,26 @@ class ZadooSettingsWindow:
             result = self.cloud.poll_activation()
             if result.get("status") == "claimed":
                 self._activation_poll_deadline = 0.0
-                # Fetch profile + credits then do one final reload
+                # New account: wipe any state cached from a previous account, then pull
+                # THIS account's fresh profile + credits + entitlement before reloading.
                 import threading
                 def _post_signin():
                     try:
-                        self.cloud.fetch_profile()
-                        self.cloud.fetch_credits()
+                        def _wipe(data):
+                            data["entitlement_cache"] = {}
+                            data["credits_cache"] = {}
+                            data["billing_status"] = {}
+                            data["session_blocked"] = False
+                            data["session_block_reason"] = ""
+                            data["public_url"] = ""
+                        self.store.atomic_update(_wipe)
                     except Exception:
                         pass
+                    for fetch in (self.cloud.fetch_profile, self.cloud.fetch_credits, self.cloud.entitlement):
+                        try:
+                            fetch()
+                        except Exception:
+                            pass
                     self.root.after(0, lambda: (self.reload(), self._set_status("Signed in ✓")))
                 threading.Thread(target=_post_signin, daemon=True).start()
             elif result.get("status") == "pending":
@@ -974,15 +986,35 @@ class ZadooSettingsWindow:
             self._set_status(str(exc) or "Entitlement refresh failed")
 
     def sign_out(self) -> None:
-        """Clear device token and all cached user data, return to welcome screen."""
+        """Stop Zadoo immediately, mark the device offline, and clear all account data."""
         if not messagebox.askyesno(
             "Sign Out",
-            "Are you sure you want to sign out?\n\nThis will unlink this device from your Zadoo account.",
+            "Are you sure you want to sign out?\n\nThis will stop Zadoo and unlink this device from your Zadoo account.",
             icon="warning",
         ):
             return
+        # 1. Stop the running runtime NOW — frees port 6173 and (via the stop handler)
+        #    tells the cloud the device is going offline so the website link disappears.
         try:
-            # Clear token + profile cache
+            if _local_server_running():
+                try:
+                    _post_local_json("/api/runtime/stop", {"admin_code": self._admin_code()})
+                except Exception:
+                    pass
+                for _ in range(20):  # wait up to ~5s for the port to actually free
+                    if not _local_server_running():
+                        break
+                    time.sleep(0.25)
+        except Exception:
+            pass
+        # 2. Belt-and-suspenders: mark this device offline on the cloud while the token is
+        #    still valid (covers the case where the runtime wasn't running).
+        try:
+            self.cloud.go_offline()
+        except Exception:
+            pass
+        try:
+            # 3. Clear token + ALL cached account state so nothing leaks to the next account.
             self.store.clear_device_token()
             data = self.store.load(reload=True)
             data["user_name"] = ""
@@ -990,12 +1022,17 @@ class ZadooSettingsWindow:
             data["user_image_url"] = ""
             data["credits_cache"] = {}
             data["entitlement_cache"] = {}
+            data["billing_status"] = {}
             data["activation"] = {}
+            data["session_blocked"] = False
+            data["session_block_reason"] = ""
+            data["public_url"] = ""
             self.store.save(data)
         except Exception as exc:
             self._set_status(f"Sign out error: {exc}")
             return
         self.reload()
+        self._set_status("Signed out — Zadoo stopped")
 
     def copy_activation_code(self) -> None:
         code = self.activation_code.get().strip()
