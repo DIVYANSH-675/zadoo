@@ -42,8 +42,11 @@ def _patch_websockets_allow_post() -> None:
         headers = yield from http11.parse_headers(read_line)
         if "Transfer-Encoding" in headers:
             raise NotImplementedError("transfer codings aren't supported")
-        # Lenient: tolerate a Content-Length body (upstream raises). We don't read it
-        # here; routes that need POST data read it from the query string instead.
+        # Lenient: tolerate a Content-Length body (upstream raises). The body is NOT
+        # read or attached — websockets' Request has no .body field, so process_request
+        # always sees an empty body. Every POST route therefore takes its data from the
+        # query string (topup-order/verify) or headers (X-Zadoo-Code for stop/refresh);
+        # do NOT add a route that relies on a JSON request body over this server.
         return cls(path, headers)
 
     try:
@@ -56,7 +59,7 @@ from .input_control import InputControlMixin
 from .logging_utils import _log_fallback
 from .media import MediaMixin
 from .routes import RoutesMixin
-from .settings import DEFAULT_PERMISSIONS, get_settings_store
+from .settings import get_settings_store
 from .streaming import AdaptiveStreamController, detect_encoder_capabilities
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
@@ -147,18 +150,6 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             return bool(self.settings_store.configured())
         except Exception:
             return False
-
-    def _profile_permissions(self, profile_id):
-        try:
-            settings = self.settings_store.load(reload=True)
-            profile = (settings.get("profiles") or {}).get(str(profile_id or ""))
-            if isinstance(profile, dict):
-                perms = dict(DEFAULT_PERMISSIONS)
-                perms.update({k: bool(v) for k, v in (profile.get("permissions") or {}).items() if k in perms})
-                return perms
-        except Exception:
-            pass
-        return dict(DEFAULT_PERMISSIONS)
 
     async def start_server(self):
         """Start WebSocket servers."""
@@ -339,6 +330,14 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             await self.video_stream_handler(websocket)
 
     def stop(self):
+        # Release the cached MSS screen-grabber (holds GDI/DC handles on Windows).
+        try:
+            sct = getattr(self, "_snapshot_sct", None)
+            if sct is not None:
+                sct.close()
+                self._snapshot_sct = None
+        except Exception:
+            pass
         if self.loop and self.stop_event is not None:
             def _stop():
                 if self.stop_event is not None:

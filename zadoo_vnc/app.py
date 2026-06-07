@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-import webbrowser
 from pathlib import Path
 
 from .config import _load_dotenv
@@ -97,13 +96,6 @@ def _local_server_running():
             return int(getattr(response, "status", 0) or 0) < 500
     except Exception:
         return False
-
-
-def _open_local_page(path="/"):
-    try:
-        webbrowser.open(_local_url(path))
-    except Exception:
-        pass
 
 
 def _zadoo_pids_on_port(port):
@@ -220,11 +212,6 @@ def main():
         run_settings_window()
         return
 
-    if "--open" in args and _local_server_running():
-        print("Existing Zadoo instance detected; restarting it...")
-        _stop_existing_zadoo_on_port(6173)
-        time.sleep(0.8)
-
     disable_startup_task = os.environ.get("ZADOO_DISABLE_STARTUP_TASK", "").strip().lower() in {
         "1",
         "true",
@@ -261,14 +248,14 @@ def main():
     if _local_server_running():
         print("Existing Zadoo instance detected; restarting it...")
         _stop_existing_zadoo_on_port(web_port)
+        time.sleep(0.8)  # let the old listener free port 6173 before we bind it
     elif _zadoo_pids_on_port(web_port):
         _stop_existing_zadoo_on_port(web_port)
+        time.sleep(0.8)
 
     settings_store = get_settings_store()
-    setup_complete = settings_store.configured()
     signed_in = bool(settings_store.get_device_token())
     tunnel_disabled_by_env = os.environ.get("ZADOO_DISABLE_TUNNEL", "").strip().lower() in {"1", "true", "yes", "on"}
-    cloud_ready = False
     revoked = False
     cloud_block_reason = ""
     # The public link / tunnel generates whenever the device is SIGNED IN, regardless of
@@ -287,8 +274,6 @@ def main():
             if entitlement.get("revoked"):
                 revoked = True
                 cloud_block_reason = "Tunnel disabled because this device was revoked"
-            elif entitlement.get("allowed"):
-                cloud_ready = True
         except Exception:
             entitlement = settings_store.load(reload=True).get("entitlement_cache") or {}
             if isinstance(entitlement, dict) and entitlement.get("revoked"):
@@ -306,8 +291,6 @@ def main():
     print(f"Network: http://{local_ip}:{web_port}")
     if use_tunnel and tunnel_manager:
         print(f"Tunnel port: {web_port}")
-    elif not setup_complete:
-        print("Tunnel disabled until first-launch setup is completed")
     elif tunnel_disabled_by_env:
         print("Tunnel disabled by ZADOO_DISABLE_TUNNEL")
     elif cloud_block_reason:

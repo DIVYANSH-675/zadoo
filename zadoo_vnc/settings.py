@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -96,10 +97,6 @@ def machine_id() -> str:
 
 def _now() -> float:
     return time.time()
-
-
-def _truthy(value: Any) -> bool:
-    return str(value or "").strip().lower() not in FALSE_VALUES
 
 
 def _b64(data: bytes) -> str:
@@ -284,38 +281,54 @@ class SettingsStore:
         self.path = path or settings_path()
         self._data: dict[str, Any] | None = None
         self._mtime_ns: int | None = None
+        # Re-entrant so a locked atomic_update can call load()/save() (also locked).
+        self._lock = threading.RLock()
 
     def load(self, *, reload: bool = False) -> dict[str, Any]:
-        try:
-            mtime_ns = self.path.stat().st_mtime_ns
-        except Exception:
-            mtime_ns = None
-        if self._data is not None and not reload and mtime_ns == self._mtime_ns:
+        with self._lock:
+            try:
+                mtime_ns = self.path.stat().st_mtime_ns
+            except Exception:
+                mtime_ns = None
+            if self._data is not None and not reload and mtime_ns == self._mtime_ns:
+                return self._data
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except Exception:
+                raw = None
+            data = normalize_settings(raw)
+            self._data = data
+            self._mtime_ns = mtime_ns
+            if not data.get("env_alerts_imported"):
+                self.import_env_alerts(save=False)
             return self._data
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
-            raw = None
-        data = normalize_settings(raw)
-        self._data = data
-        self._mtime_ns = mtime_ns
-        if not data.get("env_alerts_imported"):
-            self.import_env_alerts(save=False)
-        return self._data
 
     def save(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        clean = normalize_settings(data if data is not None else self.load())
-        clean["updated_at"] = _now()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
-        self._data = clean
-        try:
-            self._mtime_ns = self.path.stat().st_mtime_ns
-        except Exception:
-            self._mtime_ns = None
-        return clean
+        with self._lock:
+            clean = normalize_settings(data if data is not None else self.load())
+            clean["updated_at"] = _now()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(self.path)
+            self._data = clean
+            try:
+                self._mtime_ns = self.path.stat().st_mtime_ns
+            except Exception:
+                self._mtime_ns = None
+            return clean
+
+    def atomic_update(self, mutator) -> dict[str, Any]:
+        """Thread-safe load -> mutate -> save. Prevents lost updates when the device
+        heartbeat and the per-session heartbeat write the settings file concurrently
+        (e.g. one clearing session_blocked while the other re-writes a stale snapshot).
+        The lock is held only around the in-memory mutate + disk write, never network I/O."""
+        with self._lock:
+            data = self.load(reload=True)
+            result = mutator(data)
+            if isinstance(result, dict):
+                data = result
+            return self.save(data)
 
     def configured(self) -> bool:
         return bool(self.load().get("setup_complete"))

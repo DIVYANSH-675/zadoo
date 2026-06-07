@@ -96,14 +96,16 @@ class ZadooCloudClient:
             return {"success": False, "error": "Device is not activated"}
         result = self._request("GET", "/api/agent/entitlement", token=token)
         if result.get("success"):
-            data = self.store.load()
-            data["entitlement_cache"] = result.get("entitlement") or {}
-            data["billing_status"] = {
-                "last_checked_at": time.time(),
-                "allowed": bool((result.get("entitlement") or {}).get("allowed")),
-                "reason": (result.get("entitlement") or {}).get("reason"),
-            }
-            self.store.save(data)
+            ent = result.get("entitlement") or {}
+
+            def _apply(data):
+                data["entitlement_cache"] = ent
+                data["billing_status"] = {
+                    "last_checked_at": time.time(),
+                    "allowed": bool(ent.get("allowed")),
+                    "reason": ent.get("reason"),
+                }
+            self.store.atomic_update(_apply)
         return result
 
     def heartbeat(self, public_url: str | None = None) -> dict[str, Any]:
@@ -112,14 +114,16 @@ class ZadooCloudClient:
             return {"success": False, "error": "Device is not activated"}
         result = self._request("POST", "/api/agent/heartbeat", {"publicUrl": public_url or "", "version": APP_VERSION}, token=token)
         if result.get("success"):
-            data = self.store.load()
-            data["entitlement_cache"] = result.get("entitlement") or {}
-            data["billing_status"] = {
-                "last_checked_at": time.time(),
-                "allowed": bool((result.get("entitlement") or {}).get("allowed")),
-                "reason": (result.get("entitlement") or {}).get("reason"),
-            }
-            self.store.save(data)
+            ent = result.get("entitlement") or {}
+
+            def _apply(data):
+                data["entitlement_cache"] = ent
+                data["billing_status"] = {
+                    "last_checked_at": time.time(),
+                    "allowed": bool(ent.get("allowed")),
+                    "reason": ent.get("reason"),
+                }
+            self.store.atomic_update(_apply)
         return result
 
     def go_offline(self) -> dict[str, Any]:
@@ -137,9 +141,7 @@ class ZadooCloudClient:
         result = self._request("POST", "/api/agent/session/start", {"publicUrl": public_url or ""}, token=token)
         entitlement = result.get("entitlement") if isinstance(result, dict) else None
         if isinstance(entitlement, dict):
-            data = self.store.load()
-            data["entitlement_cache"] = entitlement
-            self.store.save(data)
+            self.store.atomic_update(lambda data: data.__setitem__("entitlement_cache", entitlement))
         return result
 
     def session_heartbeat(self, session_id: str, minutes: int = 1) -> dict[str, Any]:
@@ -149,13 +151,13 @@ class ZadooCloudClient:
         result = self._request("POST", "/api/agent/session/heartbeat", {"sessionId": session_id, "minutes": int(minutes or 1)}, token=token)
         entitlement = result.get("entitlement") if isinstance(result, dict) else None
         if isinstance(entitlement, dict):
-            data = self.store.load()
-            data["entitlement_cache"] = entitlement
-            # Set session_blocked flag for the tunnel/server to detect
-            allowed = bool(entitlement.get("allowed", True))
-            data["session_blocked"] = not allowed
-            data["session_block_reason"] = str(entitlement.get("reason") or "") if not allowed else ""
-            self.store.save(data)
+            def _apply(data):
+                data["entitlement_cache"] = entitlement
+                # Set session_blocked flag for the tunnel/server to detect
+                allowed = bool(entitlement.get("allowed", True))
+                data["session_blocked"] = not allowed
+                data["session_block_reason"] = str(entitlement.get("reason") or "") if not allowed else ""
+            self.store.atomic_update(_apply)
         return result
 
     def end_session(self, session_id: str) -> dict[str, Any]:

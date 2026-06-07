@@ -352,6 +352,11 @@ class RoutesMixin:
         return self._feature_allowed_for_headers(request_headers, feature)
 
     def _is_ws_action_authorized(self, websocket, action):
+        # Control actions require an active viewing (/video) session — which is what starts
+        # cloud billing. Without it, a client could open /input alone and drive the machine
+        # unmetered. View actions are always allowed; control needs a live video client.
+        if str(action) not in self.VIEW_ACTIONS and not getattr(self, "video_clients", None):
+            return False
         # During the post-zero grace lock (≈ -5 to -10 min), only screen-view actions are
         # allowed — mouse / keyboard / clipboard / everything else is disabled.
         if getattr(self, "_grace_block_controls", False) and str(action) not in self.VIEW_ACTIONS:
