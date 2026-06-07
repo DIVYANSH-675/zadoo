@@ -1086,26 +1086,19 @@ class ZadooSettingsWindow:
         if (self.data.get("entitlement_cache") or {}).get("revoked"):
             self._set_status("Device is revoked")
             return
-        # Balance is 0 → tell the user and offer to add credit. They can still start anyway
-        # (and top up from inside the session via the payment panel).
+        # Balance is 0 → HARD BLOCK. Zadoo does not start with no credit; the user must
+        # add credit first. We only offer to open the Add Credit page.
         if int(getattr(self, "_account_total", 0) or 0) <= 0:
-            choice = messagebox.askyesnocancel(
+            if messagebox.askyesno(
                 "Your balance is 0",
                 "Your account balance is 0 minutes.\n\n"
-                "Add credit to get session minutes.\n\n"
-                "Yes  →  Add credit now\n"
-                "No  →  Start anyway\n"
-                "Cancel  →  Don't start",
+                "Add credit to start a session.\n\n"
+                "Add credit now?",
                 icon="warning",
-            )
-            if choice is None:
-                self._set_status("Your balance is 0 — add credit to continue")
-                return
-            if choice:
+            ):
                 self._add_balance()
-                self._set_status("Your balance is 0 — opening Add Credit…")
-                return
-            # choice is False → user chose Start anyway; fall through.
+            self._set_status("Your balance is 0 — add credit to start")
+            return
         # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
         # fresh tunnel/public link is created. We use the graceful stop endpoint (not
         # taskkill /T), so this Settings window is never tree-killed.
