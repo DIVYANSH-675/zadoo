@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import json
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -138,12 +139,23 @@ class ZadooSettingsWindow:
         self._activation_poll_after: str | None = None
         self._activation_poll_deadline = 0.0
         self._has_credits = False
+        # Live runtime state (kept fresh by a background poll so the public-link label
+        # updates automatically when Zadoo starts/stops — without blocking the UI).
+        self._runtime_running = False
+        self._runtime_url = ""
+        self._runtime_poll_after: str | None = None
+        self._balance_poll_after: str | None = None
+        self._last_focus_refresh = 0.0
         # Account tab avatar image reference (prevent GC)
         self._avatar_photo: tk.PhotoImage | None = None
 
         self._build_style()
         self._build_ui()
         self.reload()
+        self._poll_runtime_status()  # start the live public-link / running-state poll
+        self._poll_account_balance()  # start the live balance/credits poll
+        # Refresh balance the moment the window regains focus (e.g. back from paying).
+        self.root.bind("<FocusIn>", lambda _e: self._refresh_balance_now())
         if self.store.get_device_token():
             self._fetch_latest_account_details_async(show_status=False)
 
@@ -599,10 +611,12 @@ class ZadooSettingsWindow:
         self.activation_code.insert(0, code)
         self.activation_code.configure(state="readonly")
 
-        # Public URL label (Open button state is driven by credits below, not URL presence)
-        pub_url = str(self.data.get("public_url") or "").strip()
-        if pub_url:
-            self.public_url_label.configure(text=pub_url, foreground=ACCENT)
+        # Public URL label — show the live link ONLY while Zadoo is actually running; a
+        # stored URL from a previous run is stale. The background poll keeps this fresh.
+        if self._runtime_running and self._runtime_url:
+            self.public_url_label.configure(text=self._runtime_url, foreground=ACCENT)
+        elif self._runtime_running:
+            self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
         else:
             self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
 
@@ -698,6 +712,93 @@ class ZadooSettingsWindow:
             self._set_status("Zadoo is not running — click Start first.")
         else:
             self._set_status("Tunnel not ready yet — click Refresh in a moment.")
+
+    def _poll_runtime_status(self) -> None:
+        """Background-poll the local runtime so the public-link label reflects whether
+        Zadoo is actually running — auto-clearing a stale link the moment it's stopped."""
+        def _check():
+            running = False
+            url = ""
+            try:
+                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.2) as resp:
+                    data = json.loads(resp.read().decode("utf-8", "replace"))
+                running = bool(data.get("running", True))
+                url = str(data.get("public_url") or "")
+            except Exception:
+                running = False
+                url = ""
+            try:
+                self.root.after(0, lambda: self._apply_runtime_status(running, url))
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_check, daemon=True).start()
+        except Exception:
+            pass
+
+    def _apply_runtime_status(self, running: bool, url: str) -> None:
+        self._runtime_running = running
+        self._runtime_url = url
+        try:
+            if running and url:
+                self.public_url_label.configure(text=url, foreground=ACCENT)
+            elif running:
+                self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
+            else:
+                self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
+        except Exception:
+            pass
+        try:
+            self._runtime_poll_after = self.root.after(4000, self._poll_runtime_status)
+        except Exception:
+            self._runtime_poll_after = None
+
+    def _poll_account_balance(self) -> None:
+        """Background-poll the cloud so the Credits card updates on its own (e.g. after a
+        top-up) without the user having to click Refresh."""
+        if self.store.get_device_token():
+            def _check():
+                for fetch in (self.cloud.fetch_credits, self.cloud.entitlement):
+                    try:
+                        fetch()
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(0, self.reload)
+                except Exception:
+                    pass
+            try:
+                threading.Thread(target=_check, daemon=True).start()
+            except Exception:
+                pass
+        try:
+            self._balance_poll_after = self.root.after(12000, self._poll_account_balance)
+        except Exception:
+            self._balance_poll_after = None
+
+    def _refresh_balance_now(self) -> None:
+        """Immediate one-shot balance refresh (used when the window regains focus, e.g.
+        returning from the billing page after paying)."""
+        if not self.store.get_device_token():
+            return
+        now = time.time()
+        if now - getattr(self, "_last_focus_refresh", 0.0) < 3.0:
+            return  # debounce: FocusIn can fire repeatedly
+        self._last_focus_refresh = now
+        def _check():
+            for fetch in (self.cloud.fetch_credits, self.cloud.entitlement):
+                try:
+                    fetch()
+                except Exception:
+                    pass
+            try:
+                self.root.after(0, self.reload)
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_check, daemon=True).start()
+        except Exception:
+            pass
 
     def _begin_public_url_autopoll(self, attempts: int = 8) -> None:
         """After Start, poll the runtime until the public link appears — or until the
