@@ -664,6 +664,8 @@ class MediaMixin:
             self._grace_block_controls = False
             raise
         except Exception:
+            # Never leave controls permanently locked if the heartbeat loop crashes.
+            self._grace_block_controls = False
             return
 
     async def _send_grace(self, websocket, grace_minutes, controls_locked, recharged=False):

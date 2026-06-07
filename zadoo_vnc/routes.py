@@ -404,13 +404,16 @@ class RoutesMixin:
             if not store.get_device_token():
                 return False
             cache = store.load(reload=True).get("entitlement_cache") or {}
+            # Fail OPEN when the cache isn't populated yet (fresh start / entitlement fetch
+            # not landed) — don't silently kill control. Billing is still enforced by the
+            # per-minute /video session heartbeat, and Start is already blocked at 0 balance.
             if not isinstance(cache, dict) or "allowed" not in cache:
-                return False
+                return True
             if cache.get("revoked"):
                 return False
             return bool(cache.get("allowed"))
         except Exception:
-            return False
+            return True
 
     def _settings_permission_allows(self, feature):
         if feature in {"public", "view"}:

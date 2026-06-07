@@ -4792,8 +4792,11 @@
             if (blockMouse && (event.action === 'click' || event.action === 'drag' || event.action === 'move' || event.action === 'scroll')) {
                 return;
             }
-            if (inputSocket.readyState === WebSocket.OPEN) {
-                inputSocket.send(JSON.stringify(event));
+            // Use the LIVE global socket (not the closure-captured one) so mouse input keeps
+            // working after the /input WebSocket reconnects — the keyboard handlers do the same.
+            var s = window.inputSocket || inputSocket;
+            if (s && s.readyState === WebSocket.OPEN) {
+                s.send(JSON.stringify(event));
             }
         }
 
@@ -4943,6 +4946,8 @@
                 if (t.closest('#webcam-container')) return true;
                 if (t.closest('#sidebar-trigger')) return true;
                 if (t.closest('#paymentPanel') || t.closest('.payment-panel')) return true;
+                if (t.closest('#creditBanner') || t.closest('.credit-banner')) return true;
+                if (t.closest('#controlsLockedOverlay') || t.closest('#sessionEndOverlay')) return true;
             } catch (_) { }
             return false;
         }
@@ -6468,8 +6473,13 @@
                     setFeatureEnabled(['button[onclick="takeSnapshot(event)"]'], !!permissions.snapshots);
                     setFeatureEnabled(['#capture-method-select', '.capture-chip', '#perf-toggle', '#perf-region', '#perf-scale', '#perf-gray'], !!permissions.advanced_video);
                     setFeatureEnabled(['#btn-refresh-url'], !!permissions.tunnel_refresh);
-                    if (!permissions.mouse) { try { blockMouse = true; } catch(_) {} }
-                    if (!permissions.keyboard) { try { blockKeyboard = true; } catch(_) {} }
+                    // Only block on an EXPLICIT false; a missing/undefined field must not
+                    // silently kill the mouse. Reset symmetrically (re-grant unblocks), but
+                    // never override an active lockdown.
+                    if (permissions.mouse === false) { try { blockMouse = true; } catch(_) {} }
+                    else if (permissions.mouse === true && !window.__modeChallenger) { try { blockMouse = false; } catch(_) {} }
+                    if (permissions.keyboard === false) { try { blockKeyboard = true; } catch(_) {} }
+                    else if (permissions.keyboard === true && !window.__modeChallenger) { try { blockKeyboard = false; } catch(_) {} }
                 }
                 function applyAuthorizedMode(result){
                     const mode = (result && result.mode) || result || 'full';
