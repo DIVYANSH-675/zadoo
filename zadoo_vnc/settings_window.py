@@ -363,9 +363,9 @@ class ZadooSettingsWindow:
 
         credits_btns = ttk.Frame(self.credits_card, style="Surface.TFrame")
         credits_btns.pack(anchor="w", pady=(8, 0))
-        ttk.Button(credits_btns, text="Add Balance →", command=self._add_balance,
+        ttk.Button(credits_btns, text="＋ Add Credit", command=self._add_balance,
                    style="Primary.TButton").pack(side=LEFT)
-        ttk.Button(credits_btns, text="Add Credits →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(credits_btns, text="View Plans →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
         ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
 
     def _build_runtime_tab(self) -> None:
@@ -619,6 +619,7 @@ class ZadooSettingsWindow:
 
         allowed_flag = entitlement.get("allowed", credits.get("allowed"))
         self._has_credits = bool(total > 0 or allowed_flag is True)
+        self._account_total = total
 
         if credits or entitlement:
             self.credits_included_label.configure(text=f"Included: {included} min")
@@ -1085,6 +1086,26 @@ class ZadooSettingsWindow:
         if (self.data.get("entitlement_cache") or {}).get("revoked"):
             self._set_status("Device is revoked")
             return
+        # Balance is 0 → tell the user and offer to add credit. They can still start anyway
+        # (and top up from inside the session via the payment panel).
+        if int(getattr(self, "_account_total", 0) or 0) <= 0:
+            choice = messagebox.askyesnocancel(
+                "Your balance is 0",
+                "Your account balance is 0 minutes.\n\n"
+                "Add credit to get session minutes.\n\n"
+                "Yes  →  Add credit now\n"
+                "No  →  Start anyway\n"
+                "Cancel  →  Don't start",
+                icon="warning",
+            )
+            if choice is None:
+                self._set_status("Your balance is 0 — add credit to continue")
+                return
+            if choice:
+                self._add_balance()
+                self._set_status("Your balance is 0 — opening Add Credit…")
+                return
+            # choice is False → user chose Start anyway; fall through.
         # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
         # fresh tunnel/public link is created. We use the graceful stop endpoint (not
         # taskkill /T), so this Settings window is never tree-killed.
