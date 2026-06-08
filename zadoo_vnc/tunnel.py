@@ -51,6 +51,17 @@ class CloudflareTunnelManager:
             return True
         if not self.cloudflared_path or not os.path.exists(self.cloudflared_path):
             return False
+        # Get-AuthenticodeSignature spawns PowerShell (~1-2s). The binary does not change
+        # within a session, so cache the verdict per (path, mtime) — this keeps tunnel
+        # restarts/refreshes from paying that cost every time.
+        try:
+            mtime = os.path.getmtime(self.cloudflared_path)
+        except Exception:
+            mtime = 0.0
+        cache = getattr(self, "_signature_cache", None)
+        if cache and cache[0] == self.cloudflared_path and cache[1] == mtime:
+            return cache[2]
+        ok = False
         try:
             quoted_path = self.cloudflared_path.replace("'", "''")
             command = f"(Get-AuthenticodeSignature -LiteralPath '{quoted_path}').Status"
@@ -62,13 +73,15 @@ class CloudflareTunnelManager:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode == 0 and (result.stdout or "").strip().lower() == "valid":
-                return True
-            logging.error("cloudflared signature verification failed: %s %s", result.stdout.strip(), result.stderr.strip())
+                ok = True
+            else:
+                logging.error("cloudflared signature verification failed: %s %s", result.stdout.strip(), result.stderr.strip())
         except Exception:
             logging.error("cloudflared signature verification failed", exc_info=True)
-        return False
+        self._signature_cache = (self.cloudflared_path, mtime, ok)
+        return ok
 
-    def _cleanup_stale_cloudflared(self, port):
+    def _cleanup_stale_cloudflared(self, port, exclude_pid=None):
         if os.name != "nt":
             return
         try:
@@ -96,6 +109,8 @@ class CloudflareTunnelManager:
             for item in processes:
                 command_line = str(item.get("CommandLine") or "")
                 pid = int(item.get("ProcessId") or 0)
+                if exclude_pid and pid == int(exclude_pid):
+                    continue
                 if pid > 0 and target in command_line and " tunnel " in f" {command_line} ":
                     try:
                         subprocess.run(
@@ -169,8 +184,16 @@ class CloudflareTunnelManager:
             return None, None
 
         try:
-            self._cleanup_stale_cloudflared(port)
-            cmd = [self.cloudflared_path, "tunnel", "--url", f"http://localhost:{port}"]
+            # Force HTTP/2 (TCP) by default: cloudflared otherwise tries QUIC over UDP 7844
+            # first and, on networks that block/throttle UDP (common on campus/home Wi-Fi),
+            # retries with exponential backoff (2,4,8,...s) before falling back to HTTP/2 —
+            # the main cause of slow public-URL generation. --no-autoupdate skips the update
+            # probe. Override with ZADOO_CLOUDFLARED_PROTOCOL=quic/auto/default if desired.
+            protocol = (os.getenv("ZADOO_CLOUDFLARED_PROTOCOL", "http2") or "http2").strip()
+            cmd = [self.cloudflared_path, "tunnel", "--no-autoupdate"]
+            if protocol and protocol.lower() != "default":
+                cmd += ["--protocol", protocol]
+            cmd += ["--url", f"http://localhost:{port}"]
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -182,6 +205,12 @@ class CloudflareTunnelManager:
             )
 
             logging.info("Started cloudflared for port %s with PID %s", port, process.pid)
+
+            # Kill any orphaned cloudflared from a previous run in the background so it never
+            # blocks URL generation; exclude the process we just started to avoid a race.
+            threading.Thread(
+                target=self._cleanup_stale_cloudflared, args=(port, process.pid), daemon=True
+            ).start()
 
             output_queue = queue.Queue()
 

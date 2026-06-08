@@ -115,9 +115,25 @@ class ZadooSettingsWindow:
     def __init__(self, store: SettingsStore | None = None):
         self.store = store or get_settings_store()
         self.cloud = ZadooCloudClient(self.store)
+        # Make the process DPI-aware BEFORE creating Tk so the window renders crisply and at the
+        # right size on high-DPI / scaled displays instead of being bitmap-stretched.
+        try:
+            from .dpi import ensure_process_dpi_aware_once
+            ensure_process_dpi_aware_once()
+        except Exception:
+            pass
         self.root = Tk()
         self.root.title("Zadoo Settings")
-        self.root.minsize(420, 320)
+        # Match Tk scaling to the monitor DPI (tk scaling = DPI/72) so fonts and widgets are
+        # sized correctly for every device, and remember the ratio for window sizing below.
+        try:
+            dpi = float(self.root.winfo_fpixels("1i"))
+            self._ui_scale = max(1.0, dpi / 96.0) if dpi > 0 else 1.0
+            if dpi > 0:
+                self.root.tk.call("tk", "scaling", dpi / 72.0)
+        except Exception:
+            self._ui_scale = 1.0
+        self.root.minsize(int(420 * self._ui_scale), int(320 * self._ui_scale))
         self._fit_geometry(520, 380)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
@@ -267,42 +283,30 @@ class ZadooSettingsWindow:
         ttk.Button(self.footer, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
         ttk.Button(self.footer, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
 
-    def _fit_geometry(self, w: int, h: int) -> None:
-        """Size and centre the window so it always fits the current screen (any device/DPI)."""
+    def _fit_geometry(self, base_w: int, base_h: int) -> None:
+        """Scale the requested size to the monitor DPI, then clamp to the screen and centre so
+        the window fits and looks right on every device — no scrollbars needed."""
         try:
+            scale = getattr(self, "_ui_scale", 1.0) or 1.0
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
-            w = max(360, min(int(w), sw - 40))
-            h = max(300, min(int(h), sh - 96))
+            w = max(int(360 * scale), min(int(base_w * scale), sw - 40))
+            h = max(int(300 * scale), min(int(base_h * scale), sh - 96))
             x = max(0, (sw - w) // 2)
             y = max(0, (sh - h) // 3)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
             try:
-                self.root.geometry(f"{int(w)}x{int(h)}")
+                self.root.geometry(f"{int(base_w)}x{int(base_h)}")
             except Exception:
                 pass
 
-    def _make_scrollable(self, parent):
-        """Return a padded inner frame inside `parent` that scrolls vertically when its content
-        overflows — keeps every field reachable on small / high-DPI screens."""
-        canvas = tk.Canvas(parent, bg=SURFACE, highlightthickness=0, bd=0)
-        vbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vbar.set)
-        vbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        inner = ttk.Frame(canvas, padding=16, style="Surface.TFrame")
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
-
-        def _on_wheel(event):
-            try:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            except Exception:
-                pass
-        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
-        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+    def _tab_body(self, parent):
+        """Return a padded content frame filling `parent`. No scrollbars — the window itself
+        auto-fits the screen and scales to the monitor DPI, so content stays right-sized and
+        visible on every device."""
+        inner = ttk.Frame(parent, padding=16, style="Surface.TFrame")
+        inner.pack(fill=BOTH, expand=True)
         return inner
 
     def _access_code_validator(self, value: str) -> bool:
@@ -311,7 +315,7 @@ class ZadooSettingsWindow:
     def _build_access_tab(self) -> None:
         self.tab_access = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_access, text="Access")
-        body = self._make_scrollable(self.tab_access)
+        body = self._tab_body(self.tab_access)
         validator = (self.root.register(self._access_code_validator), "%P")
 
         form = ttk.Frame(body, style="Surface.TFrame")
@@ -348,7 +352,7 @@ class ZadooSettingsWindow:
     def _build_account_tab(self) -> None:
         self.tab_account = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_account, text="Account")
-        body = self._make_scrollable(self.tab_account)
+        body = self._tab_body(self.tab_account)
 
         # ── Profile card ──────────────────────────────────────────────
         self.profile_card = ttk.LabelFrame(body, text="Signed-in account", style="Card.TLabelframe")
@@ -423,7 +427,7 @@ class ZadooSettingsWindow:
     def _build_runtime_tab(self) -> None:
         self.tab_runtime = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_runtime, text="Runtime")
-        body = self._make_scrollable(self.tab_runtime)
+        body = self._tab_body(self.tab_runtime)
         card = ttk.LabelFrame(body, text="Windows behavior", style="Card.TLabelframe")
         card.pack(fill="x")
         self._check_button(card, "Start Zadoo when Windows starts", self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
@@ -475,7 +479,7 @@ class ZadooSettingsWindow:
     def _build_permissions_tab(self) -> None:
         self.tab_permissions = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_permissions, text="Permissions")
-        body = self._make_scrollable(self.tab_permissions)
+        body = self._tab_body(self.tab_permissions)
 
         perms = ttk.LabelFrame(body, text="Allowed controls for this password", style="Card.TLabelframe")
         perms.pack(fill=BOTH, expand=True)
@@ -513,7 +517,7 @@ class ZadooSettingsWindow:
     def _build_alert_tab(self) -> None:
         self.tab_alerts = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_alerts, text="Alerts")
-        body = self._make_scrollable(self.tab_alerts)
+        body = self._tab_body(self.tab_alerts)
         alert_tabs = ttk.Notebook(body)
         alert_tabs.pack(fill=BOTH, expand=True)
         for code in ("A", "B", "C", "D"):
@@ -589,16 +593,18 @@ class ZadooSettingsWindow:
                 if tab_id not in existing_tabs:
                     self.tabs.insert(idx, tab_widget, text=label)
 
-            self.root.minsize(480, 360)
-            if self.root.winfo_width() < 660:
+            _s = getattr(self, "_ui_scale", 1.0) or 1.0
+            self.root.minsize(int(480 * _s), int(360 * _s))
+            if self.root.winfo_width() < int(660 * _s):
                 self._fit_geometry(780, 560)
         else:
             self.tabs.pack_forget()
             self.footer.pack_forget()
             self.signin_welcome_frame.pack(fill=BOTH, expand=True, pady=(10, 8))
 
-            self.root.minsize(420, 320)
-            if self.root.winfo_width() > 560:
+            _s = getattr(self, "_ui_scale", 1.0) or 1.0
+            self.root.minsize(int(420 * _s), int(320 * _s))
+            if self.root.winfo_width() > int(560 * _s):
                 self._fit_geometry(520, 380)
 
             # Check if there is an active activation process running
@@ -1292,7 +1298,7 @@ class ZadooSettingsWindow:
                 _post_local_json("/api/runtime/stop", {"admin_code": self._admin_code()})
             except Exception:
                 pass
-            self.root.after(3000, self._launch_runtime)
+            self.root.after(1200, self._launch_runtime)
             return
         self._launch_runtime()
 
@@ -1307,7 +1313,7 @@ class ZadooSettingsWindow:
             # Keep Settings open (do not hide). Show the public link as the tunnel comes up.
             self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
             self._set_status("Starting Zadoo… the public link will appear here shortly.")
-            self.root.after(3500, lambda: self._begin_public_url_autopoll(20))
+            self.root.after(1500, lambda: self._begin_public_url_autopoll(20))
         except Exception as exc:
             messagebox.showerror("Zadoo", f"Could not start Zadoo: {exc}")
 

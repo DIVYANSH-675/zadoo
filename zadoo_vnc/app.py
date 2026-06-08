@@ -248,10 +248,10 @@ def main():
     if _local_server_running():
         print("Existing Zadoo instance detected; restarting it...")
         _stop_existing_zadoo_on_port(web_port)
-        time.sleep(0.8)  # let the old listener free port 6173 before we bind it
+        time.sleep(0.4)  # let the old listener free port 6173 before we bind it
     elif _zadoo_pids_on_port(web_port):
         _stop_existing_zadoo_on_port(web_port)
-        time.sleep(0.8)
+        time.sleep(0.4)
 
     settings_store = get_settings_store()
     signed_in = bool(settings_store.get_device_token())
