@@ -805,6 +805,12 @@ def fetch(base_url: str, path: str, headers: dict[str, str] | None = None):
 
 def assert_live(base_url: str) -> None:
     status, content_type, body = fetch(base_url, "/")
+    if status == 403:
+        fail(
+            "live root returned 403 — direct (non-tunnel) access is blocked by default. "
+            "Start the target server with ZADOO_ALLOW_DIRECT_ACCESS=1 to run live localhost "
+            "smoke tests, e.g.  set ZADOO_ALLOW_DIRECT_ACCESS=1 && python zadoo_vnc_single.py"
+        )
     if status != 200 or "text/html" not in content_type:
         fail(f"live root failed: status={status} content_type={content_type}")
 

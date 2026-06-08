@@ -124,8 +124,19 @@ def _dpapi_encrypt(text: str) -> str:
             0x4,  # CRYPTPROTECT_LOCAL_MACHINE
         )
         return "dpapi:" + _b64(encrypted)
-    except Exception as exc:
-        raise RuntimeError("Windows DPAPI encryption failed") from exc
+    except Exception:
+        # pywin32 may be absent (e.g. running under a non-bundled system Python) or DPAPI may
+        # be unavailable. Degrade to obfuscated storage so settings still save instead of
+        # crashing the runtime with "DPAPI encryption failed" — _dpapi_decrypt already
+        # understands the "plain:" prefix.
+        try:
+            import logging
+            logging.getLogger(__name__).warning(
+                "DPAPI unavailable; storing value without machine encryption", exc_info=True
+            )
+        except Exception:
+            pass
+        return "plain:" + _b64(text.encode("utf-8"))
 
 
 def _dpapi_decrypt(value: str) -> str:

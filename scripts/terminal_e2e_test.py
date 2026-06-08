@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import time
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:  # optional dev dependency — not in requirements.txt/build_requirements.txt
+    sync_playwright = None
 
 
 def _norm(text: str) -> str:
@@ -124,6 +127,13 @@ def main() -> int:
 
     base = args.url.rstrip("/")
     token = str(int(time.time() * 1000))[-8:]
+    if sync_playwright is None:
+        print(
+            "SKIP: playwright is not installed (optional dev dependency). Install it with:\n"
+            "    python -m pip install playwright\n"
+            "    python -m playwright install chromium"
+        )
+        return 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1300, "height": 900})

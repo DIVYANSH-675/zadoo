@@ -54,7 +54,7 @@ npm run prisma:migrate
 npm run dev
 ```
 
-It includes an original Zadoo website, pricing, Auth.js Google/email OTP login, dashboard, device activation, billing history, Stripe/Razorpay checkout, signed webhooks, entitlement APIs, and agent session usage endpoints. Configure `web\.env.local` from `web\.env.example` with Postgres, Auth.js, Stripe, Razorpay, and email provider credentials.
+It includes an original Zadoo website, pricing, Auth.js Google/email OTP login, dashboard, device activation, billing history, Razorpay checkout, signed webhooks, entitlement APIs, and agent session usage endpoints. Configure `web\.env.local` from `web\.env.example` with Postgres, Auth.js, Razorpay, and email provider credentials.
 
 ## Screen Sharing Performance
 
