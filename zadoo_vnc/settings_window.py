@@ -117,8 +117,8 @@ class ZadooSettingsWindow:
         self.cloud = ZadooCloudClient(self.store)
         self.root = Tk()
         self.root.title("Zadoo Settings")
-        self.root.geometry("520x380")
-        self.root.minsize(520, 380)
+        self.root.minsize(420, 320)
+        self._fit_geometry(520, 380)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.root.bind("<Unmap>", self._on_unmap)
@@ -267,15 +267,54 @@ class ZadooSettingsWindow:
         ttk.Button(self.footer, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
         ttk.Button(self.footer, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
 
+    def _fit_geometry(self, w: int, h: int) -> None:
+        """Size and centre the window so it always fits the current screen (any device/DPI)."""
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            w = max(360, min(int(w), sw - 40))
+            h = max(300, min(int(h), sh - 96))
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 3)
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            try:
+                self.root.geometry(f"{int(w)}x{int(h)}")
+            except Exception:
+                pass
+
+    def _make_scrollable(self, parent):
+        """Return a padded inner frame inside `parent` that scrolls vertically when its content
+        overflows — keeps every field reachable on small / high-DPI screens."""
+        canvas = tk.Canvas(parent, bg=SURFACE, highlightthickness=0, bd=0)
+        vbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas, padding=16, style="Surface.TFrame")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+
+        def _on_wheel(event):
+            try:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
     def _access_code_validator(self, value: str) -> bool:
         return len(value or "") <= ACCESS_CODE_MAX_LENGTH
 
     def _build_access_tab(self) -> None:
-        self.tab_access = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tab_access = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_access, text="Access")
+        body = self._make_scrollable(self.tab_access)
         validator = (self.root.register(self._access_code_validator), "%P")
 
-        form = ttk.Frame(self.tab_access, style="Surface.TFrame")
+        form = ttk.Frame(body, style="Surface.TFrame")
         form.pack(fill="x")
         ttk.Label(form, text=f"Access code ({ACCESS_CODE_MAX_LENGTH} chars max)", style="Surface.TLabel").grid(row=0, column=0, sticky="w")
         self.access_code = ttk.Entry(form, validate="key", validatecommand=validator)
@@ -291,7 +330,7 @@ class ZadooSettingsWindow:
         form.columnconfigure(0, weight=1)
 
         # ── Remote access (public link + start) ───────────────────────
-        self.public_url_frame = ttk.Frame(self.tab_access, style="Surface.TFrame")
+        self.public_url_frame = ttk.Frame(body, style="Surface.TFrame")
         self.public_url_frame.pack(fill="x", pady=(18, 0))
         ttk.Label(self.public_url_frame, text="Public link", style="Surface.TLabel").pack(anchor="w")
         url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
@@ -307,11 +346,12 @@ class ZadooSettingsWindow:
                   style="Muted.TLabel", font=("Segoe UI", 8)).pack(anchor="w")
 
     def _build_account_tab(self) -> None:
-        self.tab_account = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tab_account = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_account, text="Account")
+        body = self._make_scrollable(self.tab_account)
 
         # ── Profile card ──────────────────────────────────────────────
-        self.profile_card = ttk.LabelFrame(self.tab_account, text="Signed-in account", style="Card.TLabelframe")
+        self.profile_card = ttk.LabelFrame(body, text="Signed-in account", style="Card.TLabelframe")
 
         avatar_frame = ttk.Frame(self.profile_card, style="Surface.TFrame")
         avatar_frame.pack(side=LEFT, padx=(0, 12))
@@ -336,13 +376,13 @@ class ZadooSettingsWindow:
         ttk.Button(self.profile_card, text="Sign Out", command=self.sign_out).pack(side=RIGHT, padx=(0, 4))
 
         # ── Device name container ─────────────────────────────────────
-        self.device_name_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
+        self.device_name_frame = ttk.Frame(body, style="Surface.TFrame")
         ttk.Label(self.device_name_frame, text="Device name", style="Surface.TLabel").pack(anchor="w")
         self.device_name = ttk.Entry(self.device_name_frame)
         self.device_name.pack(fill="x", pady=(2, 10))
 
         # ── Sign-in Container ─────────────────────────────────────────
-        self.signin_frame = ttk.Frame(self.tab_account, style="Surface.TFrame")
+        self.signin_frame = ttk.Frame(body, style="Surface.TFrame")
         ttk.Label(self.signin_frame, text="Sign in to your Zadoo account to start using this device.",
                   style="Surface.TLabel", font=("Segoe UI", 10, "bold"), foreground=ACCENT).pack(anchor="w", pady=(5, 10))
 
@@ -358,7 +398,7 @@ class ZadooSettingsWindow:
         ttk.Button(btn_row, text="Check sign-in", command=self.poll_activation).pack(side=LEFT, padx=(8, 0))
 
         # ── Credits ───────────────────────────────────────────────────
-        self.credits_card = ttk.LabelFrame(self.tab_account, text="Credits", style="Card.TLabelframe")
+        self.credits_card = ttk.LabelFrame(body, text="Credits", style="Card.TLabelframe")
         # Icon-only refresh (loads latest balance) floated at the top-right so it does NOT
         # push the credit lines down / disturb the layout.
         ttk.Button(self.credits_card, text="⟳", width=3, command=self._refresh_credits).place(relx=1.0, x=-4, y=2, anchor="ne")
@@ -381,14 +421,15 @@ class ZadooSettingsWindow:
         ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
 
     def _build_runtime_tab(self) -> None:
-        self.tab_runtime = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tab_runtime = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_runtime, text="Runtime")
-        card = ttk.LabelFrame(self.tab_runtime, text="Windows behavior", style="Card.TLabelframe")
+        body = self._make_scrollable(self.tab_runtime)
+        card = ttk.LabelFrame(body, text="Windows behavior", style="Card.TLabelframe")
         card.pack(fill="x")
         self._check_button(card, "Start Zadoo when Windows starts", self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
         self._check_button(card, "Keep Settings visible on taskbar when minimized", self.show_taskbar_var).grid(row=1, column=0, sticky="w", pady=4)
         ttk.Button(card, text="Apply Startup", command=self.apply_startup).grid(row=2, column=0, sticky="w", pady=(12, 0))
-        self.runtime_state = ttk.Label(self.tab_runtime, text="", style="Surface.TLabel")
+        self.runtime_state = ttk.Label(body, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
 
     def _ensure_check_images(self) -> None:
@@ -432,10 +473,11 @@ class ZadooSettingsWindow:
         return ttk.Checkbutton(parent, text=text, variable=var)
 
     def _build_permissions_tab(self) -> None:
-        self.tab_permissions = ttk.Frame(self.tabs, padding=16, style="Surface.TFrame")
+        self.tab_permissions = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_permissions, text="Permissions")
+        body = self._make_scrollable(self.tab_permissions)
 
-        perms = ttk.LabelFrame(self.tab_permissions, text="Allowed controls for this password", style="Card.TLabelframe")
+        perms = ttk.LabelFrame(body, text="Allowed controls for this password", style="Card.TLabelframe")
         perms.pack(fill=BOTH, expand=True)
         self._ensure_check_images()
         for index, key in enumerate(PERMISSION_KEYS):
@@ -463,15 +505,16 @@ class ZadooSettingsWindow:
                 pady=6,
             )
 
-        actions = ttk.Frame(self.tab_permissions, style="Surface.TFrame")
+        actions = ttk.Frame(body, style="Surface.TFrame")
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Allow All", command=self.allow_all_permissions).pack(side=LEFT)
         ttk.Button(actions, text="Clear All", command=self.clear_permissions).pack(side=LEFT, padx=(6, 0))
 
     def _build_alert_tab(self) -> None:
-        self.tab_alerts = ttk.Frame(self.tabs, padding=12, style="Surface.TFrame")
+        self.tab_alerts = ttk.Frame(self.tabs, style="Surface.TFrame")
         self.tabs.add(self.tab_alerts, text="Alerts")
-        alert_tabs = ttk.Notebook(self.tab_alerts)
+        body = self._make_scrollable(self.tab_alerts)
+        alert_tabs = ttk.Notebook(body)
         alert_tabs.pack(fill=BOTH, expand=True)
         for code in ("A", "B", "C", "D"):
             frame = ttk.Frame(alert_tabs, padding=16, style="Surface.TFrame")
@@ -527,8 +570,10 @@ class ZadooSettingsWindow:
         # Adjust window controls, tabs, and footer visibility dynamically based on sign in status
         if is_signed_in:
             self.signin_welcome_frame.pack_forget()
+            # Pack the footer FIRST at the bottom so Start/Stop stay visible on any screen
+            # even when the tab area is squeezed; the tabs then fill the space above it.
+            self.footer.pack(side="bottom", fill="x")
             self.tabs.pack(fill=BOTH, expand=True, pady=(10, 8))
-            self.footer.pack(fill="x")
 
             # Insert tabs only if not already present (guard against duplicate insert errors)
             existing_tabs = list(self.tabs.tabs())
@@ -544,17 +589,17 @@ class ZadooSettingsWindow:
                 if tab_id not in existing_tabs:
                     self.tabs.insert(idx, tab_widget, text=label)
 
-            self.root.minsize(680, 500)
-            if self.root.winfo_width() < 680:
-                self.root.geometry("780x560")
+            self.root.minsize(480, 360)
+            if self.root.winfo_width() < 660:
+                self._fit_geometry(780, 560)
         else:
             self.tabs.pack_forget()
             self.footer.pack_forget()
             self.signin_welcome_frame.pack(fill=BOTH, expand=True, pady=(10, 8))
 
-            self.root.minsize(520, 380)
-            if self.root.winfo_width() > 540:
-                self.root.geometry("520x380")
+            self.root.minsize(420, 320)
+            if self.root.winfo_width() > 560:
+                self._fit_geometry(520, 380)
 
             # Check if there is an active activation process running
             activation = self.data.get("activation") or {}

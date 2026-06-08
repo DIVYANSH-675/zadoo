@@ -6691,8 +6691,10 @@
                 var resp=await fetch("/api/local/topup-order?amountRupees="+encodeURIComponent(amt),{method:"POST"});
                 var od=await resp.json();
                 if(!od.success)throw new Error(od.error||"Order failed");
+                if(!window.Razorpay)throw new Error("Could not load the Razorpay checkout. Check the internet connection and retry.");
+                if(!od.razorpayKeyId||!od.order)throw new Error("Payments are not configured on the server yet. Please try again later.");
                 ppRate=od.minutesGranted/amt;
-                new window.Razorpay({
+                var rzp=new window.Razorpay({
                     key:od.razorpayKeyId,amount:od.order.amount,currency:od.order.currency,
                     order_id:od.order.id,name:"Zadoo Credits",description:od.minutesGranted+" min",
                     theme:{color:"#18bfa6"},
@@ -6714,7 +6716,18 @@
                         }
                     },
                     modal:{ondismiss:function(){if(ppBtn)ppBtn.disabled=false;}}
-                }).open();
+                });
+                if(rzp&&typeof rzp.on==="function"){
+                    rzp.on("payment.failed",function(r){
+                        if(ppSt){ppSt.textContent=(r&&r.error&&r.error.description)||"Payment failed. Please try again.";ppSt.className="pp-status error";}
+                        if(ppBtn)ppBtn.disabled=false;
+                    });
+                }
+                rzp.open();
+                // Razorpay's modal is a full-screen overlay that blocks the page, so re-enable the
+                // underlying button immediately. This guarantees it can never stay greyed-out/stuck
+                // if the modal fails to open or is closed without firing handler/ondismiss.
+                if(ppBtn)ppBtn.disabled=false;
             }catch(ex){
                 if(ppSt){ppSt.textContent=friendlyPayError(ex.message);ppSt.className="pp-status error";}
                 if(ppBtn)ppBtn.disabled=false;
