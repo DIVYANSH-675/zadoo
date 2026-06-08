@@ -6669,6 +6669,13 @@
             if(origP)origP(data);
             try{if(data&&data.entitlement&&typeof data.entitlement.minutesRemaining==="number")setC(data.entitlement.minutesRemaining);}catch(ex){}
         };
+        function friendlyPayError(msg){
+            var m=String(msg||"").toLowerCase();
+            if(m.indexOf("unauthorized")>=0||m.indexOf("not signed in")>=0||m.indexOf("device not")>=0||m.indexOf("401")>=0){
+                return "This PC isn't linked to a Zadoo account. On the host PC open the Zadoo app and click \"Sign in to Zadoo\" (if it was signed in before, click Sign Out then sign in again to refresh the link), then retry.";
+            }
+            return msg||"Payment failed. Please try again.";
+        }
         window.initiateTopup=async function(){
             if(ppBtn)ppBtn.disabled=true;
             if(ppSt){ppSt.textContent="";ppSt.className="pp-status";}
@@ -6702,14 +6709,14 @@
                             if(ppBtn)ppBtn.disabled=false;
                             setTimeout(function(){collapsePaymentPanel();},5000);
                         }catch(ex){
-                            if(ppSt){ppSt.textContent=ex.message||"Verify failed";ppSt.className="pp-status error";}
+                            if(ppSt){ppSt.textContent=friendlyPayError(ex.message);ppSt.className="pp-status error";}
                             if(ppBtn)ppBtn.disabled=false;
                         }
                     },
                     modal:{ondismiss:function(){if(ppBtn)ppBtn.disabled=false;}}
                 }).open();
             }catch(ex){
-                if(ppSt){ppSt.textContent=ex.message||"Failed";ppSt.className="pp-status error";}
+                if(ppSt){ppSt.textContent=friendlyPayError(ex.message);ppSt.className="pp-status error";}
                 if(ppBtn)ppBtn.disabled=false;
             }
         };

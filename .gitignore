@@ -29,8 +29,11 @@ skills-lock.json
 .claude/
 .codex/
 .agents/
+.vs/
+.vscode/
 Claude-Code-Frontend-Design-Toolkit/
 impeccable/
+/app/
 web/
 web/node_modules/
 web/.next/

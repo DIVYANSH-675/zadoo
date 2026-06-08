@@ -149,9 +149,12 @@ class ZadooSettingsWindow:
         # Account tab avatar image reference (prevent GC)
         self._avatar_photo: tk.PhotoImage | None = None
 
+        self._autosave_after: str | None = None
+        self._loading = False
         self._build_style()
         self._build_ui()
         self.reload()
+        self._wire_autosave()  # settings persist automatically (no Save button)
         self._poll_runtime_status()  # start the live public-link / running-state poll
         self._poll_account_balance()  # start the live balance/credits poll
         # Refresh balance the moment the window regains focus (e.g. back from paying).
@@ -260,10 +263,9 @@ class ZadooSettingsWindow:
         self.footer = ttk.Frame(outer, style="Root.TFrame")
         self.status_label = ttk.Label(self.footer, text="", style="Status.TLabel")
         self.status_label.pack(side=LEFT, fill="x", expand=True)
-        ttk.Button(self.footer, text="Hide", command=self.hide).pack(side=RIGHT, padx=(6, 0))
+        # Settings autosave automatically — no Save button. Keep only Start/Stop here.
         ttk.Button(self.footer, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
         ttk.Button(self.footer, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
-        ttk.Button(self.footer, text="Save", command=self.save, style="Primary.TButton").pack(side=RIGHT)
 
     def _access_code_validator(self, value: str) -> bool:
         return len(value or "") <= ACCESS_CODE_MAX_LENGTH
@@ -298,9 +300,7 @@ class ZadooSettingsWindow:
                                           font=("Segoe UI", 9), cursor="hand2")
         self.public_url_label.pack(side=LEFT, fill="x", expand=True)
         self.public_url_label.bind("<Button-1>", lambda _e: self._open_public_url())
-        self.start_btn = ttk.Button(url_row, text="Start", command=self.start_zadoo, style="Primary.TButton")
-        self.start_btn.pack(side=LEFT, padx=(6, 0))
-        ttk.Button(url_row, text="Stop", command=self.stop_zadoo).pack(side=LEFT, padx=(6, 0))
+        # Start/Stop live in the always-visible footer; keep only Refresh inline with the link.
         ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
         ttk.Label(self.public_url_frame,
                   text="Click Start to launch Zadoo — the public link appears here, then click it to open.",
@@ -493,19 +493,23 @@ class ZadooSettingsWindow:
         return bool(self.data.get("setup_complete"))
 
     def reload(self) -> None:
-        self.data = self.store.load(reload=True)
-        self.saved_access_code = str(self.data.get("access_code_plain") or "")
-        is_signed_in = bool(self.store.get_device_token())
-        self._load_account_values()
-        if is_signed_in:
-            self._load_access_values()
-            self._load_permission_values()
-            self._load_alert_values()
-            self._load_runtime_values()
-        if is_signed_in:
-            self.state_label.configure(text="Configured" if self._setup_complete() else "Ready")
-        else:
-            self.state_label.configure(text="")
+        self._loading = True  # suppress autosave while we populate fields programmatically
+        try:
+            self.data = self.store.load(reload=True)
+            self.saved_access_code = str(self.data.get("access_code_plain") or "")
+            is_signed_in = bool(self.store.get_device_token())
+            self._load_account_values()
+            if is_signed_in:
+                self._load_access_values()
+                self._load_permission_values()
+                self._load_alert_values()
+                self._load_runtime_values()
+            if is_signed_in:
+                self.state_label.configure(text="Configured" if self._setup_complete() else "Ready")
+            else:
+                self.state_label.configure(text="")
+        finally:
+            self._loading = False
 
     def _load_access_values(self) -> None:
         self.access_code.delete(0, END)
@@ -969,26 +973,59 @@ class ZadooSettingsWindow:
             payload["permissions"]["terminal"] = False
         return payload
 
-    def save(self) -> bool:
+    def _wire_autosave(self) -> None:
+        """Persist settings automatically whenever a field changes (replaces the Save button)."""
+        for entry in (self.access_code, self.email_to, self.device_name):
+            try:
+                entry.bind("<KeyRelease>", self._schedule_autosave, add="+")
+                entry.bind("<FocusOut>", self._schedule_autosave, add="+")
+            except Exception:
+                pass
+        toggles = [self.autostart_var, self.show_taskbar_var]
+        toggles.extend(self.permission_vars.values())
+        for vars_for_code in self.alert_vars.values():
+            toggles.extend(vars_for_code.values())
+        for var in toggles:
+            try:
+                var.trace_add("write", self._schedule_autosave)
+            except Exception:
+                pass
+
+    def _schedule_autosave(self, *_args) -> None:
+        if getattr(self, "_loading", False):
+            return
+        try:
+            if self._autosave_after:
+                self.root.after_cancel(self._autosave_after)
+        except Exception:
+            pass
+        self._autosave_after = self.root.after(700, self._autosave)
+
+    def _autosave(self) -> None:
+        self._autosave_after = None
+        # Nothing to persist until the device is signed in (the welcome screen has no form).
+        if not self.store.get_device_token():
+            return
         try:
             payload = self._collect_payload()
-            if not payload["access_code"]:
-                raise ValueError("access code is required")
-            if len(payload["access_code"]) > ACCESS_CODE_MAX_LENGTH:
-                raise ValueError(f"access code must be {ACCESS_CODE_MAX_LENGTH} characters or fewer")
+        except Exception:
+            return
+        code = str(payload.get("access_code") or "")
+        # Wait for a complete, valid access code before writing — don't nag mid-typing.
+        if not code or len(code) > ACCESS_CODE_MAX_LENGTH:
+            return
+        try:
             self.store.apply_setup(payload, require_code=payload.get("admin_code"))
             self.apply_startup(show_status=False)
             if _local_server_running():
                 _notify_settings_reload(payload.get("access_code", ""))
-            self.reload()
-            self._set_status("Saved")
-            return True
+            self.saved_access_code = code
+            self._set_status("Saved ✓")
         except PermissionError:
-            self._set_status("Incorrect access code")
-            return False
-        except Exception as exc:
-            self._set_status(str(exc) or "Save failed")
-            return False
+            # Access code changed mid-edit; will retry on the next change.
+            pass
+        except Exception:
+            pass
 
     def _save_cloud_fields_only(self) -> None:
         data = self.store.load(reload=True)
