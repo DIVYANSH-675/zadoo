@@ -3139,6 +3139,7 @@
     let audioContext;
     let audioSourceNode;
     let audioScriptNode;
+    let audioPlayer = null;
     let audioPlaying = false;
     let audioFormat = null;
     let pendingAudioHeader = true;
@@ -3146,6 +3147,7 @@
     let micSocket;
     let micAudioContext;
     let micScriptNode;
+    let micPlayer = null;
     let micPlaying = false;
     let micFormat = null;
     let pendingMicHeader = true;
@@ -5775,11 +5777,128 @@
         }
     }
 
+    // ---- Low-latency, glitch-free PCM playback (research-backed) ----------------------
+    // ScriptProcessorNode runs on the MAIN thread, so it stutters under video-render load
+    // ("blurry"/choppy audio) and adds latency. AudioWorklet runs on a dedicated audio
+    // thread (128-frame quanta ~2.9ms). The worklet also RESAMPLES the incoming stream to
+    // the device's AudioContext rate — fixing pitch/speed distortion when the device runs at
+    // 44.1kHz while the stream is 48kHz — and keeps a small adaptive jitter buffer (~40ms)
+    // for low, stable latency. Falls back to ScriptProcessor only if AudioWorklet is absent.
+    const PCM_WORKLET_SRC = `
+class PcmPlayer extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this.cap = 1 << 18;            // 262144 samples (~5s @48k), power of two for fast masking
+    this.mask = this.cap - 1;
+    this.ring = new Float32Array(this.cap);
+    this.writePos = 0;             // integer count of source samples written
+    this.readPos = 0;              // fractional source-sample read cursor (for resampling)
+    this.srcRate = sampleRate;     // stream rate; updated by 'format' message
+    this.started = false;
+    this.targetMs = 40;            // jitter-buffer target latency (ms)
+    this.port.onmessage = (e) => {
+      const d = e.data; if (!d) return;
+      if (d.cmd === 'format'){ this.srcRate = d.sr || sampleRate; this.writePos = 0; this.readPos = 0; this.started = false; return; }
+      if (d.cmd === 'reset'){ this.writePos = 0; this.readPos = 0; this.started = false; return; }
+      if (d.pcm){
+        const src = new Int16Array(d.pcm), ring = this.ring, mask = this.mask;
+        let w = this.writePos;
+        for (let i = 0; i < src.length; i++){ ring[w & mask] = src[i] / 32768; w++; }
+        this.writePos = w;
+      }
+    };
+  }
+  process(_inputs, outputs){
+    const out = outputs[0][0];
+    if (!out) return true;
+    const ratio = this.srcRate / sampleRate;        // source samples consumed per output sample
+    const target = this.srcRate * this.targetMs / 1000;
+    const maxBuf = target * 4;
+    if (!this.started){
+      if ((this.writePos - this.readPos) >= target) this.started = true;
+      else { out.fill(0); return true; }            // prime the buffer before starting
+    }
+    if ((this.writePos - this.readPos) > maxBuf) this.readPos = this.writePos - target;  // cap latency
+    const ring = this.ring, mask = this.mask;
+    for (let i = 0; i < out.length; i++){
+      if ((this.writePos - this.readPos) < 2){       // underrun -> silence + re-prime
+        for (let j = i; j < out.length; j++) out[j] = 0;
+        this.started = false;
+        return true;
+      }
+      const ip = Math.floor(this.readPos), frac = this.readPos - ip;
+      const a = ring[ip & mask], b = ring[(ip + 1) & mask];
+      out[i] = a + (b - a) * frac;                   // linear interpolation resample
+      this.readPos += ratio;
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-player', PcmPlayer);
+`;
+
+    class PcmStreamPlayer {
+      constructor(ctx){ this.ctx = ctx; this.node = null; this.spNode = null; this.queue = []; this.playPtr = 0; this.srcRate = ctx.sampleRate; }
+      async init(){
+        if (this.ctx.audioWorklet){
+          try {
+            if (!this.ctx.__pcmModuleLoaded){
+              const url = URL.createObjectURL(new Blob([PCM_WORKLET_SRC], { type: 'application/javascript' }));
+              await this.ctx.audioWorklet.addModule(url);
+              URL.revokeObjectURL(url);
+              this.ctx.__pcmModuleLoaded = true;
+            }
+            this.node = new AudioWorkletNode(this.ctx, 'pcm-player', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+            this.node.connect(this.ctx.destination);
+            return;
+          } catch (e){ this.node = null; /* fall back to ScriptProcessor below */ }
+        }
+        this._initFallback();
+      }
+      setFormat(sr){
+        this.srcRate = sr || this.ctx.sampleRate;
+        if (this.node) this.node.port.postMessage({ cmd: 'format', sr: this.srcRate });
+      }
+      push(arrayBuffer){
+        if (this.node){ this.node.port.postMessage({ pcm: arrayBuffer }, [arrayBuffer]); return; }
+        const int16 = new Int16Array(arrayBuffer), f = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) f[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+        this.queue.push(f);
+        const maxQ = Math.floor((this.srcRate / 1000) * 80);
+        let total = 0; for (let k = 0; k < this.queue.length; k++) total += this.queue[k].length;
+        while (total > maxQ && this.queue.length){ const d = this.queue.shift(); total -= (d ? d.length : 0); this.playPtr = 0; }
+      }
+      _initFallback(){
+        const sp = this.ctx.createScriptProcessor(512, 0, 1);
+        sp.onaudioprocess = (e) => {
+          const out = e.outputBuffer.getChannelData(0);
+          let i = 0;
+          while (i < out.length){
+            if (this.queue.length === 0) break;
+            const buf = this.queue[0], remaining = buf.length - this.playPtr, toCopy = Math.min(remaining, out.length - i);
+            out.set(buf.subarray(this.playPtr, this.playPtr + toCopy), i);
+            i += toCopy; this.playPtr += toCopy;
+            if (this.playPtr >= buf.length){ this.queue.shift(); this.playPtr = 0; }
+          }
+          for (; i < out.length; i++) out[i] = 0;
+        };
+        sp.connect(this.ctx.destination);
+        this.spNode = sp;
+      }
+      stop(){
+        try { if (this.node) this.node.disconnect(); } catch (_){}
+        try { if (this.spNode) this.spNode.disconnect(); } catch (_){}
+        this.node = null; this.spNode = null; this.queue = []; this.playPtr = 0;
+      }
+    }
+
     async function startAudio() {
         try {
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
             }
+            audioPlayer = new PcmStreamPlayer(audioContext);
+            await audioPlayer.init();
             audioSocket = new WebSocket(`${WSS_URL}/audio`);
             audioSocket.binaryType = 'arraybuffer';
             pendingAudioHeader = true;
@@ -5788,28 +5907,7 @@
 
             updateAudioStatus('Connecting');
 
-            let playPtr = 0;
-            const bufferSize = 512; // smaller buffer for lower latency
-            audioScriptNode = audioContext.createScriptProcessor(bufferSize, 0, 1);
-            audioScriptNode.onaudioprocess = function(e) {
-                const out = e.outputBuffer.getChannelData(0);
-                let i = 0;
-                while (i < out.length) {
-                    if (audioBufferQueue.length === 0) break;
-                    const buf = audioBufferQueue[0];
-                    const remaining = buf.length - playPtr;
-                    const toCopy = Math.min(remaining, out.length - i);
-                    out.set(buf.subarray(playPtr, playPtr + toCopy), i);
-                    i += toCopy;
-                    playPtr += toCopy;
-                    if (playPtr >= buf.length) {
-                        audioBufferQueue.shift();
-                        playPtr = 0;
-                    }
-                }
-                for (; i < out.length; i++) out[i] = 0;
-            };
-            audioScriptNode.connect(audioContext.destination);
+            // PCM playback is handled by the AudioWorklet-backed PcmStreamPlayer (above).
 
             let resolved = false;
             const finish = (ok, status) => {
@@ -5837,6 +5935,7 @@
                         if (meta && meta.type === 'audio_format') {
                             audioFormat = meta;
                             pendingAudioHeader = false;
+                            audioPlayer.setFormat(meta.samplerate);
                             updateAudioStatus('Connected');
                         }
                     } catch (_) {
@@ -5844,22 +5943,9 @@
                     }
                     return;
                 }
-                // PCM s16le -> Float32 [-1,1]
-                const int16 = new Int16Array(ev.data);
-                const float32 = new Float32Array(int16.length);
-                for (let i = 0; i < int16.length; i++) float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
-                audioBufferQueue.push(float32);
-                // Keep jitter buffer small (~30ms target, drop if >80ms)
-                let sampPerMs = (audioFormat && audioFormat.samplerate) ? (audioFormat.samplerate / 1000) : 48;
-                const maxQueued = Math.floor(sampPerMs * 80);
-                const targetQueued = Math.floor(sampPerMs * 30);
-                let total = 0;
-                for (let k = 0; k < audioBufferQueue.length; k++) total += audioBufferQueue[k].length;
-                while (total > maxQueued && audioBufferQueue.length > 0) {
-                    const dropped = audioBufferQueue.shift();
-                    total -= (dropped ? dropped.length : 0);
-                    playPtr = 0;
-                }
+                // Hand the raw PCM straight to the AudioWorklet player (resamples to the
+                // device rate + small jitter buffer, all off the main thread).
+                audioPlayer.push(ev.data);
             };
             audioSocket.onclose = () => { stopAudio(); updateAudioStatus('Disconnected'); };
             audioSocket.onerror = () => { stopAudio(); updateAudioStatus('Error'); };
@@ -5883,7 +5969,8 @@
     function stopAudio() {
         audioPlaying = false;
         try { if (audioSocket) audioSocket.close(); } catch (_) {}
-        try { if (audioScriptNode) audioScriptNode.disconnect(); } catch (_) {}
+        try { if (audioPlayer) audioPlayer.stop(); } catch (_) {}
+        audioPlayer = null;
         audioScriptNode = null;
         audioSocket = null;
         audioBufferQueue = [];
@@ -5986,6 +6073,8 @@
             if (micAudioContext.state === 'suspended') {
                 await micAudioContext.resume();
             }
+            micPlayer = new PcmStreamPlayer(micAudioContext);
+            await micPlayer.init();
             const micDevice = encodeURIComponent(getSelectedMicDevice());
             micSocket = new WebSocket(`${WSS_URL}/mic?device=${micDevice}`);
             micSocket.binaryType = 'arraybuffer';
@@ -5995,28 +6084,7 @@
             micFirstChunkLogged = false;
             updateMicStatus('Connecting');
 
-            let playPtr = 0;
-            const bufferSize = 512;
-            micScriptNode = micAudioContext.createScriptProcessor(bufferSize, 0, 1);
-            micScriptNode.onaudioprocess = function(e) {
-                const out = e.outputBuffer.getChannelData(0);
-                let i = 0;
-                while (i < out.length) {
-                    if (micBufferQueue.length === 0) break;
-                    const buf = micBufferQueue[0];
-                    const remaining = buf.length - playPtr;
-                    const toCopy = Math.min(remaining, out.length - i);
-                    out.set(buf.subarray(playPtr, playPtr + toCopy), i);
-                    i += toCopy;
-                    playPtr += toCopy;
-                    if (playPtr >= buf.length) {
-                        micBufferQueue.shift();
-                        playPtr = 0;
-                    }
-                }
-                for (; i < out.length; i++) out[i] = 0;
-            };
-            micScriptNode.connect(micAudioContext.destination);
+            // PCM playback handled by the AudioWorklet-backed PcmStreamPlayer (above).
 
             const readyPromise = new Promise(resolve => {
                 let settled = false;
@@ -6043,6 +6111,7 @@
                             if (meta && meta.type === 'audio_format') {
                                 micFormat = meta;
                                 pendingMicHeader = false;
+                                micPlayer.setFormat(meta.samplerate);
                                 updateMicStatus('Header OK');
                                 sendMicClientEvent('header_received', `sr=${meta.samplerate} ch=${meta.channels || 1} fmt=${meta.format || ''}`);
                             }
@@ -6051,24 +6120,13 @@
                         }
                         return;
                     }
-                    const int16 = new Int16Array(ev.data);
-                    const float32 = new Float32Array(int16.length);
-                    for (let i = 0; i < int16.length; i++) float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
-                    micBufferQueue.push(float32);
-                    const sampPerMs = (micFormat && micFormat.samplerate) ? (micFormat.samplerate / 1000) : 48;
-                    const maxQueued = Math.floor(sampPerMs * 120);
-                    let total = 0;
-                    for (let k = 0; k < micBufferQueue.length; k++) total += micBufferQueue[k].length;
-                    while (total > maxQueued && micBufferQueue.length > 0) {
-                        const dropped = micBufferQueue.shift();
-                        total -= (dropped ? dropped.length : 0);
-                        playPtr = 0;
-                    }
+                    const byteLen = ev.data.byteLength || 0;  // read before push() transfers/detaches it
+                    micPlayer.push(ev.data);
                     if (!micFirstChunkLogged) {
                         micFirstChunkLogged = true;
                         micPlaying = true;
                         updateMicStatus('Playing');
-                        sendMicClientEvent('first_chunk', `${ev.data.byteLength || int16.byteLength} bytes`);
+                        sendMicClientEvent('first_chunk', `${byteLen} bytes`);
                         finish(true);
                     }
                 };
@@ -6114,7 +6172,8 @@
         const wasPlaying = micPlaying || (micSocket && micSocket.readyState === WebSocket.OPEN);
         micPlaying = false;
         try { if (micSocket) micSocket.close(); } catch (_) {}
-        try { if (micScriptNode) micScriptNode.disconnect(); } catch (_) {}
+        try { if (micPlayer) micPlayer.stop(); } catch (_) {}
+        micPlayer = null;
         micScriptNode = null;
         micSocket = null;
         micBufferQueue = [];
