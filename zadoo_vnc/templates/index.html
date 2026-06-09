@@ -6731,10 +6731,15 @@ registerProcessor('pcm-player', PcmPlayer);
         function friendlyPayError(msg){
             var m=String(msg||"").toLowerCase();
             if(m.indexOf("unauthorized")>=0||m.indexOf("not signed in")>=0||m.indexOf("device not")>=0||m.indexOf("401")>=0){
-                return "This PC isn't linked to a Zadoo account. On the host PC open the Zadoo app and click \"Sign in to Zadoo\" (if it was signed in before, click Sign Out then sign in again to refresh the link), then retry.";
+                return "The host PC isn't signed in to Zadoo. On the host, open the Zadoo app and click \"Sign in to Zadoo\" (or Sign Out then sign in again), then retry.";
             }
-            if(m.indexOf("public link")>=0||m.indexOf("ip address")>=0||m.indexOf("non-json")>=0||m.indexOf("unexpected")>=0||m.indexOf("doctype")>=0){
-                return "Open Zadoo through its public link (or http://localhost:6173 on the host PC) — paying isn't available when the page is opened by raw IP address. Also make sure the host is signed in.";
+            // The "open via public link" guidance ONLY applies when the page was reached by raw
+            // IP / LAN — the only case where the server returns that error — never on the cloud link.
+            if(m.indexOf("open zadoo via")>=0||m.indexOf("open via your public")>=0||(m.indexOf("public link")>=0&&m.indexOf("reach")<0)){
+                return "This page was opened by IP address, where paying isn't available. Open Zadoo through its public link instead.";
+            }
+            if(m.indexOf("non-json")>=0||m.indexOf("unexpected")>=0||m.indexOf("doctype")>=0||m.indexOf("502")>=0||m.indexOf("503")>=0||m.indexOf("504")>=0||m.indexOf("gateway")>=0||m.indexOf("timeout")>=0||m.indexOf("timed out")>=0||m.indexOf("failed to fetch")>=0){
+                return "Couldn't reach the payment service just now. The host's Zadoo may have restarted (its public link can change) — make sure the host is running and signed in, reopen the latest public link, then retry.";
             }
             return msg||"Payment failed. Please try again.";
         }
@@ -6744,10 +6749,8 @@ registerProcessor('pcm-player', PcmPlayer);
             var raw="";
             try{ raw=await resp.text(); }catch(_){ raw=""; }
             try{ var data=JSON.parse(raw); if(data&&typeof data==="object")return data; }catch(_){}
-            if(!resp.ok){
-                throw new Error("Server returned "+resp.status+" for the "+what+". Open Zadoo via its public link (or localhost on the host) and make sure the host is signed in.");
-            }
-            throw new Error("The server sent a non-JSON response for the "+what+". Please retry.");
+            // Non-JSON body (HTML/plain error page from a gate, tunnel or CDN, or an empty body).
+            throw new Error("non-json response for the "+what+" (status "+resp.status+")");
         }
         window.initiateTopup=async function(){
             if(ppBtn)ppBtn.disabled=true;

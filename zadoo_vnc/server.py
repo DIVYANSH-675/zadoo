@@ -89,7 +89,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.input_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_subscribers: Set[websockets.WebSocketServerProtocol] = set()
         self.cursor_broadcast_enabled = False
-        self.audio_queue = queue.Queue(maxsize=10)
+        self.audio_queue = queue.Queue(maxsize=5)   # ~100ms; small so audio stays low-latency (drop-oldest on overload)
         self.stop_event = None
         self.loop = None
         self.frame_ready_event = None
@@ -104,7 +104,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # mic streaming state
         self.mic_running = False
         self.mic_stream = None
-        self.mic_queue = queue.Queue(maxsize=64)
+        self.mic_queue = queue.Queue(maxsize=5)   # ~100ms; was 64 (~1.3s) which caused the voice lag
         self.mic_samplerate = 48000
         self.mic_blocksize = 960
         self.mic_channels = 1

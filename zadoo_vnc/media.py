@@ -519,6 +519,11 @@ class MediaMixin:
                     await asyncio.sleep(0.005)
                     continue
                 try:
+                    # Keep audio low-latency: if the socket is already backed up, drop this frame
+                    # instead of piling on more delay (a tiny gap beats seconds of lag).
+                    _tr = getattr(websocket, "transport", None)
+                    if _tr is not None and _tr.get_write_buffer_size() > 16000:
+                        continue
                     await websocket.send(chunk)
                 except websockets.exceptions.ConnectionClosed:
                     break
@@ -740,6 +745,10 @@ class MediaMixin:
                     await asyncio.sleep(0.005)
                     continue
                 try:
+                    # Keep voice low-latency: drop this frame if the socket is already backed up.
+                    _tr = getattr(websocket, "transport", None)
+                    if _tr is not None and _tr.get_write_buffer_size() > 16000:
+                        continue
                     await websocket.send(chunk)
                     sent_chunks += 1
                     if sent_chunks == 1 or sent_chunks % 250 == 0:
