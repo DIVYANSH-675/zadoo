@@ -251,8 +251,11 @@ def assert_imports() -> None:
             fail("adaptive stream did not select the default 720p120 startup profile")
         if server.current_fps != 120 or server.current_quality != 85:
             fail(f"startup profile did not apply fps/locked quality: fps={server.current_fps} quality={server.current_quality}")
+        if server._quality_locked_by_user:
+            fail("startup quality lock should be OFF so the adaptive resolution ladder can run on slow links")
+        server._apply_quality(70)
         if not server._quality_locked_by_user:
-            fail("startup quality should be locked at 85 until the user changes quality")
+            fail("changing quality should lock it so the user's manual choice is honored")
         methods = screen_capture.ScreenCapturer().get_available_methods()
         expected_methods = []
         if screen_capture.HAS_BETTERCAM:

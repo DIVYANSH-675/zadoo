@@ -72,7 +72,11 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.enable_tunnel = True
         self.screen_capturer = None
         self.current_quality = 85
-        self._quality_locked_by_user = True
+        # Do NOT lock quality/full-resolution by default. The lock pins quality=85 -> scale_div=1
+        # and disables the adaptive RESOLUTION ladder, so a slow (e.g. 2 Mbps) client can never be
+        # downshifted in resolution and stays flooded. The lock is enabled only when the user
+        # explicitly changes quality (see _apply_quality).
+        self._quality_locked_by_user = False
         self.current_fps = 0
         self.encoder_capabilities = detect_encoder_capabilities()
         self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)

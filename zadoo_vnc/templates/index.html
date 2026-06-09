@@ -6733,7 +6733,21 @@ registerProcessor('pcm-player', PcmPlayer);
             if(m.indexOf("unauthorized")>=0||m.indexOf("not signed in")>=0||m.indexOf("device not")>=0||m.indexOf("401")>=0){
                 return "This PC isn't linked to a Zadoo account. On the host PC open the Zadoo app and click \"Sign in to Zadoo\" (if it was signed in before, click Sign Out then sign in again to refresh the link), then retry.";
             }
+            if(m.indexOf("public link")>=0||m.indexOf("ip address")>=0||m.indexOf("non-json")>=0||m.indexOf("unexpected")>=0||m.indexOf("doctype")>=0){
+                return "Open Zadoo through its public link (or http://localhost:6173 on the host PC) — paying isn't available when the page is opened by raw IP address. Also make sure the host is signed in.";
+            }
             return msg||"Payment failed. Please try again.";
+        }
+        // Read a fetch() Response as JSON without throwing the cryptic "Unexpected token '<'"
+        // when a gate / tunnel / CDN returns an HTML or plain-text error page instead of JSON.
+        async function readPayJson(resp, what){
+            var raw="";
+            try{ raw=await resp.text(); }catch(_){ raw=""; }
+            try{ var data=JSON.parse(raw); if(data&&typeof data==="object")return data; }catch(_){}
+            if(!resp.ok){
+                throw new Error("Server returned "+resp.status+" for the "+what+". Open Zadoo via its public link (or localhost on the host) and make sure the host is signed in.");
+            }
+            throw new Error("The server sent a non-JSON response for the "+what+". Please retry.");
         }
         window.initiateTopup=async function(){
             if(ppBtn)ppBtn.disabled=true;
@@ -6748,7 +6762,7 @@ registerProcessor('pcm-player', PcmPlayer);
                     });
                 }
                 var resp=await fetch("/api/local/topup-order?amountRupees="+encodeURIComponent(amt),{method:"POST"});
-                var od=await resp.json();
+                var od=await readPayJson(resp,"order");
                 if(!od.success)throw new Error(od.error||"Order failed");
                 if(!window.Razorpay)throw new Error("Could not load the Razorpay checkout. Check the internet connection and retry.");
                 if(!od.razorpayKeyId||!od.order)throw new Error("Payments are not configured on the server yet. Please try again later.");
@@ -6761,7 +6775,7 @@ registerProcessor('pcm-player', PcmPlayer);
                         if(ppSt)ppSt.textContent="Verifying...";
                         try{
                             var vresp=await fetch("/api/local/topup-verify?paymentId="+encodeURIComponent(od.paymentId)+"&razorpay_payment_id="+encodeURIComponent(rsp.razorpay_payment_id)+"&razorpay_order_id="+encodeURIComponent(rsp.razorpay_order_id)+"&razorpay_signature="+encodeURIComponent(rsp.razorpay_signature),{method:"POST"});
-                            var vd=await vresp.json();
+                            var vd=await readPayJson(vresp,"verification");
                             if(!vd.success)throw new Error(vd.error||"Verify failed");
                             paid=true;
                             secs=Math.round(vd.totalMinutesRemaining*60);

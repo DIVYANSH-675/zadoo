@@ -286,6 +286,17 @@ class RoutesMixin:
             body=body.encode("utf-8"),
         )
 
+    def _api_forbidden(self, route_path, message="Forbidden", status=None):
+        """For /api/* paths return a JSON error body. API clients call resp.json() and choke on
+        an HTML/plain-text 403 ('Unexpected token <' / non-JSON). Returns None for non-API paths
+        so the caller falls back to its normal HTML/plain response."""
+        if str(route_path or "").startswith("/api/"):
+            return self._json_response(
+                {"success": False, "error": message},
+                status or http.HTTPStatus.FORBIDDEN,
+            )
+        return None
+
     def _settings_store(self):
         store = getattr(self, "settings_store", None)
         if store is None:
@@ -904,7 +915,7 @@ class RoutesMixin:
         logging.debug("process_request: path=%s", path)
 
         if not self._request_origin_allowed(request_headers):
-            return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            return self._api_forbidden(route_path, "Forbidden origin") or self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
         # Reachable through the Cloudflare tunnel (public link) AND from localhost on the host
         # itself (so the owner can open localhost:6173 to test). Direct LAN access from another
@@ -914,7 +925,7 @@ class RoutesMixin:
         if (not is_admin_route and not self._is_tunnel_request(request_headers)
                 and not self._is_localhost_request(request_headers)
                 and not self._env_enabled("ZADOO_ALLOW_DIRECT_ACCESS", "0")):
-            return self._public_only_response()
+            return self._api_forbidden(route_path, "Open Zadoo via your public link") or self._public_only_response()
 
         # WebSocket upgrades must be authenticated before the stream handlers run.
         try:
@@ -929,9 +940,9 @@ class RoutesMixin:
 
         feature = self._feature_for_route(route_path)
         if feature and feature != "public" and not self._is_authorized(request_headers, feature):
-            return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            return self._api_forbidden(route_path) or self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
         if self._http_route_requires_csrf(route_path, feature) and not self._state_changing_http_allowed(request_headers):
-            return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
+            return self._api_forbidden(route_path) or self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
         # Process routes
         if route_path == "/":
@@ -1395,6 +1406,8 @@ class RoutesMixin:
                     body=b"Error generating snapshot",
                 )
         else:
+            if route_path.startswith("/api/"):
+                return self._json_response({"success": False, "error": "Not Found"}, http.HTTPStatus.NOT_FOUND)
             headers = Headers()
             headers["Content-Type"] = "text/plain; charset=utf-8"
             return WSResponse(

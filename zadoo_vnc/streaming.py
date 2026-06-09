@@ -31,8 +31,13 @@ STREAM_LADDER = (
     StreamProfile("720p120", "Fast", 120, 54, 2),
     StreamProfile("720p60", "Balanced", 60, 60, 2),
     StreamProfile("540p60", "Balanced", 60, 52, 2),
+    # Low-bitrate tiers: hold resolution and drop FPS first (text stays legible at ~2 Mbps),
+    # then drop resolution. Research: for screen content, lower FPS beats lower resolution.
+    StreamProfile("540p30", "Balanced", 30, 54, 2),
+    StreamProfile("540p15", "Saving Data", 15, 50, 2),
     StreamProfile("360p30", "Saving Data", 30, 46, 3),
-    StreamProfile("360p15", "Saving Data", 15, 40, 3),
+    StreamProfile("360p15", "Saving Data", 15, 42, 3),
+    StreamProfile("360p10", "Saving Data", 10, 40, 3),
 )
 
 
@@ -113,8 +118,11 @@ class AdaptiveStreamController:
             self.fallback_reason = "WebRTC transport is not enabled in this build; using adaptive JPEG WebSocket."
             _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
 
-        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p240")).strip().lower()
-        default_index = self._index_for_name("720p240", default=0)
+        # Start conservative for an UNKNOWN link (safe at ~2 Mbps) and let the controller upshift
+        # toward high FPS on fast/local links. Starting near the top of the ladder floods a slow
+        # link for several seconds before it can converge down.
+        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "540p60")).strip().lower()
+        default_index = self._index_for_name("540p60", default=6)
         self.profile_index = self._index_for_name(start_name, default=default_index)
         self.last_change_at = 0.0
         self.last_eval_at = 0.0
@@ -131,6 +139,13 @@ class AdaptiveStreamController:
         self.fps_cap_reason = ""
         self.downshift_reason = "startup"
         self._last_applied_signature = None
+        # Optional hard bandwidth target in kbps (e.g. 2000 for a 2 Mbps link). 0 = disabled, in
+        # which case adaptation reacts to latency/backlog only. When set, the controller also
+        # downshifts proactively whenever the estimated egress (frame_bytes x fps) exceeds it.
+        try:
+            self._target_kbps = max(0, int(str(os.getenv("ZADOO_TARGET_KBPS", "0")).strip() or "0"))
+        except Exception:
+            self._target_kbps = 0
 
     def _index_for_name(self, name: str, default: int = 0) -> int:
         for index, profile in enumerate(STREAM_LADDER):
@@ -260,6 +275,12 @@ class AdaptiveStreamController:
         quality = int(self.last_server_stats.get("quality") or 0)
         full_resolution_locked = quality >= 85
 
+        # Estimated egress for the current send rate (kbps). Used only when a target is configured.
+        frame_bytes = int(self.last_server_stats.get("frame_bytes") or 0)
+        est_send_kbps = (frame_bytes * max(1, int(self.effective_target_fps)) * 8.0) / 1000.0
+        bitrate_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 1.1
+        bitrate_far_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 2.0
+
         network_backlog = max_write_buffer > 128_000 or skipped_delta > max(2, video_clients * 3)
         stale_frames = frame_age_ms > 220 or inflight_sends > video_clients
         browser_slow = bool(client) and (
@@ -272,7 +293,7 @@ class AdaptiveStreamController:
             capture_ms + encode_ms > max(10.0, budget_ms * 1.35)
             or (capture_fps > 0 and capture_fps < target_fps * 0.55)
         )
-        overloaded = network_backlog or stale_frames or browser_slow or host_slow
+        overloaded = network_backlog or stale_frames or browser_slow or host_slow or bitrate_over
         cap_reason = ""
         desired_cap = int(profile.target_fps)
         if host_slow:
@@ -311,12 +332,20 @@ class AdaptiveStreamController:
                         skipped_delta,
                     )
                 return self.measured_fps_cap != old_cap
-            if self.profile_index < len(STREAM_LADDER) - 1 and now - self.last_change_at >= 1.5:
-                self.profile_index += 1
+            # When the link is severely over budget, converge fast: shorten the inter-step guard
+            # and allow a 2-rung jump so a slow (2 Mbps) link stops flooding within ~1s instead of
+            # descending one rung every 1.5s.
+            severe = (max_write_buffer > 512_000) or (skipped_delta > max(6, video_clients * 8)) or bitrate_far_over
+            downshift_guard = 0.6 if severe else 1.5
+            if self.profile_index < len(STREAM_LADDER) - 1 and now - self.last_change_at >= downshift_guard:
+                step = 2 if (severe and self.profile_index < len(STREAM_LADDER) - 2) else 1
+                self.profile_index = min(len(STREAM_LADDER) - 1, self.profile_index + step)
                 self.last_change_at = now
                 reasons = []
                 if network_backlog:
                     reasons.append("network_backlog")
+                if bitrate_over:
+                    reasons.append("bitrate_over")
                 if stale_frames:
                     reasons.append("stale_frames")
                 if browser_slow:
@@ -365,7 +394,8 @@ class AdaptiveStreamController:
             logging.getLogger("streaming").info("Stream FPS cap relaxed cap=%s", self.measured_fps_cap)
             return True
 
-        if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0:
+        bitrate_ok = self._target_kbps <= 0 or est_send_kbps < self._target_kbps * 0.8
+        if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0 and bitrate_ok:
             self.profile_index -= 1
             self.good_intervals = 0
             self.last_change_at = now
