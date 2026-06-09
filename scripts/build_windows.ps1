@@ -335,6 +335,12 @@ function Build-Arch([string]$TargetArch) {
                     Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
                 }
             }
+            # Prune now-empty parent dirs so only dist\installer remains.
+            foreach ($parent in @((Join-Path $distRoot "onedir"), (Join-Path $distRoot "portable"), (Join-Path $Root "build"))) {
+                if ((Test-Path -LiteralPath $parent) -and -not (Get-ChildItem -LiteralPath $parent -Force -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 }
