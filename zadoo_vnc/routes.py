@@ -253,6 +253,19 @@ class RoutesMixin:
             pass
         return False
 
+    def _is_localhost_request(self, request_headers):
+        """True if the request targets this machine itself (localhost). The host accessing its
+        own server is safe, so it is allowed without the public link — this lets the owner open
+        http://localhost:6173 to test directly. Remote LAN access stays blocked."""
+        try:
+            host = str(self._header_get(request_headers, "Host", "") or "").strip().lower()
+        except Exception:
+            host = ""
+        if not host:
+            return False
+        hostname = host.rsplit(":", 1)[0].strip("[]")
+        return hostname in ("localhost", "127.0.0.1", "::1")
+
     def _public_only_response(self):
         body = (
             "<!doctype html><html><head><meta charset='utf-8'><title>Zadoo</title>"
@@ -893,11 +906,13 @@ class RoutesMixin:
         if not self._request_origin_allowed(request_headers):
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
 
-        # Public-link-only: the machine is reachable ONLY through its Cloudflare tunnel.
-        # Direct localhost/LAN access (typing localhost:6173 or ip:6173) is refused for
-        # everything except the local admin API used by the Settings window.
+        # Reachable through the Cloudflare tunnel (public link) AND from localhost on the host
+        # itself (so the owner can open localhost:6173 to test). Direct LAN access from another
+        # machine (ip:6173) is still refused unless ZADOO_ALLOW_DIRECT_ACCESS=1. The local admin
+        # API used by the Settings window is always allowed.
         is_admin_route = route_path.startswith("/api/runtime/") or route_path.startswith("/api/settings/")
         if (not is_admin_route and not self._is_tunnel_request(request_headers)
+                and not self._is_localhost_request(request_headers)
                 and not self._env_enabled("ZADOO_ALLOW_DIRECT_ACCESS", "0")):
             return self._public_only_response()
 

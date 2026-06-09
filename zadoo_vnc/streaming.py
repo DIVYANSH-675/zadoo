@@ -25,7 +25,7 @@ class StreamProfile:
 
 STREAM_LADDER = (
     StreamProfile("1080p240", "Max FPS", 240, 52, 1),
-    StreamProfile("720p240", "Max FPS", 240, 48, 2),
+    StreamProfile("720p240", "Max FPS", 240, 54, 2),
     StreamProfile("1080p120", "Fast", 120, 65, 1),
     StreamProfile("900p120", "Fast", 120, 56, 1),
     StreamProfile("720p120", "Fast", 120, 54, 2),
@@ -113,8 +113,8 @@ class AdaptiveStreamController:
             self.fallback_reason = "WebRTC transport is not enabled in this build; using adaptive JPEG WebSocket."
             _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
 
-        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p120")).strip().lower()
-        default_index = self._index_for_name("720p120", default=0)
+        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "720p240")).strip().lower()
+        default_index = self._index_for_name("720p240", default=0)
         self.profile_index = self._index_for_name(start_name, default=default_index)
         self.last_change_at = 0.0
         self.last_eval_at = 0.0
