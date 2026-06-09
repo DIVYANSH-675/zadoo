@@ -11,6 +11,7 @@ param(
     [switch]$SkipInstaller,
     [switch]$SkipPortable,
     [switch]$SkipTests,
+    [switch]$KeepOneDir,
     [switch]$InstallMissingTools
 )
 
@@ -323,6 +324,17 @@ function Build-Arch([string]$TargetArch) {
             if (-not $moved) { throw "Failed to move installer to $finalInstaller" }
         } finally {
             Remove-Item -LiteralPath $tempInstallerOut -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        # The installer is fully self-contained. Remove the loose one-folder app and the
+        # PyInstaller work directory so the ONLY artifact left is the installer itself
+        # (no standalone Zadoo.exe). Pass -KeepOneDir to opt out.
+        if (-not $KeepOneDir) {
+            foreach ($leftover in @($oneDirDist, $workRoot)) {
+                if ($leftover -and (Test-Path -LiteralPath $leftover)) {
+                    Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 }
