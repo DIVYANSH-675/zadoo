@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import urllib.parse
 from contextlib import suppress
 
@@ -21,6 +22,7 @@ from .tunnel import CloudflareTunnelManager
 
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
+    VIEWER_ROUTES = frozenset({"/video", "/input", "/audio", "/mic", "/terminal", "/webcam"})
 
     def __init__(self, port):
         self.port = port
@@ -87,6 +89,10 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._auth_window_seconds = env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
         self._auth_max_failures = env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
         self._auth_lockout_seconds = env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
+        self._cloud_heartbeat_grace_seconds = env_int(
+            "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS", 120, 60, 120
+        )
+        self._max_viewers = env_int("ZADOO_MAX_VIEWERS", 5, 1, 5)
         self._clipboard_image_max_bytes = env_int(
             "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES", 5_000_000, 1, 100_000_000
         )
@@ -107,6 +113,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._cloud_heartbeat_thread = None
         self._fatal_error = None
         self._grace_locks_by_session = {}
+        self._viewer_connections_by_session = {}
         self._hotkey_lock = threading.RLock()
         self._keyboard_cleanup_registered = False
         self.live_typing_text_by_client = {}
@@ -213,15 +220,23 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 {stop_wait_task, broadcast_task, cursor_broadcast_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for task in done:
-                if task is stop_wait_task:
-                    if self._fatal_error is not None:
-                        raise self._fatal_error
-                    continue
-                task.result()
-                raise RuntimeError("A required media broadcast task stopped unexpectedly")
+            self._raise_for_completed_required_tasks(
+                done, stop_wait_task, self._fatal_error
+            )
         finally:
             await cleanup((stop_wait_task, broadcast_task, cursor_broadcast_task))
+
+    @staticmethod
+    def _raise_for_completed_required_tasks(done, stop_wait_task, fatal_error):
+        # Graceful stop can wake the waiter at the same moment that media loops
+        # observe the stop event and finish. Stop must win that benign race.
+        if stop_wait_task in done:
+            if fatal_error is not None:
+                raise fatal_error
+            return
+        for task in done:
+            task.result()
+        raise RuntimeError("A required media broadcast task stopped unexpectedly")
 
     def _start_cloud_heartbeat(self):
         if not self.settings_store.get_device_token():
@@ -235,14 +250,42 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
                 client = ZadooCloudClient(self.settings_store)
                 seen_url = not self.enable_tunnel
+                failure_started = None
+                consecutive_failures = 0
                 while not stop_event.is_set():
-                    process = self.tunnel_manager.primary_tunnel_process if self.tunnel_manager else None
-                    if process is not None and process.poll() is not None:
-                        raise RuntimeError(f"cloudflared exited with code {process.returncode}")
-                    public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
-                    result = client.heartbeat(public_url)
-                    if not result["success"]:
-                        raise RuntimeError(f"Cloud heartbeat failed: {result['error']}")
+                    try:
+                        process = self.tunnel_manager.primary_tunnel_process if self.tunnel_manager else None
+                        if process is not None and process.poll() is not None:
+                            raise RuntimeError(f"cloudflared exited with code {process.returncode}")
+                        public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
+                        result = client.heartbeat(public_url)
+                        if not result["success"]:
+                            raise RuntimeError(f"Cloud heartbeat failed: {result['error']}")
+                    except Exception as exc:
+                        now = time.monotonic()
+                        try:
+                            failure_started, consecutive_failures, retry_delay, elapsed = (
+                                self._heartbeat_retry_policy(
+                                    failure_started,
+                                    consecutive_failures,
+                                    now,
+                                    exc,
+                                )
+                            )
+                        except RuntimeError as final_error:
+                            raise final_error from exc
+                        logging.warning(
+                            "Cloud heartbeat failed; retrying in %.1f seconds (%.1f/%ss): %s",
+                            retry_delay,
+                            elapsed,
+                            self._cloud_heartbeat_grace_seconds,
+                            exc,
+                        )
+                        if stop_event.wait(retry_delay):
+                            break
+                        continue
+                    failure_started = None
+                    consecutive_failures = 0
                     if public_url:
                         seen_url = True
                     # Heartbeat quickly until the tunnel URL first appears (so the website
@@ -258,6 +301,49 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._cloud_heartbeat_thread = threading.Thread(target=_loop, daemon=True)
         self._cloud_heartbeat_thread.start()
 
+    def _heartbeat_retry_policy(self, failure_started, consecutive_failures, now, error):
+        if failure_started is None:
+            failure_started = now
+        consecutive_failures += 1
+        elapsed = now - failure_started
+        if elapsed >= self._cloud_heartbeat_grace_seconds:
+            raise RuntimeError(
+                "Cloud heartbeat failed for "
+                f"{self._cloud_heartbeat_grace_seconds} seconds: {error}"
+            )
+        retry_delay = min(
+            30,
+            5 * (2 ** min(consecutive_failures - 1, 3)),
+            self._cloud_heartbeat_grace_seconds - elapsed,
+        )
+        return failure_started, consecutive_failures, retry_delay, elapsed
+
+    def _register_viewer_connection(self, websocket, route_path):
+        if route_path not in self.VIEWER_ROUTES:
+            return None
+        token = self._cookie_value(self._headers_for_websocket(websocket), self.AUTH_COOKIE_NAME)
+        if not token:
+            raise PermissionError("Authenticated viewer session is missing")
+        sessions = self._viewer_connections_by_session
+        connections = sessions.get(token)
+        if connections is None:
+            if len(sessions) >= self._max_viewers:
+                raise RuntimeError(f"Viewer limit reached ({self._max_viewers})")
+            connections = set()
+            sessions[token] = connections
+        connections.add(websocket)
+        return token
+
+    def _unregister_viewer_connection(self, token, websocket):
+        if token is None:
+            return
+        connections = self._viewer_connections_by_session.get(token)
+        if connections is None:
+            return
+        connections.discard(websocket)
+        if not connections:
+            del self._viewer_connections_by_session[token]
+
     async def main_handler(self, websocket):
         """Handles incoming connections and routes them (websockets v15 ServerConnection)."""
         path = websocket.request.path
@@ -267,7 +353,11 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             if not self._request_origin_allowed(request_headers):
                 await websocket.close(code=1008, reason="Forbidden")
                 return
-            if not self._is_ws_authorized(route_path, request_headers):
+            if route_path == "/rpc":
+                if not self._rpc_connection_allowed(request_headers, websocket):
+                    await websocket.close(code=1008, reason="Forbidden")
+                    return
+            elif not self._is_ws_authorized(route_path, request_headers):
                 await websocket.close(code=1008, reason="Forbidden")
                 return
         except Exception:
@@ -275,20 +365,31 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             await websocket.close(code=1008, reason="Forbidden")
             return
         
-        if route_path == "/video":
-            await self.video_stream_handler(websocket)
-        elif route_path == "/input":
-            await self.input_event_handler(websocket)
-        elif route_path == "/audio":
-            await self.audio_stream_handler(websocket)
-        elif route_path == "/mic":
-            await self.mic_stream_handler(websocket, path=path)
-        elif route_path == "/terminal":
-            await self.local_shell_ws_handler(websocket)
-        elif route_path == "/webcam":
-            await self.webcam_stream_handler(websocket)
-        else:
-            await websocket.close(code=1008, reason=f"Unsupported WebSocket route: {route_path}")
+        viewer_token = None
+        try:
+            try:
+                viewer_token = self._register_viewer_connection(websocket, route_path)
+            except RuntimeError as exc:
+                await websocket.close(code=1013, reason=str(exc))
+                return
+            if route_path == "/rpc":
+                await self.rpc_handler(websocket)
+            elif route_path == "/video":
+                await self.video_stream_handler(websocket)
+            elif route_path == "/input":
+                await self.input_event_handler(websocket)
+            elif route_path == "/audio":
+                await self.audio_stream_handler(websocket)
+            elif route_path == "/mic":
+                await self.mic_stream_handler(websocket, path=path)
+            elif route_path == "/terminal":
+                await self.local_shell_ws_handler(websocket)
+            elif route_path == "/webcam":
+                await self.webcam_stream_handler(websocket)
+            else:
+                await websocket.close(code=1008, reason=f"Unsupported WebSocket route: {route_path}")
+        finally:
+            self._unregister_viewer_connection(viewer_token, websocket)
 
     def stop(self):
         if self.loop and self.stop_event is not None:

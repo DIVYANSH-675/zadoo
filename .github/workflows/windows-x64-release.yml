@@ -1,0 +1,165 @@
+name: Publish signed Windows x64 release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signed-windows-x64-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, verify, and publish signed Windows x64 release
+    runs-on: windows-2025
+    timeout-minutes: 45
+    environment: release
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11.9 x64
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.11.9
+          architecture: x64
+
+      - name: Set up Node.js 24.18.0 x64
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          architecture: x64
+
+      - name: Validate tag and signing secrets
+        id: release_meta
+        shell: powershell
+        env:
+          ZADOO_SIGN_PFX_BASE64: ${{ secrets.ZADOO_SIGN_PFX_BASE64 }}
+          ZADOO_SIGN_PFX_PASSWORD: ${{ secrets.ZADOO_SIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF_TYPE -ne "tag") {
+            throw "Signed releases must be dispatched from a Git tag."
+          }
+          $version = (& python -c "from zadoo_vnc import __version__; print(__version__)").Trim()
+          $expectedTag = "v$version"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Release tag must be $expectedTag; got $env:GITHUB_REF_NAME."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:ZADOO_SIGN_PFX_BASE64)) {
+            throw "GitHub release secret ZADOO_SIGN_PFX_BASE64 is required."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:ZADOO_SIGN_PFX_PASSWORD)) {
+            throw "GitHub release secret ZADOO_SIGN_PFX_PASSWORD is required."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$expectedTag" >> $env:GITHUB_OUTPUT
+
+      - name: Audit hash-locked dependencies
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $auditRoot = Join-Path $env:RUNNER_TEMP "zadoo-release-audit"
+          python -m venv $auditRoot
+          $auditPython = Join-Path $auditRoot "Scripts\python.exe"
+          & $auditPython -m pip install --no-cache-dir --require-hashes -r ci_requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked release audit tools." }
+          foreach ($lock in @("requirements-runtime.lock", "requirements-build.lock")) {
+            & $auditPython -m pip_audit -r $lock --require-hashes --disable-pip --strict --progress-spinner off
+            if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed for $lock." }
+          }
+
+      - name: Materialize temporary signing certificate
+        id: signing_cert
+        shell: powershell
+        env:
+          ZADOO_SIGN_PFX_BASE64: ${{ secrets.ZADOO_SIGN_PFX_BASE64 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "zadoo-release-signing.pfx"
+          try {
+            $bytes = [Convert]::FromBase64String($env:ZADOO_SIGN_PFX_BASE64)
+          } catch {
+            throw "GitHub release secret ZADOO_SIGN_PFX_BASE64 is not valid base64."
+          }
+          if ($bytes.Length -eq 0) { throw "Decoded signing PFX is empty." }
+          [IO.File]::WriteAllBytes($pfxPath, $bytes)
+          "path=$pfxPath" >> $env:GITHUB_OUTPUT
+
+      - name: Build signed Windows x64 artifacts
+        shell: powershell
+        env:
+          ZADOO_SIGN_PFX_PASSWORD: ${{ secrets.ZADOO_SIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $python = (Get-Command python).Source
+          $node = (Get-Command node).Source
+          .\scripts\build_windows.ps1 -PfxPath "${{ steps.signing_cert.outputs.path }}" -InstallMissingTools -PythonPath $python -NodePath $node
+
+      - name: Generate runtime SBOM
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $auditPython = Join-Path $env:RUNNER_TEMP "zadoo-release-audit\Scripts\python.exe"
+          & $auditPython -m pip_audit -r requirements-runtime.lock --require-hashes --disable-pip --strict --progress-spinner off --format cyclonedx-json --output dist\zadoo-runtime.sbom.cdx.json
+          if ($LASTEXITCODE -ne 0) { throw "Runtime SBOM generation failed." }
+
+      - name: Independently verify signed release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = Get-Content -Raw dist\release-manifest.json | ConvertFrom-Json
+          if ($manifest.version -ne "${{ steps.release_meta.outputs.version }}") {
+            throw "Release manifest version mismatch: $($manifest.version)"
+          }
+          if ($manifest.architecture -ne "x64") {
+            throw "Release manifest architecture mismatch: $($manifest.architecture)"
+          }
+          if ($manifest.signed -ne $true) { throw "Public release artifacts must be signed." }
+          foreach ($artifact in $manifest.artifacts) {
+            $path = Join-Path dist ($artifact.file -replace "/", "\")
+            if (-not (Test-Path -LiteralPath $path)) { throw "Manifest artifact missing: $path" }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $artifact.sha256) { throw "Manifest hash mismatch for $path" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne "Valid") {
+              throw "Authenticode signature is not valid for $path ($($signature.Status))."
+            }
+          }
+
+      - name: Publish GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ steps.release_meta.outputs.tag }}"
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { throw "GitHub release $tag already exists." }
+          $assets = @(
+            Get-ChildItem -LiteralPath dist\installer -File -Filter *.exe
+            Get-ChildItem -LiteralPath dist\portable -File -Filter *.exe
+            Get-Item -LiteralPath dist\release-manifest.json
+            Get-Item -LiteralPath dist\SHA256SUMS.txt
+            Get-Item -LiteralPath dist\zadoo-runtime.sbom.cdx.json
+          ) | ForEach-Object FullName
+          if ($assets.Count -ne 5) { throw "Expected exactly five signed release assets; got $($assets.Count)." }
+          & gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes --title "Zadoo ${{ steps.release_meta.outputs.version }}" --latest
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release publication failed." }
+
+      - name: Remove temporary signing certificate
+        if: always()
+        shell: powershell
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "zadoo-release-signing.pfx"
+          if (Test-Path -LiteralPath $pfxPath) {
+            Remove-Item -LiteralPath $pfxPath -Force
+          }

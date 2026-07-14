@@ -24,8 +24,25 @@ def main() -> None:
         relative = path.relative_to(ROOT)
         if "pull_request_target:" in text:
             fail(f"{relative} uses privileged pull_request_target")
-        if not re.search(r"(?m)^permissions:\s*$\n\s+contents:\s*read\s*$", text):
-            fail(f"{relative} must declare contents: read permissions")
+        permissions = re.search(
+            r"(?m)^permissions:\s*$\n\s+contents:\s*(read|write)\s*$", text
+        )
+        if not permissions:
+            fail(f"{relative} must declare explicit contents permissions")
+        if permissions.group(1) == "write":
+            if re.search(r"(?m)^\s+(?:push|pull_request):\s*$", text):
+                fail(f"{relative} grants contents: write to an automatic trigger")
+            required_release_guards = (
+                "on:\n  workflow_dispatch:\n\npermissions:",
+                "environment: release",
+                'if ($env:GITHUB_REF_TYPE -ne "tag")',
+                'if ($manifest.signed -ne $true)',
+                "gh release create",
+            )
+            if path.name != "windows-x64-release.yml" or any(
+                marker not in text for marker in required_release_guards
+            ):
+                fail(f"{relative} has contents: write without the signed tagged-release guards")
         for reference in USES_RE.findall(text):
             if reference.startswith("./"):
                 continue

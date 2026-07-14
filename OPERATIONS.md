@@ -39,16 +39,18 @@ deliberate development or test client must connect directly rather than through 
 ## Installed setup
 
 1. Install a signed `Zadoo-<version>-x64-Setup.exe` as an administrator.
-2. Leave the ProgramData deletion prompt unanswered during upgrades; it appears only when
-   uninstalling.
+2. Upgrades migrate an existing `%ProgramData%\Zadoo\config.json` once into the current
+   Windows user's protected profile; keep the legacy copy until the upgrade is verified.
 3. Open Zadoo Settings, sign in to the hosted service, and finish device activation.
 4. Create the local access code and review every permission before sharing a public link.
 5. Start Zadoo from Settings and confirm that a public URL appears.
 6. Open the public URL from a second device and verify authentication, screen video, and only
    the permissions intended for that viewer.
 
-Installed configuration is stored in `%ProgramData%\Zadoo\config.json`. It contains DPAPI
-encrypted values and must not be copied to another machine as a backup or deployment method.
+Installed configuration is stored in `%LOCALAPPDATA%\Zadoo\config.json`. Access codes and
+device tokens use current-user DPAPI and the settings tree has an explicit protected ACL. The
+file cannot be decrypted by another Windows account and must not be copied as a backup or
+deployment method.
 
 ## Health and graceful shutdown
 
@@ -64,20 +66,17 @@ A healthy local process returns `success=True`, `running=True`, and `port=6173`.
 is enabled, treat a non-empty `tunnel_block_reason`, `tunnel_error`, or missing `public_url` as a
 degraded public-access state even though the local process is running.
 
-Stop the runtime through its authenticated local endpoint so capture, media, terminal, tunnel,
-and heartbeat workers can close cleanly:
-
-```powershell
-$code = Read-Host "Local Zadoo access code"
-Invoke-RestMethod http://127.0.0.1:6173/api/runtime/stop -Headers @{"X-Zadoo-Code" = $code} -TimeoutSec 10
-```
+Stop the runtime with **Stop** in Zadoo Settings so its authenticated local WebSocket RPC can
+close capture, media, terminal, tunnel, and heartbeat workers cleanly. Legacy state-changing
+HTTP routes intentionally return HTTP 405 with
+`State-changing action requires authenticated WebSocket RPC`.
 
 The expected response message is `Zadoo runtime stopping`; port `6173` should then stop
 listening. Use Task Manager termination only when the authenticated stop path cannot respond.
 
 ## Logs and local monitoring
 
-Runtime logs are under `%ProgramData%\Zadoo\logs`. Defaults keep the current log plus two
+Runtime logs are under `%LOCALAPPDATA%\Zadoo\logs`. Defaults keep the current log plus two
 5 MiB backups for each active day and prune log files older than 14 days. Source-only overrides
 are documented in `.env.example`:
 
@@ -85,10 +84,13 @@ are documented in `.env.example`:
 - `ZADOO_LOG_RETENTION_DAYS`
 - `ZADOO_LOG_MAX_BYTES`
 - `ZADOO_LOG_BACKUP_COUNT`
+- `ZADOO_DIAGNOSTIC_MAX_LOG_BYTES`
+- `ZADOO_DIAGNOSTIC_MAX_LOG_FILES`
 
-Before escalating an incident, preserve the relevant bounded logs, the application version,
-Windows version, status payload with access codes removed, and exact reproduction time. Do not
-attach `config.json`, device tokens, access codes, PFX files, or API keys.
+Use **Runtime > Export Diagnostics** in Zadoo Settings before escalating an incident. The ZIP
+contains bounded log tails and a system/runtime summary; access codes, tokens, IDs, email
+addresses, DPAPI blobs, cookies, bearer values, and public tunnel links are redacted. Never
+attach `config.json`, PFX files, or API keys.
 
 ## Release build and verification
 
@@ -108,6 +110,25 @@ $env:ZADOO_SIGN_PFX_PASSWORD = $credential.GetNetworkCredential().Password
 Remove-Item Env:\ZADOO_SIGN_PFX_PASSWORD
 $credential = $null
 ```
+
+For a public GitHub release, configure the protected `release` environment with required
+reviewers and these repository/environment secrets:
+
+- `ZADOO_SIGN_PFX_BASE64`: base64 of the code-signing PFX.
+- `ZADOO_SIGN_PFX_PASSWORD`: the PFX password.
+
+Create and push an annotated tag exactly matching `v<zadoo_vnc.__version__>`, then dispatch
+**Publish signed Windows x64 release** from that tag:
+
+```powershell
+$version = .\.venv\Scripts\python.exe -c "from zadoo_vnc import __version__; print(__version__)"
+git tag -a "v$version" -m "Zadoo $version"
+git push origin "v$version"
+gh workflow run windows-x64-release.yml --ref "v$version"
+```
+
+The workflow refuses branches, version-mismatched tags, missing/invalid secrets, unsigned
+artifacts, invalid signatures, hash mismatches, and duplicate releases.
 
 The build starts from a clean `dist` directory. Before release, verify:
 
@@ -132,8 +153,8 @@ a release.
 
 1. Keep the previous signed installer and its verified checksum before rollout.
 2. Gracefully stop Zadoo.
-3. Uninstall the current build. Choose **No** when asked whether to delete ProgramData settings
-   and logs unless the configuration itself is known to be corrupt or compromised.
+3. Uninstall the current build. Preserve `%LOCALAPPDATA%\Zadoo` and the legacy ProgramData copy
+   unless the configuration itself is known to be corrupt or compromised.
 4. Install the previous signed build.
 5. Open Settings and verify activation, permissions, runtime status, and the public URL.
 6. Perform a second-device viewer smoke test.
@@ -151,5 +172,7 @@ than editing encrypted JSON by hand.
 - [ ] `.env`, access codes, device tokens, PFX files, and passwords are absent from Git.
 - [ ] Fresh install and in-place upgrade both pass on supported Windows x64.
 - [ ] Local status, public tunnel, authentication, permissions, terminal, and graceful stop pass.
+- [ ] Two-to-five viewer admission, the sixth-viewer rejection, and heartbeat fail-closed behavior pass.
+- [ ] A diagnostic export opens successfully and contains no known secrets or personal identifiers.
 - [ ] Browser console and network checks show no unexpected errors or external assets.
 - [ ] Previous signed installer and rollback procedure are available.

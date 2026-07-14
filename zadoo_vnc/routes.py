@@ -24,12 +24,22 @@ from PIL import Image
 from websockets.datastructures import Headers
 from websockets.http11 import Response as WSResponse
 
-from .assets import load_binary, load_static, load_template
+from .assets import (
+    load_binary,
+    load_static,
+    load_static_gzip,
+    load_template,
+    load_template_gzip,
+)
 from .camera_discovery import enumerate_camera_devices
 from .dpi import get_primary_screen_size
-from .logging_utils import _log_except
 from .saas import ZadooCloudClient
-from .settings import ACCESS_CODE_MAX_LENGTH, PERMISSION_KEYS, _clean_http_origin
+from .settings import (
+    ACCESS_CODE_MAX_LENGTH,
+    ALERT_CODES,
+    PERMISSION_KEYS,
+    _clean_http_origin,
+)
 
 
 class RoutesMixin:
@@ -63,6 +73,7 @@ class RoutesMixin:
         "/api/runtime/status": "settings",
         "/api/runtime/stop": "settings",
         "/api/runtime/refresh-tunnel": "settings",
+        "/rpc": "view",
         "/brand-header.png": "public",
         "/trigger-icon.png": "public",
         "/splash.png": "public",
@@ -176,20 +187,58 @@ class RoutesMixin:
             {"Cache-Control": "no-store"},
         )
 
-    def _template_response(self, name, extra_headers=None, strip=False):
+    def _accepts_gzip(self, request_headers):
+        raw = str(self._header_get(request_headers, "Accept-Encoding", "") or "")
+        gzip_quality = None
+        wildcard_quality = None
+        for item in raw.split(","):
+            parts = [part.strip() for part in item.split(";")]
+            if not parts or parts[0].lower() not in {"gzip", "*"}:
+                continue
+            coding = parts[0].lower()
+            quality = 1.0
+            for parameter in parts[1:]:
+                key, separator, value = parameter.partition("=")
+                if separator and key.strip().lower() == "q":
+                    try:
+                        quality = float(value.strip())
+                    except ValueError:
+                        quality = 0.0
+            if not 0.0 <= quality <= 1.0:
+                quality = 0.0
+            if coding == "gzip":
+                gzip_quality = quality
+            else:
+                wildcard_quality = quality
+        selected = gzip_quality if gzip_quality is not None else wildcard_quality
+        return selected is not None and selected > 0
+
+    def _template_response(self, name, extra_headers=None, strip=False, request_headers=None):
         template = load_template(name)
         if strip:
             template = template.strip()
-        return self._response(template.encode("utf-8"), "text/html; charset=utf-8", extra_headers=extra_headers)
+        headers = dict(extra_headers or {})
+        if not strip and self._accepts_gzip(request_headers):
+            headers.update({"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+            body = load_template_gzip(name)
+        else:
+            body = template.encode("utf-8")
+        return self._response(body, "text/html; charset=utf-8", extra_headers=headers)
 
-    def _static_response(self, name, content_type):
+    def _static_response(self, name, content_type, request_headers=None):
+        headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if self._accepts_gzip(request_headers):
+            headers.update({"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+            body = load_static_gzip(name)
+        else:
+            body = load_static(name)
         return self._response(
-            load_static(name),
+            body,
             content_type,
-            extra_headers={
-                "Cache-Control": "public, max-age=31536000, immutable",
-                "X-Content-Type-Options": "nosniff",
-            },
+            extra_headers=headers,
         )
 
     def _png_file_response(self, name, missing_message):
@@ -290,6 +339,13 @@ class RoutesMixin:
             return False
         hostname = host.rsplit(":", 1)[0].strip("[]")
         return hostname in ("localhost", "127.0.0.1", "::1")
+
+    def _is_local_admin_request(self, request_headers, connection):
+        return (
+            self._is_local_request(connection)
+            and self._is_localhost_request(request_headers)
+            and not self._is_tunnel_request(request_headers)
+        )
 
     def _public_only_response(self):
         body = (
@@ -400,6 +456,21 @@ class RoutesMixin:
         if feature in {"billing", "view"}:
             return True
         return permissions.get(feature) is True
+
+    def _rpc_connection_allowed(self, request_headers, connection):
+        return self._is_local_admin_request(request_headers, connection) or self._session_for_headers(
+            request_headers
+        ) is not None
+
+    def _rpc_local_admin(self, websocket):
+        return self._is_local_admin_request(self._headers_for_websocket(websocket), websocket)
+
+    def _rpc_feature_allowed(self, websocket, feature):
+        request_headers = self._headers_for_websocket(websocket)
+        session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
+        if self._grace_locks_by_session.get(session_token) and feature != "billing":
+            return False
+        return self._feature_allowed_for_headers(request_headers, feature)
 
     def _cookie_value(self, request_headers, name):
         cookie_header = self._header_get(request_headers, "Cookie", "")
@@ -545,7 +616,10 @@ class RoutesMixin:
             "expires_in": self.AUTH_TTL_SECONDS,
             "csrf_token": csrf_token,
             "permissions": permissions,
-            "limits": {"clipboard_image_max_bytes": self._clipboard_image_max_bytes},
+            "limits": {
+                "clipboard_image_max_bytes": self._clipboard_image_max_bytes,
+                "max_viewers": self._max_viewers,
+            },
         }
         return self._json_response(
             payload,
@@ -652,7 +726,7 @@ class RoutesMixin:
         self._apply_stream_profile("quality_changed")
         return value
 
-    async def _proxy_cloud(self, method: str, cloud_path: str, request_headers=None, request_body=None):
+    async def _proxy_cloud_result(self, method: str, cloud_path: str, request_headers=None, request_body=None):
         try:
             if method not in {"GET", "POST"}:
                 raise ValueError(f"Unsupported cloud proxy method: {method}")
@@ -661,7 +735,7 @@ class RoutesMixin:
             store = self.settings_store
             token = store.get_device_token()
             if not token:
-                return self._json_response({"success": False, "error": "Device not signed in"}, http.HTTPStatus.UNAUTHORIZED)
+                return http.HTTPStatus.UNAUTHORIZED, {"success": False, "error": "Device not signed in"}
             if method == "POST" and not isinstance(request_body, (bytes, bytearray)):
                 raise TypeError("Cloud POST body must be bytes")
             url = store.load()["cloud_api_base"] + cloud_path
@@ -702,9 +776,148 @@ class RoutesMixin:
             data = ZadooCloudClient._response_object(raw, cloud_path, status)
             data = ZadooCloudClient._validated_result(data, cloud_path, status, http_error=http_error)
             http_status = http.HTTPStatus(status) if status in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY
-            return self._json_response(data, http_status)
+            return http_status, data
         except Exception as exc:
-            return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.BAD_GATEWAY)
+            return http.HTTPStatus.BAD_GATEWAY, {"success": False, "error": str(exc)}
+
+    async def _proxy_cloud(self, method: str, cloud_path: str, request_headers=None, request_body=None):
+        status, data = await self._proxy_cloud_result(method, cloud_path, request_headers, request_body)
+        return self._json_response(data, status)
+
+    @staticmethod
+    def _rpc_error(error: str) -> RuntimeError:
+        return RuntimeError(str(error or "RPC action failed"))
+
+    def _validate_rpc_request(self, raw_message):
+        if not isinstance(raw_message, str):
+            raise ValueError("RPC request must be UTF-8 JSON text")
+        try:
+            request = json.loads(raw_message)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"RPC request is invalid JSON: {exc.msg}") from exc
+        if not isinstance(request, dict):
+            raise ValueError("RPC request must be a JSON object")
+        if set(request) != {"id", "action", "params"}:
+            raise ValueError("RPC request must contain exactly id, action, and params")
+        request_id = request["id"]
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+            raise ValueError("RPC id must be a string or integer")
+        if isinstance(request_id, str) and (not request_id or len(request_id) > 128):
+            raise ValueError("RPC string id must contain 1 to 128 characters")
+        action = request["action"]
+        if not isinstance(action, str) or not action.strip() or len(action.strip()) > 64:
+            raise ValueError("RPC action must contain 1 to 64 characters")
+        params = request["params"]
+        if not isinstance(params, dict):
+            raise ValueError("RPC params must be a JSON object")
+        return request_id, action.strip(), params
+
+    def _require_rpc_admin(self, websocket, params, allowed_params=()):
+        if not self._rpc_local_admin(websocket):
+            raise PermissionError("Local request required")
+        expected = {"admin_code", *allowed_params}
+        if set(params) != expected:
+            raise ValueError(f"RPC params must contain exactly: {', '.join(sorted(expected))}")
+        if not self._match_auth_code(params["admin_code"]):
+            raise PermissionError("Invalid access code")
+
+    @staticmethod
+    def _require_rpc_params(params, expected):
+        expected = set(expected)
+        if set(params) != expected:
+            raise ValueError(f"RPC params must contain exactly: {', '.join(sorted(expected))}")
+
+    async def _rpc_action(self, websocket, action, params):
+        request_headers = self._headers_for_websocket(websocket)
+        if action == "settings.reload":
+            self._require_rpc_admin(websocket, params)
+            self._load_alert_presets_from_settings()
+            self.auth_sessions = {}
+            return {"settings": self.settings_store.owner_view()}, False
+        if action == "runtime.stop":
+            self._require_rpc_admin(websocket, params)
+            return {"message": "Zadoo runtime stopping"}, True
+        if action == "runtime.refresh_tunnel":
+            self._require_rpc_admin(websocket, params)
+            return await self._refresh_tunnel_payload(), False
+        if action == "alert.trigger":
+            self._require_rpc_params(params, {"code"})
+            if not self._rpc_feature_allowed(websocket, "remote_alerts"):
+                raise PermissionError("Forbidden")
+            code = params["code"]
+            if not isinstance(code, str) or code.upper().strip() not in ALERT_CODES:
+                raise ValueError("Alert code must be A, B, C, or D")
+            code = code.upper().strip()
+            self._load_alert_presets_from_settings()
+            if code not in self.alert_presets:
+                raise RuntimeError("Alert slot is not set")
+            title, message = self.alert_presets[code]
+            self._broadcast_controller_alert(title, message)
+            return {"ok": True}, False
+        if action == "billing.topup_order":
+            self._require_rpc_params(params, {"amount_minor"})
+            if not self._rpc_feature_allowed(websocket, "billing"):
+                raise PermissionError("Forbidden")
+            amount = params["amount_minor"]
+            if isinstance(amount, bool) or not isinstance(amount, int):
+                raise ValueError("amount_minor must be an integer")
+            if amount <= 0:
+                raise ValueError("amount_minor must be positive")
+            _, data = await self._proxy_cloud_result(
+                "POST",
+                "/api/agent/wallet/topup-order",
+                request_headers,
+                json.dumps({"amountMinor": amount}).encode("utf-8"),
+            )
+            if not data["success"]:
+                raise self._rpc_error(data["error"])
+            return data, False
+        if action == "billing.topup_verify":
+            fields = {"payment_id", "razorpay_payment_id", "razorpay_order_id", "razorpay_signature"}
+            self._require_rpc_params(params, fields)
+            if not self._rpc_feature_allowed(websocket, "billing"):
+                raise PermissionError("Forbidden")
+            body = {
+                "paymentId": params["payment_id"],
+                "razorpay_payment_id": params["razorpay_payment_id"],
+                "razorpay_order_id": params["razorpay_order_id"],
+                "razorpay_signature": params["razorpay_signature"],
+            }
+            missing = [key for key, value in body.items() if not isinstance(value, str) or not value.strip()]
+            if missing:
+                raise ValueError(f"Missing payment fields: {', '.join(missing)}")
+            _, data = await self._proxy_cloud_result(
+                "POST",
+                "/api/agent/wallet/topup-verify",
+                request_headers,
+                json.dumps(body).encode("utf-8"),
+            )
+            if not data["success"]:
+                raise self._rpc_error(data["error"])
+            refreshed = await asyncio.to_thread(ZadooCloudClient(self.settings_store).entitlement)
+            if not refreshed["success"]:
+                raise RuntimeError(f"Payment verified but entitlement refresh failed: {refreshed['error']}")
+            session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
+            self._grace_locks_by_session.pop(session_token, None)
+            return data, False
+        raise ValueError(f"Unsupported RPC action: {action}")
+
+    async def rpc_handler(self, websocket):
+        async for message in websocket:
+            request_id = None
+            stop_after_response = False
+            try:
+                request_id, action, params = self._validate_rpc_request(message)
+                result, stop_after_response = await self._rpc_action(websocket, action, params)
+                response = {"id": request_id, "success": True, "result": result}
+            except PermissionError as exc:
+                response = {"id": request_id, "success": False, "error": str(exc)}
+            except Exception as exc:
+                response = {"id": request_id, "success": False, "error": str(exc)}
+            await websocket.send(json.dumps(response))
+            if stop_after_response:
+                self.stop()
+                return
 
     def _payment_market_payload(self, request_headers):
         country = next(
@@ -734,11 +947,7 @@ class RoutesMixin:
         # API used by the Settings window is always allowed.
         is_admin_route = route_path.startswith(("/api/runtime/", "/api/settings/"))
         local_peer = self._is_local_request(connection)
-        local_admin = (
-            local_peer
-            and self._is_localhost_request(request_headers)
-            and not self._is_tunnel_request(request_headers)
-        )
+        local_admin = self._is_local_admin_request(request_headers, connection)
         if is_admin_route and not local_admin:
             return self._forbidden_response(route_path, "Local request required")
         if (not is_admin_route and not self._allow_direct_access
@@ -751,6 +960,10 @@ class RoutesMixin:
         upgrade_val = (request_headers.get("Upgrade") or "").lower() if request_headers else ""
         connection_val = (request_headers.get("Connection") or "").lower() if request_headers else ""
         if "websocket" in upgrade_val or "upgrade" in connection_val:
+            if route_path == "/rpc":
+                if self._rpc_connection_allowed(request_headers, connection):
+                    return None
+                return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
             if self._is_ws_authorized(route_path, request_headers):
                 return None
             return self._plain_response("Forbidden", http.HTTPStatus.FORBIDDEN)
@@ -763,7 +976,7 @@ class RoutesMixin:
 
         # Process routes
         if static_asset := self.STATIC_ASSETS.get(route_path):
-            return self._static_response(*static_asset)
+            return self._static_response(*static_asset, request_headers=request_headers)
         if route_path == "/":
             return self._template_response(
                 "index.html",
@@ -771,15 +984,15 @@ class RoutesMixin:
                     "Permissions-Policy": "clipboard-read=(self), clipboard-write=(self)",
                     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 },
+                request_headers=request_headers,
             )
         if route_path == "/api/auth":
             return await self.handle_auth(path, request_headers)
         if route_path == "/api/settings/reload":
-            if not self._runtime_admin_code_valid(request_headers):
-                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
-            self._load_alert_presets_from_settings()
-            self.auth_sessions = {}
-            return self._json_response({"success": True, "settings": self.settings_store.owner_view()})
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
+            )
         if route_path == "/api/runtime/status":
             return self._json_response({
                 "success": True,
@@ -789,71 +1002,47 @@ class RoutesMixin:
                 "tunnel_block_reason": self.tunnel_block_reason,
                 "tunnel_error": (self.tunnel_manager.last_error if self.tunnel_manager else None),
                 "public_url": (self.tunnel_manager.get_current_url() if self.tunnel_manager else None),
+                "active_viewers": len(self._viewer_connections_by_session),
+                "max_viewers": self._max_viewers,
             })
         if route_path == "/api/runtime/stop":
-            if not self._runtime_admin_code_valid(request_headers):
-                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
-            try:
-                self.stop()  # graceful: signals stop_event, closes the listeners
-            except Exception as exc:
-                return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
-            return self._json_response({"success": True, "message": "Zadoo runtime stopping"})
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
+            )
         if route_path == "/api/runtime/refresh-tunnel":
-            # Local-only tunnel rotation for the desktop Settings window (Open / Refresh).
-            if not self._runtime_admin_code_valid(request_headers):
-                return self._json_response({"success": False, "error": "Invalid access code"}, http.HTTPStatus.UNAUTHORIZED)
-            try:
-                return self._json_response(await self._refresh_tunnel_payload())
-            except Exception as exc:
-                return self._json_response({"success": False, "error": str(exc)}, http.HTTPStatus.INTERNAL_SERVER_ERROR)
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
+            )
         if route_path == "/terminal.html":
-            return self._template_response("terminal.html")
+            return self._template_response("terminal.html", request_headers=request_headers)
         if route_path == "/benchmark.html":
             return self._template_response(
                 "benchmark.html",
                 {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+                request_headers=request_headers,
             )
         if route_path in {"/video", "/input", "/audio", "/terminal", "/webcam"}:
             return None
+        if route_path == "/rpc":
+            return self._json_response(
+                {"success": False, "error": "WebSocket upgrade required"},
+                http.HTTPStatus.UPGRADE_REQUIRED,
+            )
         if route_path == "/api/list-cameras":
             return await self._device_list_response(self.enumerate_cameras)
         if route_path == "/api/list-mics":
             return await self._device_list_response(self.enumerate_microphones)
         if route_path == "/host-controls":
-            return self._template_response("host_controls.html", strip=True)
+            return self._template_response(
+                "host_controls.html", strip=True, request_headers=request_headers
+            )
         if route_path == "/api/alert":
-            try:
-                qs = urllib.parse.parse_qs(
-                    urllib.parse.urlparse(path).query,
-                    keep_blank_values=True,
-                    strict_parsing=True,
-                )
-            except ValueError as exc:
-                return self._json_response({"ok": False, "error": str(exc)}, http.HTTPStatus.BAD_REQUEST)
-            if set(qs) != {"code"} or len(qs["code"]) != 1:
-                return self._json_response(
-                    {"ok": False, "error": "Alert request must contain exactly one code parameter"},
-                    http.HTTPStatus.BAD_REQUEST,
-                )
-            code = qs["code"][0].upper().strip()
-            if code not in {"A", "B", "C", "D"}:
-                return self._json_response(
-                    {"ok": False, "error": "Alert code must be A, B, C, or D"},
-                    http.HTTPStatus.BAD_REQUEST,
-                )
-            try:
-                self._load_alert_presets_from_settings()
-                if code not in self.alert_presets:
-                    return self._json_response({"ok": False, "error": "Alert slot is not set"}, http.HTTPStatus.NOT_FOUND)
-                title, message = self.alert_presets[code]
-                self._broadcast_controller_alert(title, message)
-                return self._json_response({"ok": True})
-            except Exception as exc:
-                _log_except("api.alert", exc)
-                return self._json_response(
-                    {"ok": False, "error": str(exc)},
-                    http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
+            )
         if route_path == "/api/local/credits":
             if not self.settings_store.get_device_token():
                 return self._json_response({"success": False, "offline": True, "error": "Device not signed in"})
@@ -861,69 +1050,15 @@ class RoutesMixin:
         if route_path == "/api/local/payment-market":
             return self._json_response({"success": True, **self._payment_market_payload(request_headers)})
         if route_path == "/api/local/topup-order":
-            raw_amount = self._header_get(request_headers, "X-Zadoo-Amount-Minor", "")
-            try:
-                amount = int(raw_amount)
-            except (TypeError, ValueError):
-                return self._json_response(
-                    {"success": False, "error": "X-Zadoo-Amount-Minor must be an integer"},
-                    http.HTTPStatus.BAD_REQUEST,
-                )
-            if amount <= 0:
-                return self._json_response(
-                    {"success": False, "error": "X-Zadoo-Amount-Minor must be positive"},
-                    http.HTTPStatus.BAD_REQUEST,
-                )
-            body = {"amountMinor": amount}
-            return await self._proxy_cloud(
-                "POST",
-                "/api/agent/wallet/topup-order",
-                request_headers,
-                json.dumps(body).encode("utf-8"),
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
             )
         if route_path == "/api/local/topup-verify":
-            header_fields = {
-                "paymentId": "X-Zadoo-Payment-Id",
-                "razorpay_payment_id": "X-Razorpay-Payment-Id",
-                "razorpay_order_id": "X-Razorpay-Order-Id",
-                "razorpay_signature": "X-Razorpay-Signature",
-            }
-            body = {
-                key: str(self._header_get(request_headers, header, "") or "").strip()
-                for key, header in header_fields.items()
-            }
-            missing = [header for key, header in header_fields.items() if not body[key]]
-            if missing:
-                return self._json_response(
-                    {"success": False, "error": f"Missing payment headers: {', '.join(missing)}"},
-                    http.HTTPStatus.BAD_REQUEST,
-                )
-            resp = await self._proxy_cloud(
-                "POST",
-                "/api/agent/wallet/topup-verify",
-                request_headers,
-                json.dumps(body).encode("utf-8"),
+            return self._json_response(
+                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
+                http.HTTPStatus.METHOD_NOT_ALLOWED,
             )
-            try:
-                vd = json.loads(resp.body.decode("utf-8"))
-                if vd["success"]:
-                    refreshed = await asyncio.to_thread(ZadooCloudClient(self.settings_store).entitlement)
-                    if not refreshed["success"]:
-                        return self._json_response(
-                            {
-                                "success": False,
-                                "error": f"Payment verified but entitlement refresh failed: {refreshed['error']}",
-                            },
-                            http.HTTPStatus.BAD_GATEWAY,
-                        )
-                    session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
-                    self._grace_locks_by_session.pop(session_token, None)
-            except Exception as exc:
-                return self._json_response(
-                    {"success": False, "error": f"Payment verification state update failed: {exc}"},
-                    http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
-            return resp
         if route_path == "/brand-header.png":
             return self._png_file_response("brand-header.png", "Header image not found")
         if route_path == "/trigger-icon.png":

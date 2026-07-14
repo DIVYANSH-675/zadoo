@@ -7,7 +7,8 @@ Zadoo is a Windows 10/11 x64 host runtime. The hosted dashboard and billing serv
 - `python -m zadoo_vnc` and the `zadoo-vnc` console script call `zadoo_vnc.app:main`.
 - `--open` and `--settings` open the native Settings window; no arguments start the runtime.
 - The runtime starts screen capture, binds one `websockets` 15 server to port `6173`, verifies the first encoded frame, then starts the signed, bundled `cloudflared.exe`.
-- Installed settings and logs live under `%ProgramData%\Zadoo`.
+- Installed settings and logs live under the current user's protected `%LOCALAPPDATA%\Zadoo`
+  tree. A one-time migration re-encrypts legacy ProgramData secrets with current-user DPAPI.
 
 ## Runtime modules
 
@@ -25,6 +26,7 @@ Zadoo is a Windows 10/11 x64 host runtime. The hosted dashboard and billing serv
 | `settings.py` | Normalized JSON settings, DPAPI secrets and access-code verification |
 | `settings_window.py` | Native owner configuration and runtime controls |
 | `saas.py` | Device activation, entitlement, session metering and heartbeat calls |
+| `diagnostics.py` | Bounded, redacted local diagnostic ZIP generation |
 
 ## Request flow
 
@@ -33,8 +35,12 @@ Zadoo is a Windows 10/11 x64 host runtime. The hosted dashboard and billing serv
 3. `/api/auth` verifies the access code and creates an in-memory one-hour session.
 4. Permissions are stored in that session, avoiding settings-file I/O on mouse, keyboard and stream actions.
 5. WebSocket routes dispatch to `/video`, `/input`, `/audio`, `/mic`, `/webcam` or `/terminal`.
+6. Browser mutations use authenticated same-origin `/rpc`; local runtime administration also
+   requires a loopback peer and the access code. Legacy mutation URLs return HTTP 405.
 
 Direct LAN access is denied by default; localhost access from the host is allowed. `ZADOO_ALLOW_DIRECT_ACCESS=1` is intended only for development and live smoke tests.
+Multiple sockets sharing one authentication session count as one viewer. At most five distinct
+viewer sessions are admitted, preventing unbounded per-viewer capture and media resources.
 
 ## Screen stream
 
@@ -47,6 +53,8 @@ The shipping video transport is adaptive JPEG frames over WebSocket:
 5. Browser and server statistics drive the adaptive FPS, quality and scale ladder.
 
 MSS seeds the initial screen, then BetterCam desktop duplication returns only changed frames. Static desktops are polled but not re-encoded or retransmitted. A capture or encode exception stops the capture thread and is exposed as an exact error.
+HTML, CSS, and JavaScript responses use cached gzip representations when negotiated. The viewer
+defaults to fit-width on narrow screens and provides fit/width, zoom, pan, and pinch controls.
 
 ## Input and clipboard
 
@@ -72,6 +80,8 @@ The local billing proxy forwards trusted country headers to `zadoo-web`. India v
 ## Tunnel and notifications
 
 The build downloads cloudflared 2026.6.0 from its versioned release, verifies its pinned SHA-256 and Authenticode signature, then bundles it as `cloudflared.exe`. Runtime never downloads or searches for alternate binaries. It verifies the Authenticode signature once per process and reports exact startup/timeout/exit errors through the local APIs and Settings UI. Resend email is optional and runs only after a public URL exists.
+Cloud heartbeat and tunnel-process failures retry with bounded backoff for 60-120 seconds, then
+stop the runtime fail-closed rather than leaving an unmetered public host running.
 
 ## Build and verification
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import gzip
 import json
 import os
 import queue
@@ -17,13 +18,26 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_GLOBS = ("zadoo_vnc/**/*.py", "zadoo_vnc/templates/*.html", "scripts/*.py", "*.py", "*.md", "*.toml", "*.txt", ".env.example")
+SOURCE_GLOBS = (
+    "zadoo_vnc/**/*.py",
+    "zadoo_vnc/templates/*.html",
+    "scripts/*.py",
+    "installer/*.iss",
+    ".github/workflows/*.yml",
+    "*.py",
+    "*.md",
+    "*.toml",
+    "*.txt",
+    ".env.example",
+)
 MOJIBAKE_RE = re.compile(r"[\u00c2\u00c3\u00e2\u00f0][^\x00-\x7f]+")
+GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
 
 
 def _legacy_auth_strings():
@@ -132,6 +146,8 @@ def assert_imports() -> None:
             "ZADOO_AUTH_LOCKOUT_SECONDS",
             "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
             "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
+            "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS",
+            "ZADOO_MAX_VIEWERS",
             "ZADOO_STREAM_START_PROFILE",
         )
     }
@@ -143,6 +159,8 @@ def assert_imports() -> None:
     os.environ["ZADOO_AUTH_LOCKOUT_SECONDS"] = "120"
     os.environ["ZADOO_CLIPBOARD_IMAGE_MAX_BYTES"] = "8"
     os.environ["ZADOO_CLIPBOARD_TEXT_MAX_BYTES"] = "8"
+    os.environ["ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS"] = "120"
+    os.environ["ZADOO_MAX_VIEWERS"] = "5"
     os.environ["ZADOO_STREAM_START_PROFILE"] = "half-120-q54"
     for key in (
         "ZADOO_ALLOWED_ORIGINS",
@@ -156,6 +174,7 @@ def assert_imports() -> None:
     from zadoo_vnc.app import require_windows_x64
     from zadoo_vnc.assets import load_binary, load_static, load_template
     from zadoo_vnc.config import env_bool
+    from zadoo_vnc.diagnostics import build_diagnostic_bundle, redact_diagnostic_text
     from zadoo_vnc.logging_utils import _BoundedLogFile, _prune_logs
     from zadoo_vnc.saas import ZadooCloudClient
     from zadoo_vnc.server import VNCServer
@@ -197,6 +216,10 @@ def assert_imports() -> None:
     path_inno = '"ISCC.exe"'
     if build_script.index(local_inno) > build_script.index(path_inno, build_script.index("function Resolve-Inno")):
         fail("Windows build must prefer the pinned Inno installation over PATH shims")
+    installer_script = (ROOT / "installer" / "zadoo.iss").read_text(encoding="utf-8")
+    for required_uninstall_path in ("{localappdata}\\Zadoo", "{commonappdata}\\Zadoo"):
+        if required_uninstall_path not in installer_script:
+            fail(f"Windows uninstaller does not cover settings path {required_uninstall_path}")
     documented_env = {
         "EMAIL_TO",
         "HIDE_CONSOLE",
@@ -210,14 +233,18 @@ def assert_imports() -> None:
         "ZADOO_AUTH_WINDOW_SECONDS",
         "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
         "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
+        "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS",
         "ZADOO_CLOUD_API_BASE",
         "ZADOO_CLOUDFLARED_PATH",
         "ZADOO_CLOUDFLARED_PROTOCOL",
         "ZADOO_DISABLE_TUNNEL",
         "ZADOO_LOG_BACKUP_COUNT",
+        "ZADOO_DIAGNOSTIC_MAX_LOG_BYTES",
+        "ZADOO_DIAGNOSTIC_MAX_LOG_FILES",
         "ZADOO_LOG_LEVEL",
         "ZADOO_LOG_MAX_BYTES",
         "ZADOO_LOG_RETENTION_DAYS",
+        "ZADOO_MAX_VIEWERS",
         "ZADOO_SETTINGS_DIR",
         "ZADOO_SETTINGS_PATH",
         "ZADOO_SIGN_PFX_PASSWORD",
@@ -254,6 +281,51 @@ def assert_imports() -> None:
         fail("empty settings path override did not fail")
     finally:
         os.environ["ZADOO_SETTINGS_PATH"] = settings_override
+    original_program_data = os.environ.get("PROGRAMDATA")
+    original_local_app_data = os.environ.get("LOCALAPPDATA")
+    with tempfile.TemporaryDirectory(prefix="zadoo-migration-smoke-") as migration_root:
+        migration_root = Path(migration_root)
+        os.environ.pop("ZADOO_SETTINGS_PATH", None)
+        os.environ["PROGRAMDATA"] = str(migration_root / "ProgramData")
+        os.environ["LOCALAPPDATA"] = str(migration_root / "LocalAppData")
+        legacy_path = migration_root / "ProgramData" / "Zadoo" / "config.json"
+        legacy_path.parent.mkdir(parents=True)
+        legacy_code = "MIGRATE10"
+        legacy_data = settings_mod.normalize_settings(None)
+        legacy_data["setup_complete"] = True
+        legacy_data["access_code"] = "dpapi:" + settings_mod._b64(
+            settings_mod.win32crypt.CryptProtectData(
+                legacy_code.encode("utf-8"), "Zadoo", None, None, None, 0x4
+            )
+        )
+        legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+        destination = settings_mod.settings_path()
+        settings_mod._migrate_legacy_settings(destination)
+        migrated_store = settings_mod.SettingsStore(destination)
+        if migrated_store.get_access_code() != legacy_code:
+            fail("legacy ProgramData access code did not survive per-user migration")
+        migrated_text = destination.read_text(encoding="utf-8")
+        if "dpapi-user:" not in migrated_text or '"dpapi:' in migrated_text:
+            fail("legacy ProgramData secrets were not re-encrypted with current-user DPAPI")
+        if not legacy_path.exists():
+            fail("legacy settings migration removed the rollback copy")
+        descriptor = settings_mod.win32security.GetNamedSecurityInfo(
+            str(destination),
+            settings_mod.win32security.SE_FILE_OBJECT,
+            settings_mod.win32security.DACL_SECURITY_INFORMATION,
+        )
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        if dacl is None or dacl.GetAceCount() != 3:
+            fail("migrated settings file does not have the expected protected three-principal ACL")
+    os.environ["ZADOO_SETTINGS_PATH"] = settings_override
+    if original_program_data is None:
+        os.environ.pop("PROGRAMDATA", None)
+    else:
+        os.environ["PROGRAMDATA"] = original_program_data
+    if original_local_app_data is None:
+        os.environ.pop("LOCALAPPDATA", None)
+    else:
+        os.environ["LOCALAPPDATA"] = original_local_app_data
     os.environ["ZADOO_SMOKE_EMPTY_BOOL"] = ""
     try:
         env_bool("ZADOO_SMOKE_EMPTY_BOOL")
@@ -801,6 +873,28 @@ def assert_imports() -> None:
                     FakeHttpRequest(path, headers, body),
                 )
 
+            loop = asyncio.get_running_loop()
+            stopped = loop.create_future()
+            stopped.set_result(True)
+            media_done = loop.create_future()
+            media_done.set_result(None)
+            server._raise_for_completed_required_tasks(
+                {media_done, stopped}, stopped, None
+            )
+            fatal = RuntimeError("heartbeat fail-closed smoke")
+            try:
+                server._raise_for_completed_required_tasks({stopped}, stopped, fatal)
+                fail("fatal shutdown error was ignored")
+            except RuntimeError as exc:
+                if exc is not fatal:
+                    fail(f"fatal shutdown returned the wrong error: {exc}")
+            try:
+                server._raise_for_completed_required_tasks({media_done}, stopped, None)
+                fail("unexpected media task completion was ignored")
+            except RuntimeError as exc:
+                if str(exc) != "A required media broadcast task stopped unexpectedly":
+                    fail(f"media task completion returned the wrong error: {exc}")
+
             headers = Headers()
             headers["Host"] = "localhost:6173"
             if server._runtime_admin_code_valid(headers):
@@ -843,6 +937,34 @@ def assert_imports() -> None:
             for name, expected in expected_security_headers.items():
                 if static_response.headers.get(name) != expected:
                     fail(f"response security header {name} was missing or invalid")
+            gzip_headers = headers.copy()
+            gzip_headers["Accept-Encoding"] = "br, gzip;q=1"
+            gzip_index = await request(server, "/", gzip_headers)
+            if (
+                gzip_index.headers.get("Content-Encoding") != "gzip"
+                or gzip_index.headers.get("Vary") != "Accept-Encoding"
+                or gzip.decompress(gzip_index.body).decode("utf-8") != load_template("index.html")
+            ):
+                fail("HTML gzip negotiation returned invalid content or headers")
+            gzip_static = await request(
+                server, "/static/vendor/codemirror-5.65.21.min.js", gzip_headers
+            )
+            if (
+                gzip_static.headers.get("Content-Encoding") != "gzip"
+                or gzip.decompress(gzip_static.body)
+                != load_static("vendor/codemirror-5.65.21.min.js")
+            ):
+                fail("static gzip negotiation returned invalid content")
+            no_gzip_headers = headers.copy()
+            no_gzip_headers["Accept-Encoding"] = "gzip;q=0"
+            no_gzip_index = await request(server, "/", no_gzip_headers)
+            if no_gzip_index.headers.get("Content-Encoding") is not None:
+                fail("gzip;q=0 unexpectedly returned compressed content")
+            explicit_no_gzip_headers = headers.copy()
+            explicit_no_gzip_headers["Accept-Encoding"] = "gzip;q=0, *;q=1"
+            explicit_no_gzip_index = await request(server, "/", explicit_no_gzip_headers)
+            if explicit_no_gzip_index.headers.get("Content-Encoding") is not None:
+                fail("explicit gzip refusal was overridden by wildcard encoding")
             asset_response = await request(server, "/brand-header.png", headers)
             if asset_response.headers.get("Cache-Control") != "public, max-age=31536000, immutable":
                 fail("content-versioned image was not served with immutable caching")
@@ -850,6 +972,21 @@ def assert_imports() -> None:
             for asset_version in ("b0e399b76691", "a8ff7f23c7aa", "7cc869410b1c"):
                 if f"?v={asset_version}" not in index_template:
                     fail(f"index template is missing image content version {asset_version}")
+            for mobile_marker in (
+                'id="view-controls"',
+                "remoteView.mode",
+                "canvas.addEventListener('pointerdown'",
+                "touchDistance(points)",
+                'callRpc("billing.topup_order"',
+                'callRpc("billing.topup_verify"',
+            ):
+                if mobile_marker not in index_template:
+                    fail(f"mobile/RPC frontend is missing {mobile_marker}")
+            if "/api/local/topup-order" in index_template or "/api/local/topup-verify" in index_template:
+                fail("frontend still calls legacy state-changing payment HTTP routes")
+            host_controls_template = load_template("host_controls.html")
+            if "alert.trigger" not in host_controls_template or "/api/alert" in host_controls_template:
+                fail("host controls did not migrate alerts to authenticated WebSocket RPC")
             snapshot_prefix_response = await request(server, "/snapshot-extra?fmt=png", headers)
             if snapshot_prefix_response.status_code != 404:
                 fail(f"snapshot prefix route returned {snapshot_prefix_response.status_code}, expected 404")
@@ -882,6 +1019,8 @@ def assert_imports() -> None:
                 fail("auth route did not set zadoo_auth cookie")
             if auth_payload.get("limits", {}).get("clipboard_image_max_bytes") != 8:
                 fail("auth route did not expose the configured clipboard image limit")
+            if auth_payload.get("limits", {}).get("max_viewers") != 5:
+                fail("auth route did not expose the five-viewer limit")
             minimum_image_frame = ((server._clipboard_image_max_bytes + 2) // 3) * 4 + 4096
             if server._websocket_max_size < minimum_image_frame:
                 fail("websocket frame limit cannot carry the configured clipboard image limit")
@@ -967,9 +1106,19 @@ def assert_imports() -> None:
                 response = await request(server, path, csrf_headers)
                 if response.status_code != 404:
                     fail(f"removed duplicate route {path} returned {response.status_code}, expected 404")
-            missing_amount = await request(server, "/api/local/topup-order", headers)
-            if missing_amount.status_code != 400 or b"X-Zadoo-Amount-Minor" not in missing_amount.body:
-                fail("top-up order did not require its exact amount header")
+            rpc_required_error = "State-changing action requires authenticated WebSocket RPC"
+            for legacy_mutation in (
+                "/api/settings/reload",
+                "/api/runtime/stop",
+                "/api/runtime/refresh-tunnel",
+                "/api/local/topup-order",
+                "/api/local/topup-verify",
+                "/api/alert?code=A",
+            ):
+                legacy_response = await request(server, legacy_mutation, csrf_headers)
+                legacy_payload = json.loads(legacy_response.body.decode("utf-8"))
+                if legacy_response.status_code != 405 or legacy_payload.get("error") != rpc_required_error:
+                    fail(f"legacy mutation {legacy_mutation} did not fail with the exact RPC error")
             global_market = await request(server, "/api/local/payment-market", headers)
             global_payload = json.loads(global_market.body.decode("utf-8"))
             if global_payload["market"] != "GLOBAL" or global_payload["currency"] != "USD":
@@ -980,9 +1129,6 @@ def assert_imports() -> None:
             india_payload = json.loads(india_market.body.decode("utf-8"))
             if india_payload["market"] != "INDIA" or india_payload["currency"] != "INR":
                 fail(f"India payment market was not INR: {india_payload}")
-            missing_payment = await request(server, "/api/local/topup-verify", headers)
-            if missing_payment.status_code != 400 or b"Missing payment headers" not in missing_payment.body:
-                fail("top-up verification did not require exact payment headers")
             removed_clipboard_response = await request(server, "/api/set-clipboard-image", csrf_headers)
             if removed_clipboard_response.status_code != 404:
                 fail(
@@ -1066,11 +1212,11 @@ def assert_imports() -> None:
                     self.headers = request_headers
 
             class FakeWebSocket:
-                remote_address = ("smoke", 1)
-                def __init__(self, request_headers, messages):
+                def __init__(self, request_headers, messages, remote_address=("smoke", 1)):
                     self.request = FakeWebSocketRequest(request_headers)
                     self.sent = []
                     self.messages = list(messages)
+                    self.remote_address = remote_address
                 async def send(self, data):
                     self.sent.append(data)
                 async def close(self, code=1000, reason=""):
@@ -1081,6 +1227,64 @@ def assert_imports() -> None:
                     if self.messages:
                         return self.messages.pop(0)
                     raise StopAsyncIteration
+
+            malformed_rpc = FakeWebSocket(headers, ["{}"])
+            await server.rpc_handler(malformed_rpc)
+            malformed_payload = json.loads(malformed_rpc.sent[-1])
+            if malformed_payload != {
+                "id": None,
+                "success": False,
+                "error": "RPC request must contain exactly id, action, and params",
+            }:
+                fail(f"malformed RPC returned the wrong exact error: {malformed_payload}")
+
+            viewer_entries = []
+            for index in range(5):
+                viewer_headers = Headers()
+                viewer_headers["Host"] = "localhost:6173"
+                viewer_headers["Cookie"] = f"zadoo_auth=viewer-{index}"
+                viewer_ws = FakeWebSocket(viewer_headers, [])
+                token = server._register_viewer_connection(viewer_ws, "/video")
+                viewer_entries.append((token, viewer_ws))
+            same_viewer_headers = Headers()
+            same_viewer_headers["Host"] = "localhost:6173"
+            same_viewer_headers["Cookie"] = "zadoo_auth=viewer-0"
+            same_viewer_ws = FakeWebSocket(same_viewer_headers, [])
+            same_token = server._register_viewer_connection(same_viewer_ws, "/input")
+            if len(server._viewer_connections_by_session) != 5:
+                fail("multiple sockets from one authenticated viewer consumed extra viewer slots")
+            sixth_headers = Headers()
+            sixth_headers["Host"] = "localhost:6173"
+            sixth_headers["Cookie"] = "zadoo_auth=viewer-5"
+            sixth_ws = FakeWebSocket(sixth_headers, [])
+            try:
+                server._register_viewer_connection(sixth_ws, "/video")
+                fail("sixth authenticated viewer exceeded the configured viewer limit")
+            except RuntimeError as exc:
+                if str(exc) != "Viewer limit reached (5)":
+                    fail(f"sixth viewer returned the wrong exact error: {exc}")
+            server._unregister_viewer_connection(same_token, same_viewer_ws)
+            for token, viewer_ws in viewer_entries:
+                server._unregister_viewer_connection(token, viewer_ws)
+            if server._viewer_connections_by_session:
+                fail("viewer slots were not released after all sockets closed")
+
+            started, failures, delay, elapsed = server._heartbeat_retry_policy(
+                None, 0, 100.0, "offline"
+            )
+            if (started, failures, delay, elapsed) != (100.0, 1, 5, 0.0):
+                fail("heartbeat retry policy did not start with a five-second backoff")
+            _, _, delay, elapsed = server._heartbeat_retry_policy(
+                started, failures, 219.0, "offline"
+            )
+            if delay != 1.0 or elapsed != 119.0:
+                fail("heartbeat retry policy did not clamp its final retry to the fail-closed deadline")
+            try:
+                server._heartbeat_retry_policy(started, failures, 220.0, "offline")
+                fail("heartbeat retry policy did not fail closed after 120 seconds")
+            except RuntimeError as exc:
+                if str(exc) != "Cloud heartbeat failed for 120 seconds: offline":
+                    fail(f"heartbeat fail-closed policy returned the wrong exact error: {exc}")
 
             second_auth_response = await request(server, "/api/auth", auth_request_headers)
             second_headers = Headers()
@@ -1126,8 +1330,8 @@ def assert_imports() -> None:
                     self.sent.append(data)
 
             alert_response = await request(server, "/api/alert?code=A", csrf_headers)
-            if alert_response.status_code != 404:
-                fail(f"unset alert route returned {alert_response.status_code}, expected 404")
+            if alert_response.status_code != 405:
+                fail(f"legacy alert route returned {alert_response.status_code}, expected 405")
 
             settings_code = "SMOKE" + secrets.token_hex(2).upper()
             no_permissions = dict.fromkeys(settings_mod.PERMISSION_KEYS, False)
@@ -1237,9 +1441,16 @@ def assert_imports() -> None:
             alert_input_ws = FakeSendWebSocket()
             server.video_clients = {alert_video_ws}
             server.input_clients = {alert_input_ws}
-            alert_response = await request(server, "/api/alert?code=A", allowed_csrf_headers)
-            if alert_response.status_code != 200:
-                fail(f"settings alert route returned {alert_response.status_code}, expected 200")
+            alert_rpc = FakeWebSocket(
+                allowed_ws_headers,
+                [json.dumps({"id": "alert-1", "action": "alert.trigger", "params": {"code": "A"}})],
+            )
+            await server.rpc_handler(alert_rpc)
+            if not alert_rpc.sent:
+                fail("settings alert RPC did not return a response")
+            alert_rpc_payload = json.loads(alert_rpc.sent[-1])
+            if alert_rpc_payload != {"id": "alert-1", "success": True, "result": {"ok": True}}:
+                fail(f"settings alert RPC response was invalid: {alert_rpc_payload}")
             await asyncio.sleep(0.05)
             for name, ws in {"video": alert_video_ws, "input": alert_input_ws}.items():
                 if not ws.sent:
@@ -1249,6 +1460,68 @@ def assert_imports() -> None:
                     fail(f"settings alert payload for {name} websocket was invalid: {alert_payload}")
             server.video_clients = set()
             server.input_clients = set()
+
+            local_rpc_headers = Headers()
+            local_rpc_headers["Host"] = "localhost:6173"
+            local_rpc = FakeWebSocket(
+                local_rpc_headers,
+                [
+                    json.dumps(
+                        {
+                            "id": "reload-1",
+                            "action": "settings.reload",
+                            "params": {"admin_code": settings_code},
+                        }
+                    )
+                ],
+                remote_address=("127.0.0.1", 6173),
+            )
+            await server.rpc_handler(local_rpc)
+            local_rpc_payload = json.loads(local_rpc.sent[-1])
+            if local_rpc_payload.get("success") is not True or not isinstance(
+                local_rpc_payload.get("result", {}).get("settings"), dict
+            ):
+                fail(f"authenticated local settings RPC failed: {local_rpc_payload}")
+
+            diagnostic_marker = "diagnostic-" + "redaction-value"
+            redacted = redact_diagnostic_text(
+                "Authorization: Bearer token-value; zadoo_auth=cookie-value; "
+                "person@example.invalid dpapi-user:QUJD C:\\Users\\PrivateUser\\file.log "
+                "workspace_id=old-workspace " + diagnostic_marker,
+                [diagnostic_marker],
+            )
+            for forbidden in (
+                "token-value",
+                "cookie-value",
+                "person@example.invalid",
+                "dpapi-user:QUJD",
+                "PrivateUser",
+                "old-workspace",
+                diagnostic_marker,
+            ):
+                if forbidden in redacted:
+                    fail(f"diagnostic redaction leaked {forbidden!r}")
+            with tempfile.TemporaryDirectory(prefix="zadoo-diagnostic-smoke-") as diagnostic_dir:
+                bundle = build_diagnostic_bundle(
+                    Path(diagnostic_dir) / "diagnostics.zip",
+                    store=isolated_store,
+                    runtime_status={
+                        "success": True,
+                        "public_url": "https://smoke-secret.trycloudflare.com",
+                    },
+                )
+                with zipfile.ZipFile(bundle) as archive:
+                    members = set(archive.namelist())
+                    if "diagnostics.json" not in members:
+                        fail("diagnostic bundle is missing diagnostics.json")
+                    combined = b"\n".join(archive.read(name) for name in members).decode(
+                        "utf-8", errors="replace"
+                    )
+                for forbidden in (settings_code, "alerts@example.invalid", "smoke-secret"):
+                    if forbidden in combined:
+                        fail(f"diagnostic bundle leaked {forbidden!r}")
+                if str(isolated_store.path) in combined:
+                    fail("diagnostic bundle exposed the absolute settings path")
 
             image_ws = FakeSendWebSocket()
             too_large_png = base64.b64encode(b"123456789").decode("ascii")
@@ -1316,6 +1589,8 @@ def assert_source_clean() -> None:
         for forbidden in FORBIDDEN_SOURCE_STRINGS:
             if forbidden in text:
                 fail(f"forbidden source string {forbidden!r} found in {path.relative_to(ROOT)}")
+        if GITHUB_TOKEN_RE.search(text):
+            fail(f"GitHub token-like value found in {path.relative_to(ROOT)}")
         match = MOJIBAKE_RE.search(text)
         if match:
             fail(f"mojibake marker {match.group(0)!r} found in {path.relative_to(ROOT)}")

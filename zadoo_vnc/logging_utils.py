@@ -89,12 +89,17 @@ def _restore_logging_streams():
 def _setup_logging_to_file():
     global _LOG_FILE_HANDLE, _ORIGINAL_STDOUT, _ORIGINAL_STDERR, _LOGGING_RESTORE_REGISTERED
     if getattr(sys, "frozen", False):
-        from .settings import settings_dir
+        from .settings import _secure_settings_path, settings_dir
 
-        log_dir = settings_dir() / "logs"
+        settings_root = settings_dir()
+        settings_root.mkdir(parents=True, exist_ok=True)
+        _secure_settings_path(settings_root, directory=True)
+        log_dir = settings_root / "logs"
     else:
         log_dir = PROJECT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        _secure_settings_path(log_dir, directory=True)
     retention_days = env_int("ZADOO_LOG_RETENTION_DAYS", 14, minimum=1, maximum=365)
     max_bytes = env_int("ZADOO_LOG_MAX_BYTES", 5 * 1024 * 1024, minimum=65536, maximum=1024 * 1024 * 1024)
     backup_count = env_int("ZADOO_LOG_BACKUP_COUNT", 2, minimum=1, maximum=20)

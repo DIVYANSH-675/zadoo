@@ -32,16 +32,21 @@ Running without arguments then starts the host runtime on fixed port `6173`. For
 Installed builds store user settings in:
 
 ```text
-%ProgramData%\Zadoo\config.json
+%LOCALAPPDATA%\Zadoo\config.json
 ```
 
-Settings include the DPAPI-encrypted access code, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
+The first upgraded run migrates a legacy `%ProgramData%\Zadoo\config.json` into the current
+Windows user's profile. Access codes and device tokens are re-encrypted with current-user DPAPI,
+and the settings tree receives an explicit protected ACL.
+
+Settings include the encrypted access code, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
 
 - One access code is used for all sessions. It is limited to 10 characters and is visible only in the local Settings window.
 - Permissions control mouse, keyboard, clipboard pull, clipboard push, system audio, mic, camera, terminal, snapshots, advanced video controls, tunnel refresh, and remote alerts.
 - Alert A-D slots have no defaults. Blank slots are disabled.
 - Email notification requires `RESEND_API_KEY`, `RESEND_FROM`, and a recipient set through `Email To` or `EMAIL_TO`; status names any missing field.
 - The Settings window can start and stop the runtime, start device activation with the hosted SaaS, refresh entitlement, toggle autostart, and choose whether minimized Settings remains visible on the taskbar.
+- The Runtime tab can export a bounded, redacted diagnostics ZIP for local troubleshooting.
 
 `.env.example` documents source-development overrides only. User-facing configuration belongs in the native Zadoo Settings window.
 
@@ -93,7 +98,11 @@ Final artifacts are written under `dist\portable` and `dist\installer`. Each fre
 
 `.github/workflows/windows-x64-ci.yml` runs on every pull request and push to `main` using a GitHub-hosted Windows 2025 x64 runner. It audits both hash-locked dependency graphs, runs the full source gate, produces an unsigned installer and portable executable, verifies their release manifest, generates a CycloneDX runtime SBOM, and uploads short-lived CI artifacts clearly labeled as unsigned. GitHub Actions are pinned to full commit SHAs and checked by `scripts/check_workflow_pins.py`.
 
-Unsigned CI artifacts are for testing only. A distributable release must be built with `-PfxPath`, must report `signed: true` in `release-manifest.json`, and must have `Valid` Authenticode status for every executable in the manifest.
+Unsigned CI artifacts are for testing only. The guarded manual
+`.github/workflows/windows-x64-release.yml` workflow accepts only a matching version tag and a
+protected release environment containing the signing PFX secrets. A distributable release must
+report `signed: true` in `release-manifest.json` and have `Valid` Authenticode status for every
+executable in the manifest.
 
 ## Smoke Tests
 

@@ -17,7 +17,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import ntsecuritycon
+import win32api
+import win32con
 import win32crypt
+import win32security
 
 from . import __version__
 
@@ -87,10 +91,19 @@ def _program_data_dir() -> Path:
     return Path(program_data) / APP_NAME
 
 
+def _local_app_data_dir() -> Path:
+    if not sys.platform.startswith("win"):
+        raise RuntimeError(f"Zadoo settings require Windows; current platform is {sys.platform}")
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        raise RuntimeError("LocalAppData environment variable is not set")
+    return Path(local_app_data) / APP_NAME
+
+
 def settings_dir() -> Path:
     override = os.environ.get("ZADOO_SETTINGS_DIR")
     if override is None:
-        return _program_data_dir()
+        return _local_app_data_dir()
     if not override.strip():
         raise RuntimeError("ZADOO_SETTINGS_DIR must not be empty")
     return Path(override).expanduser().resolve()
@@ -143,9 +156,9 @@ def _dpapi_encrypt(text: str) -> str:
             None,
             None,
             None,
-            0x4,  # CRYPTPROTECT_LOCAL_MACHINE
+            0,  # User-scoped DPAPI: other Windows accounts cannot decrypt it.
         )
-        return "dpapi:" + _b64(encrypted)
+        return "dpapi-user:" + _b64(encrypted)
     except Exception as exc:
         raise RuntimeError(f"Windows DPAPI encryption failed: {exc}") from exc
 
@@ -155,10 +168,16 @@ def _dpapi_decrypt(value: str) -> str:
         raise ValueError("Encrypted setting must be text")
     if not value:
         return ""
-    if not value.startswith("dpapi:"):
-        raise ValueError("Encrypted setting must use the dpapi: format")
+    if value.startswith("dpapi-user:"):
+        encoded = value[11:]
+    elif value.startswith("dpapi:"):
+        # Version 1.0 used machine-scoped DPAPI. Keep decryption only for the
+        # one-time ProgramData -> LocalAppData migration below.
+        encoded = value[6:]
+    else:
+        raise ValueError("Encrypted setting must use the dpapi-user: format")
     try:
-        decrypted = win32crypt.CryptUnprotectData(_unb64(value[6:]), None, None, None, 0)[1]
+        decrypted = win32crypt.CryptUnprotectData(_unb64(encoded), None, None, None, 0)[1]
         return decrypted.decode("utf-8")
     except Exception as exc:
         raise RuntimeError(f"Windows DPAPI decryption failed: {exc}") from exc
@@ -381,9 +400,98 @@ def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
+def _secure_settings_path(path: Path, *, directory: bool) -> None:
+    """Protect settings paths with an explicit current-user/SYSTEM/admin DACL."""
+    if not path.exists():
+        raise FileNotFoundError(f"Cannot secure missing Zadoo settings path: {path}")
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        user_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        token.Close()
+    system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid)
+    admins_sid = win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid)
+    inherit_flags = (
+        win32con.CONTAINER_INHERIT_ACE | win32con.OBJECT_INHERIT_ACE
+        if directory
+        else 0
+    )
+    dacl = win32security.ACL()
+    for sid in (user_sid, system_sid, admins_sid):
+        dacl.AddAccessAllowedAceEx(
+            win32security.ACL_REVISION_DS,
+            inherit_flags,
+            ntsecuritycon.FILE_ALL_ACCESS,
+            sid,
+        )
+    win32security.SetNamedSecurityInfo(
+        str(path),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION
+        | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        dacl,
+        None,
+    )
+
+
+@contextmanager
+def _locked_settings_file(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_settings_path(lock_path.parent, directory=True)
+    with lock_path.open("a+b") as lock_file:
+        _secure_settings_path(lock_path, directory=False)
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError as exc:
+            raise RuntimeError(f"Unable to lock Zadoo settings at {lock_path}: {exc}") from exc
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _migrate_legacy_settings(destination: Path) -> None:
+    """Move the old shared ProgramData config into protected per-user storage once."""
+    if os.environ.get("ZADOO_SETTINGS_DIR") is not None or os.environ.get("ZADOO_SETTINGS_PATH") is not None:
+        return
+    legacy = _program_data_dir() / "config.json"
+    if destination.exists() or not legacy.exists():
+        return
+    migration_lock = destination.with_suffix(destination.suffix + ".migration.lock")
+    with _locked_settings_file(migration_lock):
+        if destination.exists():
+            return
+        try:
+            raw = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Unable to migrate legacy Zadoo settings from {legacy}: {exc}") from exc
+        data = normalize_settings(raw)
+        for field in ("access_code", "device_token"):
+            if data[field]:
+                data[field] = _dpapi_encrypt(_dpapi_decrypt(data[field]))
+        data["updated_at"] = time.time()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _secure_settings_path(destination.parent, directory=True)
+        tmp = destination.with_suffix(destination.suffix + ".migration.tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        _secure_settings_path(tmp, directory=False)
+        tmp.replace(destination)
+        _secure_settings_path(destination, directory=False)
+
+
 class SettingsStore:
     def __init__(self, path: Path | None = None):
         self.path = path if path is not None else settings_path()
+        if path is None:
+            _migrate_legacy_settings(self.path)
         self._data: dict[str, Any] | None = None
         self._mtime_ns: int | None = None
         # Re-entrant so a locked atomic_update can call load()/save() (also locked).
@@ -391,23 +499,9 @@ class SettingsStore:
 
     @contextmanager
     def _write_lock(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        with lock_path.open("a+b") as lock_file:
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            try:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            except OSError as exc:
-                raise RuntimeError(f"Unable to lock Zadoo settings at {lock_path}: {exc}") from exc
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        with _locked_settings_file(lock_path):
+            yield
 
     def load(self, *, reload: bool = False) -> dict[str, Any]:
         with self._lock:
@@ -433,9 +527,12 @@ class SettingsStore:
         clean = normalize_settings(data)
         clean["updated_at"] = time.time()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        _secure_settings_path(self.path.parent, directory=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
+        _secure_settings_path(tmp, directory=False)
         tmp.replace(self.path)
+        _secure_settings_path(self.path, directory=False)
         self._data = clean
         self._mtime_ns = self.path.stat().st_mtime_ns
         return copy.deepcopy(clean)

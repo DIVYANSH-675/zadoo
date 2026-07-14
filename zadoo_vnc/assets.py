@@ -1,6 +1,7 @@
 """Template and static asset helpers."""
 from __future__ import annotations
 
+import gzip
 from functools import cache
 from pathlib import Path
 
@@ -19,6 +20,11 @@ def load_template(name: str) -> str:
 
 
 @cache
+def load_template_gzip(name: str) -> bytes:
+    return gzip.compress(load_template(name).encode("utf-8"), compresslevel=6, mtime=0)
+
+
+@cache
 def load_binary(name: str) -> bytes:
     return resource_path(name).read_bytes()
 
@@ -29,3 +35,8 @@ def load_static(name: str) -> bytes:
     if not path.is_file():
         raise FileNotFoundError(f"Static asset not found: {path}")
     return path.read_bytes()
+
+
+@cache
+def load_static_gzip(name: str) -> bytes:
+    return gzip.compress(load_static(name), compresslevel=6, mtime=0)
