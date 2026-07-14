@@ -186,12 +186,17 @@ def assert_imports() -> None:
         fail("Windows build does not enforce both dependency lock files")
     for required_build_marker in (
         "InnoSetupInstallerSha256",
+        '$script:InnoPath = $installedCompiler',
         "release-manifest.json",
         "SHA256SUMS.txt",
         "Write-ReleaseMetadata",
     ):
         if required_build_marker not in build_script:
             fail(f"Windows build is missing release safeguard {required_build_marker}")
+    local_inno = '$env:LOCALAPPDATA\\Programs\\Inno Setup 7\\ISCC.exe'
+    path_inno = '"ISCC.exe"'
+    if build_script.index(local_inno) > build_script.index(path_inno, build_script.index("function Resolve-Inno")):
+        fail("Windows build must prefer the pinned Inno installation over PATH shims")
     documented_env = {
         "EMAIL_TO",
         "HIDE_CONSOLE",

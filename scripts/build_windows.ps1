@@ -90,9 +90,9 @@ function Resolve-Inno {
         $found = (Resolve-Path $InnoPath).Path
     } else {
         $candidates = @(
-            "ISCC.exe",
             "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+            "ISCC.exe"
         )
         $found = Find-Exe $candidates
         if (-not $found) { throw "Inno Setup 7 x64 ISCC.exe was not found. Install it or pass -InnoPath." }
@@ -145,9 +145,13 @@ function Install-ToolsIfRequested {
     $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7"
     & $installer "/VERYSILENT" "/SUPPRESSMSGBOXES" "/NORESTART" "/CURRENTUSER" "/DIR=$installRoot" | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup $InnoSetupVersion installer failed with exit code $LASTEXITCODE." }
-    if (-not (Test-Path -LiteralPath (Join-Path $installRoot "ISCC.exe"))) {
+    $installedCompiler = Join-Path $installRoot "ISCC.exe"
+    if (-not (Test-Path -LiteralPath $installedCompiler)) {
         throw "Inno Setup $InnoSetupVersion installer completed without creating $installRoot\ISCC.exe"
     }
+    # Bind the exact compiler we just authenticated instead of resolving a PATH
+    # shim later. GitHub's hosted image includes a Chocolatey x86 ISCC shim.
+    $script:InnoPath = $installedCompiler
 
     if ($NoSelfSign -or $SignToolPath) { return }
     $expectedSignTool = "$env:ProgramFiles(x86)\Windows Kits\10\bin\$WindowsSdkBinVersion\x64\signtool.exe"
