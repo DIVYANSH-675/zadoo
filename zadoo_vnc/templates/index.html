@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zadoo - Remote Desktop</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/vendor/codemirror-5.65.21.min.css">
-    <script src="/static/vendor/codemirror-5.65.21.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -289,7 +287,7 @@
             background-size: contain;
             background-repeat: no-repeat;
             background-position: center;
-            background-image: url('/trigger-icon.png');
+            background-image: url('/trigger-icon.png?v=7cc869410b1c');
         }
         
         .trigger-button {
@@ -2039,7 +2037,7 @@
             width: 100vw;
             height: 100vh;
             z-index: 9998; /* below #splash-screen (9999), above page content */
-            background-image: url('/splash.png');
+            background-image: url('/splash.png?v=a8ff7f23c7aa');
             background-size: cover;
             background-position: center;
             filter: blur(15px);
@@ -2175,7 +2173,7 @@
     <div class="blurred-background"></div>
     <div id="splash-screen">
         <div class="splash-container">
-            <img src="/splash.png" alt="Authentication">
+            <img src="/splash.png?v=a8ff7f23c7aa" alt="Authentication">
             <form id="auth-form">
                 <input type="text" id="auth-code" placeholder="Enter Code" autocomplete="off" autofocus maxlength="10">
             </form>
@@ -2320,7 +2318,7 @@
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
-                    <img class="sidebar-logo" src="/brand-header.png" alt="Zadoo Remote Control Panel"/>
+                    <img class="sidebar-logo" src="/brand-header.png?v=b0e399b76691" alt="Zadoo Remote Control Panel"/>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
@@ -3210,7 +3208,47 @@
     }
     (function initNotepad(){
         const ta = document.getElementById('notepad-text');
-        let cm = null;
+        let codeMirrorLoadPromise = null;
+        function ensureCodeMirrorLoaded(){
+            if (typeof window.CodeMirror === 'function') return Promise.resolve(window.CodeMirror);
+            if (codeMirrorLoadPromise) return codeMirrorLoadPromise;
+            codeMirrorLoadPromise = new Promise(function(resolve, reject){
+                const stylesheet = document.createElement('link');
+                const script = document.createElement('script');
+                let stylesheetReady = false;
+                let scriptReady = false;
+                let settled = false;
+                function fail(message){
+                    if (settled) return;
+                    settled = true;
+                    codeMirrorLoadPromise = null;
+                    stylesheet.remove();
+                    script.remove();
+                    reject(new Error(message));
+                }
+                function complete(){
+                    if (settled || !stylesheetReady || !scriptReady) return;
+                    if (typeof window.CodeMirror !== 'function') {
+                        fail('Code editor script loaded without exposing CodeMirror');
+                        return;
+                    }
+                    settled = true;
+                    resolve(window.CodeMirror);
+                }
+                stylesheet.id = 'codemirror-stylesheet';
+                stylesheet.rel = 'stylesheet';
+                stylesheet.href = '/static/vendor/codemirror-5.65.21.min.css';
+                stylesheet.onload = function(){ stylesheetReady = true; complete(); };
+                stylesheet.onerror = function(){ fail('Code editor stylesheet failed to load'); };
+                script.id = 'codemirror-script';
+                script.src = '/static/vendor/codemirror-5.65.21.min.js';
+                script.onload = function(){ scriptReady = true; complete(); };
+                script.onerror = function(){ fail('Code editor script failed to load'); };
+                document.head.appendChild(stylesheet);
+                document.head.appendChild(script);
+            });
+            return codeMirrorLoadPromise;
+        }
         if (ta) {
             try { ta.value = localStorage.getItem('notepad_text') || ''; } catch(e) {}
             let timeoutId = null;
@@ -3275,11 +3313,13 @@
                 if (search) search.style.display = 'none';
                 codeDiv.style.display = 'block';
                 ta.style.display = 'none';
-                // Initialize CodeMirror once
-                setTimeout(()=>{
+                const status = document.getElementById('notepad-status');
+                if (status) status.textContent = 'Loading code editor...';
+                ensureCodeMirrorLoaded().then(function(){
+                    if (codeDiv.style.display === 'none') return;
                     try {
                         if (!window.__codeMirror) {
-                            window.__codeMirror = CodeMirror(codeDiv, {
+                            window.__codeMirror = window.CodeMirror(codeDiv, {
                                 value: ta.value || '',
                                 mode: 'python',
                                 theme: 'default',
@@ -3309,8 +3349,16 @@
                             const saved = localStorage.getItem('notepad_code');
                             if (saved && window.__codeMirror) window.__codeMirror.setValue(saved);
                         } catch(e) {}
-                    } catch(e) {}
-                }, 0);
+                        if (status) status.textContent = 'Autosaves locally';
+                    } catch(error) {
+                        throw new Error('Code editor initialization failed: '+error.message);
+                    }
+                }).catch(function(error){
+                    codeDiv.style.display = 'none';
+                    ta.style.display = 'block';
+                    if (status) status.textContent = error.message;
+                    console.error(error.message);
+                });
             } else {
                 // Closing code editor: sync back to textarea
                 try {
@@ -5438,7 +5486,11 @@ registerProcessor('pcm-player', PcmPlayer);
                     if (typeof window.loadPaymentMarket !== 'function') {
                         throw new Error('Payment market initializer is unavailable');
                     }
+                    if (typeof window.startCreditPolling !== 'function') {
+                        throw new Error('Credit polling initializer is unavailable');
+                    }
                     window.loadPaymentMarket();
+                    window.startCreditPolling();
                     closeSplash();
                 }
                 function showAuthError(error){
@@ -5640,10 +5692,15 @@ registerProcessor('pcm-player', PcmPlayer);
             if(!ticker)ticker=setInterval(tick,1000);
             render();
         }
+        let creditPollInterval = null;
         async function poll(){
             try{
                 var response=await fetch("/api/local/credits");
                 var data=await readJsonObject(response,"Credits request");
+                if(response.ok&&data.offline===true&&data.error==="Device not signed in"){
+                    if(badge)badge.textContent="Offline";
+                    return;
+                }
                 if(!response.ok)throw new Error(data.error||"Credits request failed with HTTP "+response.status);
                 if(!data.credits||typeof data.credits.totalMinutesRemaining!=="number"){
                     throw new Error("Credits response is missing totalMinutesRemaining");
@@ -5653,8 +5710,11 @@ registerProcessor('pcm-player', PcmPlayer);
                 console.error("Credit polling failed: "+error.message);
             }
         }
-        poll();
-        setInterval(poll,30000);
+        window.startCreditPolling=function(){
+            if(creditPollInterval!==null)return;
+            poll();
+            creditPollInterval=setInterval(poll,30000);
+        };
         window.initiateTopup=async function(){
             if(ppBtn)ppBtn.disabled=true;
             if(ppSt){ppSt.textContent="";ppSt.className="pp-status";}

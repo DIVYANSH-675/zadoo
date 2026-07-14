@@ -33,6 +33,13 @@ from .settings import ACCESS_CODE_MAX_LENGTH, PERMISSION_KEYS, _clean_http_origi
 
 
 class RoutesMixin:
+    SECURITY_HEADERS = {
+        "Content-Security-Policy": "base-uri 'none'; object-src 'none'; frame-ancestors 'self'",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "SAMEORIGIN",
+    }
     AUTH_COOKIE_NAME = "zadoo_auth"
     CSRF_COOKIE_NAME = "zadoo_csrf"
     AUTH_TTL_SECONDS = 3600
@@ -133,7 +140,12 @@ class RoutesMixin:
     def _response(self, body, content_type, status=http.HTTPStatus.OK, extra_headers=None):
         headers = Headers()
         headers["Content-Type"] = content_type
-        for key, value in (extra_headers or {}).items():
+        extra_headers = extra_headers or {}
+        override_names = {key.lower() for key in extra_headers}
+        for key, value in self.SECURITY_HEADERS.items():
+            if key.lower() not in override_names:
+                headers[key] = value
+        for key, value in extra_headers.items():
             if isinstance(value, (list, tuple)):
                 for item in value:
                     headers[key] = str(item)
@@ -186,7 +198,7 @@ class RoutesMixin:
             return self._response(
                 body,
                 "image/png",
-                extra_headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+                extra_headers={"Cache-Control": "public, max-age=31536000, immutable"},
             )
         except FileNotFoundError:
             return self._plain_response(missing_message, http.HTTPStatus.NOT_FOUND)
@@ -843,6 +855,8 @@ class RoutesMixin:
                     http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
         if route_path == "/api/local/credits":
+            if not self.settings_store.get_device_token():
+                return self._json_response({"success": False, "offline": True, "error": "Device not signed in"})
             return await self._proxy_cloud("GET", "/api/agent/credits", request_headers)
         if route_path == "/api/local/payment-market":
             return self._json_response({"success": True, **self._payment_market_payload(request_headers)})
@@ -978,16 +992,14 @@ class RoutesMixin:
                     max_w=max_w,
                     max_h=max_h,
                 )
-                headers = Headers()
-                headers["Content-Type"] = "image/png" if fmt == 'png' else "image/jpeg"
-                headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
                 ext = "png" if fmt == 'png' else "jpg"
-                headers["Content-Disposition"] = f"attachment; filename=\"snap-{time.strftime('%Y%m%d-%H%M%S')}.{ext}\""
-                return WSResponse(
-                    status_code=int(http.HTTPStatus.OK),
-                    reason_phrase=http.HTTPStatus.OK.phrase,
-                    headers=headers,
-                    body=img_bytes,
+                return self._response(
+                    img_bytes,
+                    "image/png" if fmt == 'png' else "image/jpeg",
+                    extra_headers={
+                        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                        "Content-Disposition": f"attachment; filename=\"snap-{time.strftime('%Y%m%d-%H%M%S')}.{ext}\"",
+                    },
                 )
             except ValueError as exc:
                 return self._plain_response(str(exc), http.HTTPStatus.BAD_REQUEST)

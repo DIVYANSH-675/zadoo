@@ -155,11 +155,72 @@ def assert_imports() -> None:
     from zadoo_vnc.app import require_windows_x64
     from zadoo_vnc.assets import load_binary, load_static, load_template
     from zadoo_vnc.config import env_bool
+    from zadoo_vnc.logging_utils import _BoundedLogFile, _prune_logs
     from zadoo_vnc.saas import ZadooCloudClient
     from zadoo_vnc.server import VNCServer
     from zadoo_vnc.streaming import STREAM_LADDER
 
     require_windows_x64()
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for lock_name, required_packages in {
+        "requirements-runtime.lock": ("pillow==12.3.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
+        "requirements-build.lock": ("pip==26.1.2", "setuptools==83.0.0", "pyinstaller==6.21.0"),
+    }.items():
+        lock_text = (ROOT / lock_name).read_text(encoding="utf-8").lower()
+        if "--hash=sha256:" not in lock_text:
+            fail(f"{lock_name} does not enforce package hashes")
+        for package in required_packages:
+            if package not in lock_text:
+                fail(f"{lock_name} is missing {package}")
+    build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    if build_script.count("--require-hashes") < 2:
+        fail("Windows build does not enforce both dependency lock files")
+    documented_env = {
+        "EMAIL_TO",
+        "HIDE_CONSOLE",
+        "RESEND_API_KEY",
+        "RESEND_FROM",
+        "ZADOO_ACCESS_CODE",
+        "ZADOO_ALLOWED_ORIGINS",
+        "ZADOO_ALLOW_DIRECT_ACCESS",
+        "ZADOO_AUTH_LOCKOUT_SECONDS",
+        "ZADOO_AUTH_MAX_FAILURES",
+        "ZADOO_AUTH_WINDOW_SECONDS",
+        "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
+        "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
+        "ZADOO_CLOUD_API_BASE",
+        "ZADOO_CLOUDFLARED_PATH",
+        "ZADOO_CLOUDFLARED_PROTOCOL",
+        "ZADOO_DISABLE_TUNNEL",
+        "ZADOO_LOG_BACKUP_COUNT",
+        "ZADOO_LOG_LEVEL",
+        "ZADOO_LOG_MAX_BYTES",
+        "ZADOO_LOG_RETENTION_DAYS",
+        "ZADOO_SETTINGS_DIR",
+        "ZADOO_SETTINGS_PATH",
+        "ZADOO_SIGN_PFX_PASSWORD",
+        "ZADOO_STREAM_START_PROFILE",
+        "ZADOO_TARGET_KBPS",
+    }
+    for name in documented_env:
+        if re.search(rf"^#?\s*{name}=", env_example, flags=re.MULTILINE) is None:
+            fail(f".env.example does not document {name}")
+    with tempfile.TemporaryDirectory(prefix="zadoo-log-smoke-") as temp_log_dir:
+        log_dir = Path(temp_log_dir)
+        log_path = log_dir / "zadoo_20260714.log"
+        bounded_log = _BoundedLogFile(log_path, max_bytes=16, backup_count=2)
+        bounded_log.write("first-line\n")
+        bounded_log.write("second-line\n")
+        bounded_log.flush()
+        bounded_log.close()
+        if not log_path.is_file() or not Path(f"{log_path}.1").is_file():
+            fail("bounded log did not rotate at the configured byte limit")
+        old_log = log_dir / "zadoo_20000101.log"
+        old_log.write_text("old", encoding="utf-8")
+        os.utime(old_log, (1, 1))
+        _prune_logs(log_dir, retention_days=1)
+        if old_log.exists():
+            fail("expired log was not pruned")
     settings_override = os.environ["ZADOO_SETTINGS_PATH"]
     os.environ["ZADOO_SETTINGS_PATH"] = ""
     try:
@@ -750,6 +811,23 @@ def assert_imports() -> None:
             )
             if static_response.status_code != 200 or static_response.headers["Cache-Control"] != "public, max-age=31536000, immutable":
                 fail("versioned static asset was not served with immutable caching")
+            expected_security_headers = {
+                "Content-Security-Policy": "base-uri 'none'; object-src 'none'; frame-ancestors 'self'",
+                "Cross-Origin-Resource-Policy": "same-origin",
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "SAMEORIGIN",
+            }
+            for name, expected in expected_security_headers.items():
+                if static_response.headers.get(name) != expected:
+                    fail(f"response security header {name} was missing or invalid")
+            asset_response = await request(server, "/brand-header.png", headers)
+            if asset_response.headers.get("Cache-Control") != "public, max-age=31536000, immutable":
+                fail("content-versioned image was not served with immutable caching")
+            index_template = load_template("index.html")
+            for asset_version in ("b0e399b76691", "a8ff7f23c7aa", "7cc869410b1c"):
+                if f"?v={asset_version}" not in index_template:
+                    fail(f"index template is missing image content version {asset_version}")
             snapshot_prefix_response = await request(server, "/snapshot-extra?fmt=png", headers)
             if snapshot_prefix_response.status_code != 404:
                 fail(f"snapshot prefix route returned {snapshot_prefix_response.status_code}, expected 404")
@@ -786,6 +864,14 @@ def assert_imports() -> None:
             if server._websocket_max_size < minimum_image_frame:
                 fail("websocket frame limit cannot carry the configured clipboard image limit")
             headers["Cookie"] = cookie
+            offline_credits = await request(server, "/api/local/credits", headers)
+            offline_payload = json.loads(offline_credits.body.decode("utf-8"))
+            if offline_credits.status_code != 200 or offline_payload != {
+                "success": False,
+                "offline": True,
+                "error": "Device not signed in",
+            }:
+                fail(f"offline credits returned unexpected response: {offline_credits.status_code} {offline_payload}")
             for path, expected_error in {
                 "/snapshot?fmt=png&fmt=jpeg": "Duplicate snapshot parameters: fmt",
                 "/snapshot?unknown=1": "Unsupported snapshot parameters: unknown",
@@ -1151,6 +1237,22 @@ def assert_imports() -> None:
             image_payload = json.loads(image_ws.sent[-1])
             if image_payload.get("success") is not False or "size limit" not in image_payload.get("error", ""):
                 fail(f"clipboard image limit returned unexpected payload: {image_payload}")
+
+            signature_cases = (
+                ("image/png", b"8BPS\x00\x01", "image data does not match declared MIME type image/png"),
+                ("image/png", b"\xff\xd8\xff\xe0", "image data does not match declared MIME type image/png"),
+                ("image/jpeg", b"\x89PNG\r\n\x1a\n", "image data does not match declared MIME type image/jpeg"),
+            )
+            for mime, payload, expected_error in signature_cases:
+                try:
+                    server._validate_clipboard_image_signature(mime, payload)
+                    fail(f"clipboard image signature accepted invalid {mime} payload")
+                except ValueError as exc:
+                    if str(exc) != expected_error:
+                        fail(f"clipboard image signature returned wrong error: {exc}")
+            server._validate_clipboard_image_signature("image/png", b"\x89PNG\r\n\x1a\n")
+            server._validate_clipboard_image_signature("image/jpeg", b"\xff\xd8\xff\xe0")
+            server._validate_clipboard_image_signature("image/jpg", b"\xff\xd8\xff\xe0")
 
             mic_a, mic_b = object(), object()
             server.mic_clients = {mic_a: queue.Queue(maxsize=5), mic_b: queue.Queue(maxsize=5)}

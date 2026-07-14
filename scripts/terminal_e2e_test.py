@@ -114,26 +114,53 @@ def _run_matrix(label, page, screen, token):
 
 
 def _authenticate_in_browser(page, base: str, code: str):
+    credit_requests = []
+    page.on("request", lambda request: credit_requests.append(request.url) if "/api/local/credits" in request.url else None)
     page.goto(f"{base}/", wait_until="domcontentloaded", timeout=15000)
     page.wait_for_timeout(1200)
+    preauth_count = len(credit_requests)
+    if preauth_count:
+        raise AssertionError(f"credits were requested before authentication: {credit_requests}")
     page.locator("#auth-code").fill(code)
-    page.keyboard.press("Enter")
+    with page.expect_response(lambda response: "/api/local/credits" in response.url, timeout=10000) as credit_response:
+        page.keyboard.press("Enter")
     page.wait_for_function("window.__zadooAuthenticated === true", timeout=10000)
+    credit_status = credit_response.value.status
+    credit_payload = credit_response.value.json()
+    expected_offline = credit_payload == {
+        "success": False,
+        "offline": True,
+        "error": "Device not signed in",
+    }
+    valid_online = credit_payload.get("success") is True and isinstance(credit_payload.get("credits"), dict)
+    ok = preauth_count == 0 and credit_status == 200 and (valid_online or expected_offline)
+    print(
+        f"CREDIT_POLLING: {'PASS' if ok else 'FAIL'} preauth={preauth_count} "
+        f"postauth_status={credit_status} expected_offline={expected_offline}"
+    )
+    return ok
 
 
 def _verify_local_ui_assets(page):
+    lazy_before = page.evaluate(
+        "typeof window.CodeMirror === 'undefined' && "
+        "!performance.getEntriesByType('resource').some(entry => entry.name.includes('codemirror-5.65.21'))"
+    )
+    page.evaluate("openCodeEditor()")
     page.wait_for_function("typeof window.CodeMirror === 'function'", timeout=10000)
+    page.wait_for_function("window.__codeMirror && document.querySelector('#codemirror-stylesheet')", timeout=10000)
     editor_version = page.evaluate("window.CodeMirror.version")
     page.locator("#ppAmountLabel").wait_for(state="visible", timeout=10000)
     page.wait_for_function("!document.querySelector('#ppAmountLabel').textContent.includes('Loading')", timeout=10000)
     image_button = page.locator("#btn-clipboard-image")
     image_input = page.locator("#clipboard-image-input")
     ok = (
-        editor_version == "5.65.21"
+        lazy_before
+        and editor_version == "5.65.21"
         and image_button.is_enabled()
         and image_input.get_attribute("accept") == "image/png,image/jpeg"
     )
-    print(f"LOCAL_UI_ASSETS: {'PASS' if ok else 'FAIL'} CodeMirror={editor_version}")
+    print(f"LOCAL_UI_ASSETS: {'PASS' if ok else 'FAIL'} CodeMirror={editor_version} lazy_before={lazy_before}")
     return ok
 
 
@@ -152,10 +179,16 @@ def main() -> int:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1300, "height": 900})
         external_requests = []
+        browser_errors = []
         context.on("request", lambda request: external_requests.append(request.url) if not request.url.startswith(base) else None)
 
         direct = context.new_page()
-        _authenticate_in_browser(direct, base, args.code)
+        direct.on("pageerror", lambda error: browser_errors.append(f"direct pageerror: {error}"))
+        direct.on(
+            "console",
+            lambda message: browser_errors.append(f"direct console: {message.text}") if message.type == "error" else None,
+        )
+        ok_direct_auth = _authenticate_in_browser(direct, base, args.code)
         ok_ui = _verify_local_ui_assets(direct)
         direct.goto(f"{base}/terminal.html", wait_until="domcontentloaded", timeout=15000)
         direct.wait_for_selector(".xterm-helper-textarea", state="attached", timeout=10000)
@@ -163,7 +196,12 @@ def main() -> int:
         ok_direct = _run_matrix("DIRECT", direct, direct.locator(".xterm-screen"), token)
 
         page = context.new_page()
-        _authenticate_in_browser(page, base, args.code)
+        page.on("pageerror", lambda error: browser_errors.append(f"panel pageerror: {error}"))
+        page.on(
+            "console",
+            lambda message: browser_errors.append(f"panel console: {message.text}") if message.type == "error" else None,
+        )
+        ok_panel_auth = _authenticate_in_browser(page, base, args.code)
         page.evaluate("toggleTerminal()")
         page.wait_for_selector("#terminal-iframe", timeout=10000)
         page.wait_for_timeout(2500)
@@ -173,8 +211,10 @@ def main() -> int:
 
         browser.close()
     ok_local = not external_requests
+    ok_browser = not browser_errors
     print(f"LOCAL_ASSET_REQUESTS: {'PASS' if ok_local else 'FAIL'} external={external_requests}")
-    return 0 if ok_ui and ok_direct and ok_panel and ok_local else 1
+    print(f"BROWSER_ERRORS: {'PASS' if ok_browser else 'FAIL'} errors={browser_errors}")
+    return 0 if ok_direct_auth and ok_panel_auth and ok_ui and ok_direct and ok_panel and ok_local and ok_browser else 1
 
 
 if __name__ == "__main__":

@@ -22,7 +22,8 @@ $CloudflaredVersion = "2026.6.0"
 $CloudflaredSha256 = "03e322598e84d77406fa55b93f59e8e54636c5d8501d9dce36697fcf080ed8cc"
 $PythonVersion = "3.11.9"
 $NodeVersion = "24.18.0"
-$InnoSetupVersion = "7.0.1-beta"
+$InnoSetupVersion = "7.0.2"
+$InnoSetupCompilerSha256 = "0ff6140d641f84b64204a2c4d52207c6fc437c9f4db8779c83083d84f7e3d70d"
 $WindowsSdkVersion = "10.0.26100.7705"
 $WindowsSdkBinVersion = "10.0.26100.0"
 
@@ -58,21 +59,53 @@ function Find-Exe([string[]]$Candidates) {
     return $null
 }
 
+function Assert-Sha256([string]$Path, [string]$Expected, [string]$Label) {
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $Expected.ToLowerInvariant()) {
+        throw "$Label SHA256 mismatch: expected $Expected, got $actual"
+    }
+}
+
+function Get-InnoInstalledVersion([string]$CompilerPath) {
+    $resolvedCompiler = [System.IO.Path]::GetFullPath($CompilerPath)
+    $registryPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    foreach ($entry in Get-ItemProperty -Path $registryPaths -ErrorAction SilentlyContinue) {
+        if ($entry.DisplayName -notlike "Inno Setup*" -or -not $entry.InstallLocation) { continue }
+        $installRoot = [System.IO.Path]::GetFullPath([string]$entry.InstallLocation).TrimEnd("\", "/")
+        if ($resolvedCompiler.StartsWith($installRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [string]$entry.DisplayVersion
+        }
+    }
+    throw "Unable to determine the installed Inno Setup version for $resolvedCompiler"
+}
+
 function Resolve-Inno {
     if ($InnoPath) {
         if (-not (Test-Path -LiteralPath $InnoPath)) { throw "Inno Setup compiler not found: $InnoPath" }
-        $resolved = (Resolve-Path $InnoPath).Path
-        Assert-X64PE $resolved "Inno Setup compiler"
-        return $resolved
+        $found = (Resolve-Path $InnoPath).Path
+    } else {
+        $candidates = @(
+            "ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
+        )
+        $found = Find-Exe $candidates
+        if (-not $found) { throw "Inno Setup 7 x64 ISCC.exe was not found. Install it or pass -InnoPath." }
     }
-    $candidates = @(
-        "ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
-    )
-    $found = Find-Exe $candidates
-    if (-not $found) { throw "Inno Setup 7 x64 ISCC.exe was not found. Install it or pass -InnoPath." }
     Assert-X64PE $found "Inno Setup compiler"
+    Assert-Sha256 $found $InnoSetupCompilerSha256 "Inno Setup $InnoSetupVersion x64 compiler"
+    $version = Get-InnoInstalledVersion $found
+    if ($version -ne $InnoSetupVersion) {
+        throw "Inno Setup $InnoSetupVersion x64 is required; resolved version $version at $found"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $found
+    if ($signature.Status -ne "Valid") {
+        throw "Inno Setup compiler signature check failed for $found ($($signature.Status))."
+    }
     return $found
 }
 
@@ -213,10 +246,19 @@ function Ensure-Venv([string]$PythonExe) {
     if ($venvRuntime -ne "${PythonVersion}:64") {
         throw "Build environment must use Python $PythonVersion x64; found $venvRuntime at $venvPython"
     }
-    & $venvPython -m pip install --no-cache-dir --upgrade "pip==26.1.2" "wheel==0.47.0" | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip/wheel" }
-    & $venvPython -m pip install --no-cache-dir $Root -r (Join-Path $Root "build_requirements.txt") | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Failed to install requirements" }
+    $buildLock = Join-Path $Root "requirements-build.lock"
+    $runtimeLock = Join-Path $Root "requirements-runtime.lock"
+    foreach ($lock in @($buildLock, $runtimeLock)) {
+        if (-not (Test-Path -LiteralPath $lock)) { throw "Dependency lock file not found: $lock" }
+    }
+    & $venvPython -m pip install --no-cache-dir --require-hashes -r $buildLock | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked build requirements" }
+    & $venvPython -m pip install --no-cache-dir --require-hashes -r $runtimeLock | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked runtime requirements" }
+    & $venvPython -m pip install --no-cache-dir --no-deps --no-build-isolation $Root | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install the local Zadoo package" }
+    & $venvPython -m pip check | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Installed dependency set is inconsistent" }
     $sanityImports = "import websockets,mss,PIL,numpy,keyboard,av,sounddevice,soundcard,bettercam,imagecodecs,winpty; import win32api,win32clipboard,win32crypt"
     & $venvPython -c $sanityImports | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Dependency import check failed" }

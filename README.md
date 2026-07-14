@@ -74,13 +74,13 @@ The packaging entrypoint is:
 .\scripts\build_windows.ps1 -NoSelfSign
 ```
 
-The script creates an isolated build environment under `.build_envs\py311-x64`, installs pinned build dependencies, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
+The script creates an isolated build environment under `.build_envs\py311-x64`, installs the fully pinned runtime and build dependency graphs from `requirements-runtime.lock` and `requirements-build.lock` with SHA-256 enforcement, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, verifies the pinned Inno Setup compiler version, SHA-256, architecture, and signature, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
 
 Required local tools:
 
 - Python 3.11.9 x64; pass `-PythonPath` when it cannot be resolved through the x64 `py` launcher or its standard install path.
 - Node.js 24.18.0 x64 for template JavaScript validation; pass `-NodePath` when it is not on `PATH`.
-- Inno Setup 7.0.1-beta x64 for installers.
+- Inno Setup 7.0.2 x64 for installers.
 - Windows SDK 10.0.26100.7705 `signtool.exe` and a PFX for release signing.
 - The repository `app_icon.ico` for the EXE and installer icon.
 
