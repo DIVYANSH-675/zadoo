@@ -2,74 +2,32 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import queue
-import time
 import threading
 import urllib.parse
-from typing import Set
+from contextlib import suppress
 
 import websockets
 
-from .tunnel import CloudflareTunnelManager
-
-
-def _patch_websockets_allow_post() -> None:
-    """websockets only parses GET handshakes and REJECTS request bodies, so every POST
-    API route (runtime/stop, refresh-tunnel, local/topup-*) is dropped before reaching
-    process_request. Patch the HTTP request parser to accept any method and tolerate a
-    body (left in the stream; the connection is closed right after the HTTP response)."""
-    try:
-        from websockets import http11
-    except Exception:
-        return
-    if getattr(http11.Request, "_zadoo_post_patched", False):
-        return
-
-    @classmethod
-    def _lenient_parse(cls, read_line):  # mirrors http11.Request.parse, but lenient
-        try:
-            request_line = yield from http11.parse_line(read_line)
-        except EOFError as exc:
-            raise EOFError("connection closed while reading HTTP request line") from exc
-        try:
-            _method, raw_path, protocol = request_line.split(b" ", 2)
-        except ValueError:
-            raise ValueError(f"invalid HTTP request line: {http11.d(request_line)}") from None
-        if protocol != b"HTTP/1.1":
-            raise ValueError(f"unsupported protocol; expected HTTP/1.1: {http11.d(request_line)}")
-        # Lenient: accept any method (GET/POST/...), unlike upstream which requires GET.
-        path = raw_path.decode("ascii", "surrogateescape")
-        headers = yield from http11.parse_headers(read_line)
-        if "Transfer-Encoding" in headers:
-            raise NotImplementedError("transfer codings aren't supported")
-        # Lenient: tolerate a Content-Length body (upstream raises). The body is NOT
-        # read or attached — websockets' Request has no .body field, so process_request
-        # always sees an empty body. Every POST route therefore takes its data from the
-        # query string (topup-order/verify) or headers (X-Zadoo-Code for stop/refresh);
-        # do NOT add a route that relies on a JSON request body over this server.
-        return cls(path, headers)
-
-    try:
-        http11.Request.parse = _lenient_parse
-        http11.Request._zadoo_post_patched = True
-    except Exception:
-        pass
-
+from .config import env_bool, env_int
 from .input_control import InputControlMixin
-from .logging_utils import _log_fallback
 from .media import MediaMixin
 from .routes import RoutesMixin
-from .settings import get_settings_store
-from .streaming import AdaptiveStreamController, detect_encoder_capabilities
+from .settings import _clean_http_origin, get_settings_store
+from .streaming import AdaptiveStreamController
+from .tunnel import CloudflareTunnelManager
+
 
 class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
 
     def __init__(self, port):
         self.port = port
         self.settings_store = get_settings_store()
-        self.runtime_settings = self.settings_store.load()
         self.tunnel_manager = None
         self.enable_tunnel = True
+        self.tunnel_block_reason = ""
         self.screen_capturer = None
         self.current_quality = 85
         # Do NOT lock quality/full-resolution by default. The lock pins quality=85 -> scale_div=1
@@ -77,96 +35,101 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         # downshifted in resolution and stays flooded. The lock is enabled only when the user
         # explicitly changes quality (see _apply_quality).
         self._quality_locked_by_user = False
-        self.current_fps = 0
-        self.encoder_capabilities = detect_encoder_capabilities()
-        self.adaptive_stream = AdaptiveStreamController(self.encoder_capabilities)
-        if self.adaptive_stream.enabled:
-            startup_profile = self.adaptive_stream.profile
-            self.current_fps = startup_profile.target_fps
-        self.video_clients: Set[websockets.WebSocketServerProtocol] = set()
-        self.audio_clients: Set[websockets.WebSocketServerProtocol] = set()
-        self.mic_clients: Set[websockets.WebSocketServerProtocol] = set()
-        self.input_clients: Set[websockets.WebSocketServerProtocol] = set()
-        self.cursor_subscribers: Set[websockets.WebSocketServerProtocol] = set()
+        self._manual_performance = None
+        self.adaptive_stream = AdaptiveStreamController()
+        self.current_fps = self.adaptive_stream.profile.target_fps
+        self.video_clients: set[websockets.WebSocketServerProtocol] = set()
+        self._media_clients_lock = threading.Lock()
+        self.audio_clients: dict[websockets.WebSocketServerProtocol, queue.Queue] = {}
+        self.mic_clients: dict[websockets.WebSocketServerProtocol, queue.Queue] = {}
+        self.input_clients: set[websockets.WebSocketServerProtocol] = set()
+        self.cursor_subscribers: set[websockets.WebSocketServerProtocol] = set()
         self.cursor_broadcast_enabled = False
-        self.audio_queue = queue.Queue(maxsize=5)   # ~100ms; small so audio stays low-latency (drop-oldest on overload)
+        self._audio_running = False
+        self._audio_thread = None
+        self._audio_stream = None
+        self._audio_stop_evt = None
+        self._audio_sr = 48000
+        self._audio_error = None
         self.stop_event = None
         self.loop = None
         self.frame_ready_event = None
-        self.selected_camera = None
-        self.selected_camera_id = None
-        self.keyboard_hook_active = False
-        self.keystroke_capture_enabled = False
-        self.keyboard_hook = None
-        # Global keyboard hook suppression flag (true only when explicitly enabled)
-        self._global_hook_suppress = False           # default: don't swallow anything
-        self._synth_injecting = False                # guard to bypass suppression when we inject
+        self._alert_hotkeys_active = False
+        self._hk_ids = []
+        self._custom_capture_hotkeys = []
+        self._controller_alert_seq = 0
+        self._alert_preset_cooldowns = {}
         # mic streaming state
         self.mic_running = False
         self.mic_stream = None
-        self.mic_queue = queue.Queue(maxsize=5)   # ~100ms; was 64 (~1.3s) which caused the voice lag
         self.mic_samplerate = 48000
         self.mic_blocksize = 960
-        self.mic_channels = 1
         self.mic_device_id = "default"
-        self.mic_device_name = "System Default"
-        # Typematic repeat state for non-modifier keys
-        self._repeat_keys = {}
+        self.mic_device_name = None
+        self._mic_error = None
         # Alert presets are user-defined. Blank slots are disabled.
         self.alert_presets = {}
         self._load_alert_presets_from_settings()
         # Custom type-to-alert capture state
         self.custom_alert_active = False
         self.custom_alert_buf = []
-        self._blocked_keys_in_capture = set()
-        self._custom_alert_cooldown_until = 0.0
         self.auth_sessions = {}
         self._auth_failures = {}
-        self._runtime_auth_code = ""
-        self._runtime_auth_generated = False
+        self._allow_direct_access = env_bool("ZADOO_ALLOW_DIRECT_ACCESS")
+        try:
+            self._allowed_origins = frozenset(
+                "*" if item == "*" else _clean_http_origin(item, "ZADOO_ALLOWED_ORIGINS entry").lower()
+                for raw in os.getenv("ZADOO_ALLOWED_ORIGINS", "").split(",")
+                if (item := raw.strip())
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid ZADOO_ALLOWED_ORIGINS: {exc}") from exc
+        self._auth_window_seconds = env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
+        self._auth_max_failures = env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
+        self._auth_lockout_seconds = env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
+        self._clipboard_image_max_bytes = env_int(
+            "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES", 5_000_000, 1, 100_000_000
+        )
+        self._clipboard_text_max_bytes = env_int(
+            "ZADOO_CLIPBOARD_TEXT_MAX_BYTES", 1_000_000, 1, 50_000_000
+        )
+        self._websocket_max_size = max(
+            1_048_576,
+            ((self._clipboard_image_max_bytes + 2) // 3) * 4 + 4096,
+            self._clipboard_text_max_bytes * 6 + 4096,
+        )
         self._video_send_tasks = {}
+        self._background_send_tasks = set()
         self._video_skipped_sends = 0
-        self._servers = []
-        self._cloud_heartbeat_active = False
+        self._server = None
+        self.ever_bound = False
+        self._cloud_heartbeat_stop = threading.Event()
+        self._cloud_heartbeat_thread = None
+        self._fatal_error = None
+        self._grace_locks_by_session = {}
         self._hotkey_lock = threading.RLock()
+        self._keyboard_cleanup_registered = False
         self.live_typing_text_by_client = {}
 
     def _load_alert_presets_from_settings(self):
-        try:
-            settings = self.settings_store.load(reload=True)
-            self.runtime_settings = settings
-            presets = {}
-            for code, item in (settings.get("alerts") or {}).items():
-                if not isinstance(item, dict) or not item.get("enabled"):
-                    continue
-                title = str(item.get("title") or "").strip()
-                message = str(item.get("message") or "").strip()
-                if title or message:
-                    presets[str(code).upper()] = (title or "Alert", message)
-            self.alert_presets = presets
-            return presets
-        except Exception:
-            self.alert_presets = {}
-            return {}
-
-    def _settings_configured(self):
-        try:
-            return bool(self.settings_store.configured())
-        except Exception:
-            return False
+        settings = self.settings_store.load(reload=True)
+        presets = {}
+        for code, item in settings["alerts"].items():
+            if not item["enabled"]:
+                continue
+            presets[code] = (item["title"], item["message"])
+        self.alert_presets = presets
+        return presets
 
     async def start_server(self):
         """Start WebSocket servers."""
-        _patch_websockets_allow_post()  # allow POST API routes through the WS HTTP parser
-        # Capture the running event loop for cross-thread broadcasts
-        try:
-            self.loop = asyncio.get_running_loop()
-        except Exception:
-            self.loop = None
+        self.loop = asyncio.get_running_loop()
         self.stop_event = asyncio.Event()
         self.frame_ready_event = asyncio.Event()
-        if self.screen_capturer and hasattr(self.screen_capturer, "set_frame_event"):
-            self.screen_capturer.set_frame_event(self.loop, self.frame_ready_event)
+        self._fatal_error = None
+        if not self.screen_capturer:
+            raise RuntimeError("Screen capturer must be configured before the server starts")
+        self.screen_capturer.set_frame_event(self.loop, self.frame_ready_event)
         self._announce_auth_codes()
 
         # Bind before starting tunnels or background stream tasks, so failed
@@ -177,47 +140,63 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             self.port,
             process_request=self.process_request,
             compression=None,
+            max_size=self._websocket_max_size,
+            max_queue=2,
         )
 
-        servers = [primary_server]
-        self._servers = servers
+        self._server = primary_server
+        self.ever_bound = True
 
-        # Start host hotkey capture on server start (A/B/C/D)
+        async def cleanup(tasks=()):
+            self._cloud_heartbeat_stop.set()
+            self.stop_host_hotkeys()
+            primary_server.close()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await primary_server.wait_closed()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            background_sends = tuple(self._background_send_tasks)
+            for task in background_sends:
+                task.cancel()
+            if background_sends:
+                await asyncio.gather(*background_sends, return_exceptions=True)
+            self._background_send_tasks.clear()
+            heartbeat_thread = self._cloud_heartbeat_thread
+            if heartbeat_thread is not None and heartbeat_thread.is_alive():
+                await asyncio.to_thread(heartbeat_thread.join, 9)
+                if heartbeat_thread.is_alive():
+                    raise RuntimeError("Cloud heartbeat thread did not stop within 9 seconds")
+            self._cloud_heartbeat_thread = None
+            self._server = None
+
         try:
-            hook_started = bool(self.start_global_keyboard_hook())
-        except Exception as e:
-            hook_started = False
-            _log_fallback("host_hotkeys", "poller", str(e), e)
-            print(f" Keyboard hook failed to initialize: {e}")
-        # If hook isn't active, start fallback poller
-        try:
-            if not hook_started or not getattr(self, 'keyboard_hook_active', False) or not getattr(self, '_alert_hotkeys_active', False):
-                _log_fallback("host_hotkeys", "poller", "keyboard_hook_inactive")
-                self.start_host_hotkey_poller()
-                print(" Fallback hotkey poller started (A/B/C/D)")
-            else:
-                print(" Global keyboard hook armed for host alerts (A/B/C/D)")
-        except Exception:
-            pass
+            registered_hotkeys = self.start_host_hotkeys()
+        except Exception as exc:
+            await cleanup()
+            raise RuntimeError(f"Host alert hotkey registration failed: {exc}") from exc
+        print(f" Host alert hotkeys armed: {registered_hotkeys}")
         
-        # Check if screen capturer is working
-        if self.screen_capturer:
-            print(" Screen capturer initialized")
-            # Wait a moment for it to capture first frame
-            await asyncio.sleep(1)
-            if self.screen_capturer.latest_frame_jpeg:
-                print(" Screen capture working - first frame captured")
-            else:
-                print("  Screen capture not producing frames yet")
-        else:
-            print(" Screen capturer not initialized")
+        if not self.screen_capturer.latest_frame_jpeg:
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.frame_ready_event.wait(), timeout=1.0)
+        if not self.screen_capturer.latest_frame_jpeg:
+            error = self.screen_capturer.last_error or "Screen capture produced no frame within one second"
+            await cleanup()
+            raise RuntimeError(error)
+        self.screen_capturer.set_streaming_active(False)
         
         # Start a tunnel only after the server has bound successfully.
-        if self.enable_tunnel:
-            if not self.tunnel_manager:
-                self.tunnel_manager = CloudflareTunnelManager(self.port)
-            threading.Thread(target=self.tunnel_manager.start_primary_tunnel, daemon=True).start()
-        self._start_cloud_heartbeat()
+        try:
+            if self.enable_tunnel:
+                if not self.tunnel_manager:
+                    self.tunnel_manager = CloudflareTunnelManager(self.port)
+                await asyncio.to_thread(self.tunnel_manager.start_primary_tunnel)
+            self._start_cloud_heartbeat()
+        except Exception:
+            await cleanup()
+            raise
                 
         # Start broadcast task for video streaming
         broadcast_task = asyncio.create_task(self.broadcast_frames())
@@ -228,84 +207,62 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         print(f" VNC server running on port: {self.port}")
         print(" Video streaming started")
         
-        # Keep servers running until stop() or task cancellation requests shutdown.
+        stop_wait_task = asyncio.create_task(self.stop_event.wait())
         try:
-            await self.stop_event.wait()
+            done, _ = await asyncio.wait(
+                {stop_wait_task, broadcast_task, cursor_broadcast_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                if task is stop_wait_task:
+                    if self._fatal_error is not None:
+                        raise self._fatal_error
+                    continue
+                task.result()
+                raise RuntimeError("A required media broadcast task stopped unexpectedly")
         finally:
-            try:
-                self._host_hotkey_poller_active = False
-                self._cloud_heartbeat_active = False
-                self.stop_global_keyboard_hook()
-            except Exception:
-                pass
-            for server in servers:
-                try:
-                    server.close()
-                except Exception:
-                    pass
-            for task in (broadcast_task, cursor_broadcast_task):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*(server.wait_closed() for server in servers), return_exceptions=True)
-            await asyncio.gather(broadcast_task, cursor_broadcast_task, return_exceptions=True)
-            self._servers = []
-
-    def set_tunnel_manager(self, tunnel_manager):
-        """Set the tunnel manager for API access"""
-        self.tunnel_manager = tunnel_manager
+            await cleanup((stop_wait_task, broadcast_task, cursor_broadcast_task))
 
     def _start_cloud_heartbeat(self):
-        try:
-            if not self.settings_store.get_device_token():
-                return
-        except Exception:
+        if not self.settings_store.get_device_token():
             return
-        if self._cloud_heartbeat_active:
-            return
-        self._cloud_heartbeat_active = True
+        self._cloud_heartbeat_stop.clear()
+        stop_event = self._cloud_heartbeat_stop
 
         def _loop():
             try:
                 from .saas import ZadooCloudClient
 
                 client = ZadooCloudClient(self.settings_store)
-                seen_url = False
-                while self._cloud_heartbeat_active:
-                    public_url = None
-                    try:
-                        public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
-                    except Exception:
-                        public_url = None
-                    try:
-                        client.heartbeat(public_url)
-                    except Exception:
-                        pass
+                seen_url = not self.enable_tunnel
+                while not stop_event.is_set():
+                    process = self.tunnel_manager.primary_tunnel_process if self.tunnel_manager else None
+                    if process is not None and process.poll() is not None:
+                        raise RuntimeError(f"cloudflared exited with code {process.returncode}")
+                    public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
+                    result = client.heartbeat(public_url)
+                    if not result["success"]:
+                        raise RuntimeError(f"Cloud heartbeat failed: {result['error']}")
                     if public_url:
                         seen_url = True
                     # Heartbeat quickly until the tunnel URL first appears (so the website
                     # link syncs within seconds of startup), then settle to once a minute.
-                    time.sleep(60 if seen_url else 5)
-            finally:
-                self._cloud_heartbeat_active = False
+                    if stop_event.wait(60 if seen_url else 5):
+                        break
+            except Exception as exc:
+                logging.exception("Required cloud heartbeat stopped")
+                self._fatal_error = RuntimeError(str(exc))
+                if self.loop and self.stop_event:
+                    self.loop.call_soon_threadsafe(self.stop_event.set)
 
-        threading.Thread(target=_loop, daemon=True).start()
+        self._cloud_heartbeat_thread = threading.Thread(target=_loop, daemon=True)
+        self._cloud_heartbeat_thread.start()
 
     async def main_handler(self, websocket):
         """Handles incoming connections and routes them (websockets v15 ServerConnection)."""
-        # Support both legacy and v15 APIs
-        path = getattr(websocket, 'path', None)
-        if not isinstance(path, str):
-            try:
-                path = websocket.request.path
-            except Exception:
-                path = '/video'
+        path = websocket.request.path
         route_path = urllib.parse.urlparse(path).path
-        try:
-            request_headers = getattr(getattr(websocket, "request", None), "headers", None)
-            if request_headers is None:
-                request_headers = getattr(websocket, "request_headers", None)
-        except Exception:
-            request_headers = None
+        request_headers = websocket.request.headers
         try:
             if not self._request_origin_allowed(request_headers):
                 await websocket.close(code=1008, reason="Forbidden")
@@ -314,6 +271,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 await websocket.close(code=1008, reason="Forbidden")
                 return
         except Exception:
+            logging.exception("WebSocket authorization failed")
             await websocket.close(code=1008, reason="Forbidden")
             return
         
@@ -325,30 +283,18 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             await self.audio_stream_handler(websocket)
         elif route_path == "/mic":
             await self.mic_stream_handler(websocket, path=path)
-        elif route_path == "/ssh":
+        elif route_path == "/terminal":
             await self.local_shell_ws_handler(websocket)
         elif route_path == "/webcam":
             await self.webcam_stream_handler(websocket)
         else:
-            # Default to video stream handler for compatibility
-            await self.video_stream_handler(websocket)
+            await websocket.close(code=1008, reason=f"Unsupported WebSocket route: {route_path}")
 
     def stop(self):
-        # Release the cached MSS screen-grabber (holds GDI/DC handles on Windows).
-        try:
-            sct = getattr(self, "_snapshot_sct", None)
-            if sct is not None:
-                sct.close()
-                self._snapshot_sct = None
-        except Exception:
-            pass
         if self.loop and self.stop_event is not None:
             def _stop():
                 if self.stop_event is not None:
                     self.stop_event.set()
-                for server in list(getattr(self, "_servers", []) or []):
-                    try:
-                        server.close()
-                    except Exception:
-                        pass
+                if self._server is not None:
+                    self._server.close()
             self.loop.call_soon_threadsafe(_stop)

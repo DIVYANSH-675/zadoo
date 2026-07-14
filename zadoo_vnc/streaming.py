@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
-import platform
-import subprocess
 import time
 from dataclasses import asdict, dataclass
 
-from .logging_utils import _log_fallback
-
-FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+from .config import env_int
 
 
 @dataclass(frozen=True)
@@ -24,106 +21,32 @@ class StreamProfile:
 
 
 STREAM_LADDER = (
-    StreamProfile("1080p240", "Max FPS", 240, 52, 1),
-    StreamProfile("720p240", "Max FPS", 240, 54, 2),
-    StreamProfile("1080p120", "Fast", 120, 65, 1),
-    StreamProfile("900p120", "Fast", 120, 56, 1),
-    StreamProfile("720p120", "Fast", 120, 54, 2),
-    StreamProfile("720p60", "Balanced", 60, 60, 2),
-    StreamProfile("540p60", "Balanced", 60, 52, 2),
-    # Low-bitrate tiers: hold resolution and drop FPS first (text stays legible at ~2 Mbps),
-    # then drop resolution. Research: for screen content, lower FPS beats lower resolution.
-    StreamProfile("540p30", "Balanced", 30, 54, 2),
-    StreamProfile("540p15", "Saving Data", 15, 50, 2),
-    StreamProfile("360p30", "Saving Data", 30, 46, 3),
-    StreamProfile("360p15", "Saving Data", 15, 42, 3),
-    StreamProfile("360p10", "Saving Data", 10, 40, 3),
+    StreamProfile("full-240-q52", "Max FPS", 240, 52, 1),
+    StreamProfile("full-120-q65", "Fast", 120, 65, 1),
+    StreamProfile("full-120-q56", "Fast", 120, 56, 1),
+    StreamProfile("half-240-q54", "Fast", 240, 54, 2),
+    StreamProfile("half-120-q54", "Fast", 120, 54, 2),
+    StreamProfile("half-60-q60", "Balanced", 60, 60, 2),
+    StreamProfile("half-60-q52", "Balanced", 60, 52, 2),
+    StreamProfile("half-30-q54", "Balanced", 30, 54, 2),
+    StreamProfile("half-15-q50", "Saving Data", 15, 50, 2),
+    StreamProfile("third-30-q46", "Saving Data", 30, 46, 3),
+    StreamProfile("third-15-q42", "Saving Data", 15, 42, 3),
+    StreamProfile("third-10-q40", "Saving Data", 10, 40, 3),
 )
-
-
-def _env_enabled(name: str, default: str = "1") -> bool:
-    return str(os.getenv(name, default)).strip().lower() not in FALSE_VALUES
-
-
-def _hidden_creationflags() -> int:
-    if platform.system().lower() != "windows":
-        return 0
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def _detect_gpu_names() -> list[str]:
-    if platform.system().lower() != "windows":
-        return []
-    if not _env_enabled("ZADOO_DETECT_GPU_NAMES", "0"):
-        return []
-    command = (
-        "Get-CimInstance Win32_VideoController | "
-        "ForEach-Object { $_.Name }"
-    )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            creationflags=_hidden_creationflags(),
-        )
-    except Exception:
-        return []
-    names = []
-    for line in (result.stdout or "").splitlines():
-        cleaned = line.strip()
-        if cleaned:
-            names.append(cleaned)
-    return names
-
-
-def detect_encoder_capabilities() -> dict:
-    """Detect likely hardware encoder options without requiring them to work."""
-    gpu_names = _detect_gpu_names()
-    joined = " ".join(gpu_names).lower()
-    has_nvidia = "nvidia" in joined
-    has_intel = "intel" in joined
-    has_amd = any(token in joined for token in ("amd", "radeon", "advanced micro devices"))
-    preferred = "software_jpeg"
-    if has_nvidia:
-        preferred = "nvenc_candidate"
-    elif has_intel:
-        preferred = "quick_sync_candidate"
-    elif has_amd:
-        preferred = "amf_candidate"
-    return {
-        "platform": platform.system() or "unknown",
-        "gpu_names": gpu_names,
-        "nvenc_candidate": has_nvidia,
-        "quick_sync_candidate": has_intel,
-        "amf_candidate": has_amd,
-        "preferred_video_encoder": preferred,
-        "active_encoder_backend": "software_jpeg",
-    }
 
 
 class AdaptiveStreamController:
     """Keeps public-link streaming responsive by adapting bitrate before delay builds."""
 
-    def __init__(self, encoder_capabilities: dict | None = None):
-        self.enabled = _env_enabled("ZADOO_ADAPTIVE_STREAM", "1")
-        self.encoder_capabilities = dict(encoder_capabilities or detect_encoder_capabilities())
-        requested = str(os.getenv("ZADOO_STREAM_MODE", "adaptive_jpeg_ws")).strip().lower()
-        self.requested_transport = requested or "adaptive_jpeg_ws"
-        self.webrtc_configured = False
-        self.transport_mode = "jpeg_ws"
-        self.fallback_reason = ""
-        if self.requested_transport.startswith("webrtc"):
-            self.fallback_reason = "WebRTC transport is not enabled in this build; using adaptive JPEG WebSocket."
-            _log_fallback("streaming.transport", "jpeg_ws", self.fallback_reason)
+    def __init__(self):
+        self.enabled = True
 
         # Start conservative for an UNKNOWN link (safe at ~2 Mbps) and let the controller upshift
         # toward high FPS on fast/local links. Starting near the top of the ladder floods a slow
         # link for several seconds before it can converge down.
-        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "540p60")).strip().lower()
-        default_index = self._index_for_name("540p60", default=6)
-        self.profile_index = self._index_for_name(start_name, default=default_index)
+        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "half-60-q52")).strip().lower()
+        self.profile_index = self._index_for_name(start_name)
         self.last_change_at = 0.0
         self.last_eval_at = 0.0
         self.good_intervals = 0
@@ -142,16 +65,14 @@ class AdaptiveStreamController:
         # Optional hard bandwidth target in kbps (e.g. 2000 for a 2 Mbps link). 0 = disabled, in
         # which case adaptation reacts to latency/backlog only. When set, the controller also
         # downshifts proactively whenever the estimated egress (frame_bytes x fps) exceeds it.
-        try:
-            self._target_kbps = max(0, int(str(os.getenv("ZADOO_TARGET_KBPS", "0")).strip() or "0"))
-        except Exception:
-            self._target_kbps = 0
+        self._target_kbps = env_int("ZADOO_TARGET_KBPS", 0, 0)
 
-    def _index_for_name(self, name: str, default: int = 0) -> int:
+    def _index_for_name(self, name: str) -> int:
         for index, profile in enumerate(STREAM_LADDER):
             if profile.name.lower() == name:
                 return index
-        return max(0, min(len(STREAM_LADDER) - 1, default))
+        choices = ", ".join(profile.name for profile in STREAM_LADDER)
+        raise ValueError(f"Invalid ZADOO_STREAM_START_PROFILE={name!r}; expected one of {choices}")
 
     @property
     def profile(self) -> StreamProfile:
@@ -164,10 +85,10 @@ class AdaptiveStreamController:
             target_fps = max(1, min(target_fps, int(self.measured_fps_cap)))
         self.effective_target_fps = target_fps
         server.current_fps = target_fps
-        capturer = getattr(server, "screen_capturer", None)
-        quality_locked = bool(getattr(server, "_quality_locked_by_user", False))
+        capturer = server.screen_capturer
+        quality_locked = server._quality_locked_by_user
         if quality_locked:
-            quality = int(getattr(server, "current_quality", profile.quality) or profile.quality)
+            quality = server.current_quality
         else:
             quality = int(profile.quality)
             server.current_quality = quality
@@ -180,16 +101,20 @@ class AdaptiveStreamController:
             self.quality_scale_lock = "balanced_resolution"
         else:
             self.quality_scale_lock = "adaptive"
+        manual = server._manual_performance
+        region = "full"
+        rect_norm = None
+        grayscale = bool(profile.grayscale)
+        if manual:
+            region, manual_scale, manual_grayscale, rect_norm = manual
+            scale_div = max(scale_div, manual_scale)
+            grayscale = grayscale or manual_grayscale
         self.effective_scale_div = scale_div
         if capturer is not None:
             capturer.fps = target_fps
             capturer.quality = quality
-            try:
-                capturer.set_performance_mode(scale_div > 1, "full", scale_div)
-                capturer.set_grayscale(bool(profile.grayscale))
-            except Exception:
-                pass
-        signature = (profile.name, target_fps, quality, scale_div, bool(profile.grayscale), quality_locked)
+            capturer.configure_performance(bool(manual) or scale_div > 1, region, scale_div, grayscale, rect_norm)
+        signature = (profile.name, target_fps, quality, scale_div, grayscale, region, quality_locked)
         if signature != self._last_applied_signature:
             logging.getLogger("streaming").info(
                 "Stream profile applied profile=%s target_fps=%s quality=%s scale_div=%s grayscale=%s quality_locked=%s reason=%s",
@@ -197,7 +122,7 @@ class AdaptiveStreamController:
                 target_fps,
                 quality,
                 scale_div,
-                bool(profile.grayscale),
+                grayscale,
                 quality_locked,
                 self.last_reason,
             )
@@ -206,8 +131,7 @@ class AdaptiveStreamController:
 
     def record_client_stats(self, payload: dict) -> None:
         now = time.time()
-        stats = {}
-        for key in (
+        keys = (
             "display_fps",
             "decode_ms",
             "draw_ms",
@@ -215,11 +139,18 @@ class AdaptiveStreamController:
             "dropped_blobs",
             "rtt_ms",
             "receive_delay_ms",
-        ):
+        )
+        stats = {}
+        for key in keys:
             try:
-                value = float(payload.get(key, 0) or 0)
-            except Exception:
-                value = 0.0
+                raw = payload[key]
+                if isinstance(raw, bool):
+                    raise TypeError("boolean is not a number")
+                value = float(raw)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid client stream statistic {key}: {exc}") from exc
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"Client stream statistic {key} must be finite and non-negative")
             stats[key] = value
         self.last_client_stats = stats
         self.last_client_at = now
@@ -233,29 +164,25 @@ class AdaptiveStreamController:
         inflight_sends: int,
         video_clients: int,
         frame_age_ms: float,
-        capture_stats: dict | None = None,
+        capture_stats: dict,
     ) -> bool:
         now = time.time()
-        skipped_delta = max(0, int(skipped_total) - int(self.last_skipped_total))
-        self.last_skipped_total = int(skipped_total)
-        capture_stats = dict(capture_stats or {})
+        skipped_delta = max(0, skipped_total - self.last_skipped_total)
+        self.last_skipped_total = skipped_total
         self.last_server_stats = {
-            "frame_bytes": int(frame_bytes or 0),
-            "max_write_buffer": int(max_write_buffer or 0),
+            "frame_bytes": frame_bytes,
+            "max_write_buffer": max_write_buffer,
             "skipped_delta": skipped_delta,
-            "skipped_total": int(skipped_total or 0),
-            "inflight_sends": int(inflight_sends or 0),
-            "video_clients": int(video_clients or 0),
-            "frame_age_ms": float(frame_age_ms or 0.0),
-            "capture_ms": float(capture_stats.get("last_capture_ms") or 0.0),
-            "encode_ms": float(capture_stats.get("last_encode_ms") or 0.0),
-            "capture_fps": float(capture_stats.get("current_fps") or 0.0),
-            "target_fps": int(capture_stats.get("target_fps") or 0),
-            "quality": int(capture_stats.get("quality") or 0),
-            "scale_div": int(capture_stats.get("perf_scale_div") or 1),
-            "jpeg_encoder": str(capture_stats.get("jpeg_encoder") or "unknown"),
-            "active_method": str(capture_stats.get("active_method") or "unknown"),
-            "dxcam_ring_buffer": bool(capture_stats.get("dxcam_ring_buffer")),
+            "skipped_total": skipped_total,
+            "inflight_sends": inflight_sends,
+            "video_clients": video_clients,
+            "frame_age_ms": frame_age_ms,
+            "capture_ms": float(capture_stats["last_capture_ms"]),
+            "encode_ms": float(capture_stats["last_encode_ms"]),
+            "capture_fps": float(capture_stats["current_fps"]),
+            "target_fps": int(capture_stats["target_fps"]),
+            "quality": int(capture_stats["quality"]),
+            "scale_div": int(capture_stats["perf_scale_div"]),
         }
         if not self.enabled or now - self.last_eval_at < 1.0:
             return False
@@ -272,11 +199,11 @@ class AdaptiveStreamController:
         capture_ms = self.last_server_stats["capture_ms"]
         encode_ms = self.last_server_stats["encode_ms"]
         capture_fps = self.last_server_stats["capture_fps"]
-        quality = int(self.last_server_stats.get("quality") or 0)
+        quality = int(self.last_server_stats["quality"])
         full_resolution_locked = quality >= 85
 
         # Estimated egress for the current send rate (kbps). Used only when a target is configured.
-        frame_bytes = int(self.last_server_stats.get("frame_bytes") or 0)
+        frame_bytes = int(self.last_server_stats["frame_bytes"])
         est_send_kbps = (frame_bytes * max(1, int(self.effective_target_fps)) * 8.0) / 1000.0
         bitrate_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 1.1
         bitrate_far_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 2.0
@@ -289,10 +216,7 @@ class AdaptiveStreamController:
             or (display_fps > 0 and display_fps < target_fps * 0.55)
             or rtt_ms > 350
         )
-        host_slow = (
-            capture_ms + encode_ms > max(10.0, budget_ms * 1.35)
-            or (capture_fps > 0 and capture_fps < target_fps * 0.55)
-        )
+        host_slow = capture_ms + encode_ms > max(10.0, budget_ms * 1.35)
         overloaded = network_backlog or stale_frames or browser_slow or host_slow or bitrate_over
         cap_reason = ""
         desired_cap = int(profile.target_fps)
@@ -408,12 +332,8 @@ class AdaptiveStreamController:
 
     def status(self) -> dict:
         profile = self.profile
-        payload = {
+        return {
             "enabled": self.enabled,
-            "transport_mode": self.transport_mode,
-            "requested_transport": self.requested_transport,
-            "fallback_reason": self.fallback_reason,
-            "webrtc_configured": self.webrtc_configured,
             "profile": asdict(profile),
             "profile_name": profile.name,
             "status": profile.status,
@@ -425,9 +345,7 @@ class AdaptiveStreamController:
             "quality_scale_lock": self.quality_scale_lock,
             "last_reason": self.last_reason,
             "ladder": [asdict(item) for item in STREAM_LADDER],
-            "encoder_capabilities": self.encoder_capabilities,
             "server": dict(self.last_server_stats),
             "client": dict(self.last_client_stats),
             "client_age_ms": max(0, (time.time() - self.last_client_at) * 1000.0) if self.last_client_at else None,
         }
-        return payload

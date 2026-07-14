@@ -2,26 +2,59 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import copy
 import json
+import math
+import msvcrt
 import os
 import secrets
 import sys
 import threading
 import time
+import urllib.parse
+import winreg
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .config import PROJECT_DIR
+import win32crypt
+
+
+def _clean_http_origin(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    clean = value.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(clean)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an HTTP(S) origin without a path query or fragment") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+        or any(char.isspace() for char in clean)
+        or "?" in clean
+        or "#" in clean
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field} must be an HTTP(S) origin without a path query or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError(f"{field} must be an HTTP(S) origin without a path query or fragment")
+    return clean
+
 
 APP_NAME = "Zadoo"
-CONFIG_VERSION = 2
-ACCESS_CODE_ITERATIONS = 260_000
+CONFIG_VERSION = 3
 ACCESS_CODE_MAX_LENGTH = 10
-DEFAULT_ACCESS_CODE = "ZADOO123"
-FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
-DEFAULT_CLOUD_API_BASE = os.getenv("ZADOO_CLOUD_API_BASE", "https://zadoo-web.vercel.app").strip().rstrip("/") or "https://zadoo-web.vercel.app"
+DEFAULT_CLOUD_API_BASE = _clean_http_origin(
+    os.getenv("ZADOO_CLOUD_API_BASE", "https://zadoo-web.vercel.app"),
+    "ZADOO_CLOUD_API_BASE",
+)
 
 PERMISSION_KEYS = (
     "mouse",
@@ -37,26 +70,37 @@ PERMISSION_KEYS = (
     "tunnel_refresh",
     "remote_alerts",
 )
+ALERT_CODES = ("A", "B", "C", "D")
 
 # Default: everything allowed except the shell/terminal (opt-in for safety).
 DEFAULT_PERMISSIONS = {key: (key != "terminal") for key in PERMISSION_KEYS}
 
 
 def _program_data_dir() -> Path:
-    if sys.platform.startswith("win"):
-        base = os.environ.get("ProgramData") or r"C:\ProgramData"
-        return Path(base) / APP_NAME
-    return PROJECT_DIR / ".zadoo"
+    if not sys.platform.startswith("win"):
+        raise RuntimeError(f"Zadoo settings require Windows; current platform is {sys.platform}")
+    program_data = os.environ.get("PROGRAMDATA", "").strip()
+    if not program_data:
+        raise RuntimeError("ProgramData environment variable is not set")
+    return Path(program_data) / APP_NAME
 
 
 def settings_dir() -> Path:
     override = os.environ.get("ZADOO_SETTINGS_DIR")
-    return Path(override).expanduser().resolve() if override else _program_data_dir()
+    if override is None:
+        return _program_data_dir()
+    if not override.strip():
+        raise RuntimeError("ZADOO_SETTINGS_DIR must not be empty")
+    return Path(override).expanduser().resolve()
 
 
 def settings_path() -> Path:
     override = os.environ.get("ZADOO_SETTINGS_PATH")
-    return Path(override).expanduser().resolve() if override else settings_dir() / "config.json"
+    if override is None:
+        return settings_dir() / "config.json"
+    if not override.strip():
+        raise RuntimeError("ZADOO_SETTINGS_PATH must not be empty")
+    return Path(override).expanduser().resolve()
 
 
 # Single source of truth for the agent version reported to the cloud.
@@ -64,39 +108,17 @@ APP_VERSION = "1.0.0"
 
 
 def machine_id() -> str:
-    """Stable per-machine identifier (Windows MachineGuid), with a persisted UUID fallback.
-
-    Used so re-activating the same physical PC reuses one device record instead of
-    creating duplicates.
-    """
-    if sys.platform.startswith("win"):
-        try:
-            import winreg
-
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
-                value, _ = winreg.QueryValueEx(key, "MachineGuid")
-                if str(value or "").strip():
-                    return str(value).strip()
-        except Exception:
-            pass
+    """Return the stable Windows MachineGuid used for device identity."""
+    if not sys.platform.startswith("win"):
+        raise RuntimeError(f"Machine identity requires Windows; current platform is {sys.platform}")
     try:
-        import uuid
-
-        path = settings_dir() / "machine_id"
-        if path.exists():
-            existing = path.read_text(encoding="utf-8").strip()
-            if existing:
-                return existing
-        generated = str(uuid.uuid4())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(generated, encoding="utf-8")
-        return generated
-    except Exception:
-        return ""
-
-
-def _now() -> float:
-    return time.time()
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+            value, _ = winreg.QueryValueEx(key, "MachineGuid")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read Windows MachineGuid: {exc}") from exc
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Windows MachineGuid is empty")
+    return value.strip()
 
 
 def _b64(data: bytes) -> str:
@@ -104,17 +126,15 @@ def _b64(data: bytes) -> str:
 
 
 def _unb64(text: str) -> bytes:
-    return base64.b64decode(str(text or "").encode("ascii"), validate=True)
+    if not isinstance(text, str):
+        raise ValueError("Encrypted setting payload must be text")
+    return base64.b64decode(text.encode("ascii"), validate=True)
 
 
 def _dpapi_encrypt(text: str) -> str:
     if not text:
         return ""
-    if not sys.platform.startswith("win"):
-        return "plain:" + _b64(text.encode("utf-8"))
     try:
-        import win32crypt
-
         encrypted = win32crypt.CryptProtectData(
             text.encode("utf-8"),
             "Zadoo",
@@ -124,384 +144,426 @@ def _dpapi_encrypt(text: str) -> str:
             0x4,  # CRYPTPROTECT_LOCAL_MACHINE
         )
         return "dpapi:" + _b64(encrypted)
-    except Exception:
-        # pywin32 may be absent (e.g. running under a non-bundled system Python) or DPAPI may
-        # be unavailable. Degrade to obfuscated storage so settings still save instead of
-        # crashing the runtime with "DPAPI encryption failed" — _dpapi_decrypt already
-        # understands the "plain:" prefix.
-        try:
-            import logging
-            logging.getLogger(__name__).warning(
-                "DPAPI unavailable; storing value without machine encryption", exc_info=True
-            )
-        except Exception:
-            pass
-        return "plain:" + _b64(text.encode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Windows DPAPI encryption failed: {exc}") from exc
 
 
 def _dpapi_decrypt(value: str) -> str:
-    value = str(value or "")
+    if not isinstance(value, str):
+        raise ValueError("Encrypted setting must be text")
     if not value:
         return ""
-    if value.startswith("plain:"):
-        return _unb64(value[6:]).decode("utf-8", "replace")
     if not value.startswith("dpapi:"):
-        return ""
-    if not sys.platform.startswith("win"):
-        return ""
+        raise ValueError("Encrypted setting must use the dpapi: format")
     try:
-        import win32crypt
-
         decrypted = win32crypt.CryptUnprotectData(_unb64(value[6:]), None, None, None, 0)[1]
-        return decrypted.decode("utf-8", "replace")
-    except Exception:
-        return ""
+        return decrypted.decode("utf-8")
+    except Exception as exc:
+        raise RuntimeError(f"Windows DPAPI decryption failed: {exc}") from exc
 
 
-def hash_access_code(code: str, *, salt: str | None = None) -> dict[str, Any]:
-    clean = str(code or "").strip()
+def _validate_access_code(code: str) -> str:
+    if not isinstance(code, str):
+        raise ValueError("access code must be a string")
+    clean = code.strip()
     if not clean:
         raise ValueError("access code is required")
     if len(clean) > ACCESS_CODE_MAX_LENGTH:
         raise ValueError(f"access code must be {ACCESS_CODE_MAX_LENGTH} characters or fewer")
-    salt = salt or _b64(secrets.token_bytes(16))
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        clean.encode("utf-8"),
-        _unb64(salt),
-        ACCESS_CODE_ITERATIONS,
-    )
-    return {
-        "algorithm": "pbkdf2_sha256",
-        "iterations": ACCESS_CODE_ITERATIONS,
-        "salt": salt,
-        "hash": _b64(digest),
-    }
-
-
-def verify_access_code(code: str, record: dict[str, Any] | None) -> bool:
-    clean = str(code or "").strip()
-    if not clean or not isinstance(record, dict):
-        return False
-    try:
-        iterations = int(record.get("iterations") or ACCESS_CODE_ITERATIONS)
-        salt = str(record.get("salt") or "")
-        expected = str(record.get("hash") or "")
-        actual = hashlib.pbkdf2_hmac("sha256", clean.encode("utf-8"), _unb64(salt), iterations)
-        return hmac.compare_digest(_b64(actual), expected)
-    except Exception:
-        return False
+    return clean
 
 
 def _empty_alerts() -> dict[str, dict[str, Any]]:
     return {
         key: {"title": "", "message": "", "enabled": False}
-        for key in ("A", "B", "C", "D")
+        for key in ALERT_CODES
     }
+
+
+def _nonnegative_int_field(data: dict[str, Any], field: str, context: str) -> int:
+    value = data.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{context} {field} must be a non-negative integer")
+    return value
+
+
+def _clean_entitlement(value: Any, context: str, *, allow_empty: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be an object")
+    if allow_empty and not value:
+        return {}
+    required = {
+        "allowed", "revoked", "reason", "planCode", "includedMinutesRemaining",
+        "walletMinutesRemaining", "concurrencyLimit", "activeSessions", "graceUntil",
+    }
+    unknown = sorted(set(value) - required - {"minutesRemaining"})
+    missing = sorted(required - set(value))
+    if unknown:
+        raise ValueError(f"{context} has unknown fields: {', '.join(unknown)}")
+    if missing:
+        raise ValueError(f"{context} is missing fields: {', '.join(missing)}")
+    for field in ("allowed", "revoked"):
+        if type(value[field]) is not bool:
+            raise ValueError(f"{context} {field} must be a boolean")
+    for field in (
+        "includedMinutesRemaining", "walletMinutesRemaining", "concurrencyLimit", "activeSessions",
+    ):
+        _nonnegative_int_field(value, field, context)
+    if "minutesRemaining" in value:
+        _nonnegative_int_field(value, "minutesRemaining", context)
+    for field in ("reason", "planCode", "graceUntil"):
+        if not isinstance(value[field], (str, type(None))):
+            raise ValueError(f"{context} {field} must be a string or null")
+    if value["revoked"] and not value["reason"]:
+        raise ValueError(f"{context} revoked=true requires reason")
+    return copy.deepcopy(value)
+
+
+def _clean_credits(value: Any, context: str, *, allow_empty: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be an object")
+    if allow_empty and not value:
+        return {}
+    required = {
+        "includedMinutesRemaining", "walletMinutes", "totalMinutesRemaining",
+        "allowed", "reason", "planCode",
+    }
+    unknown = sorted(set(value) - required)
+    missing = sorted(required - set(value))
+    if unknown:
+        raise ValueError(f"{context} has unknown fields: {', '.join(unknown)}")
+    if missing:
+        raise ValueError(f"{context} is missing fields: {', '.join(missing)}")
+    included = _nonnegative_int_field(value, "includedMinutesRemaining", context)
+    wallet = _nonnegative_int_field(value, "walletMinutes", context)
+    total = _nonnegative_int_field(value, "totalMinutesRemaining", context)
+    if total != included + wallet:
+        raise ValueError(f"{context} totalMinutesRemaining does not equal included plus wallet")
+    if type(value["allowed"]) is not bool:
+        raise ValueError(f"{context} allowed must be a boolean")
+    for field in ("reason", "planCode"):
+        if not isinstance(value[field], (str, type(None))):
+            raise ValueError(f"{context} {field} must be a string or null")
+    return copy.deepcopy(value)
+
+
+def _clean_activation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("activation must be an object")
+    if not value:
+        return {}
+    required = {"activation_id", "poll_secret", "code", "connect_url", "expires_at", "created_at"}
+    if set(value) != required:
+        raise ValueError(f"activation must contain exactly: {', '.join(sorted(required))}")
+    for field in required - {"created_at"}:
+        if not isinstance(value[field], str) or not value[field].strip():
+            raise ValueError(f"activation {field} must be a non-empty string")
+    created_at = value["created_at"]
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or not math.isfinite(created_at):
+        raise ValueError("activation created_at must be a finite number")
+    return copy.deepcopy(value)
+
+
+def _machine_name() -> str:
+    name = os.environ.get("COMPUTERNAME", "").strip()
+    if not name:
+        raise RuntimeError("Windows computer name is empty")
+    return name
 
 
 def _default_data() -> dict[str, Any]:
     return {
         "version": CONFIG_VERSION,
         "setup_complete": False,
-        "created_at": _now(),
-        "updated_at": _now(),
-        "env_alerts_imported": False,
-        "access_code": None,
-        "access_code_plain": DEFAULT_ACCESS_CODE,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "access_code": "",
         "email_to": "",
-        "resend_api_key": "",
         "permissions": dict(DEFAULT_PERMISSIONS),
         "alerts": _empty_alerts(),
         "cloud_api_base": DEFAULT_CLOUD_API_BASE,
         "workspace_id": "",
         "device_id": "",
-        "device_name": os.environ.get("COMPUTERNAME", "Windows PC"),
+        "device_name": _machine_name(),
         "device_token": "",
         "activation": {},
         "entitlement_cache": {},
-        "billing_status": {},
         "autostart_enabled": True,
         "show_settings_in_taskbar": False,
         # User profile (fetched from cloud after sign-in)
         "user_name": "",
         "user_email": "",
-        "user_image_url": "",
         # Credits cache (fetched from cloud)
         "credits_cache": {},
-        # Live public URL reported by tunnel
-        "public_url": "",
-        # Session blocked flag (set by heartbeat when credits exhausted)
-        "session_blocked": False,
-        "session_block_reason": "",
     }
 
 
 def _clean_permissions(raw: Any) -> dict[str, bool]:
-    raw = raw if isinstance(raw, dict) else {}
-    return {key: bool(raw.get(key, DEFAULT_PERMISSIONS[key])) for key in PERMISSION_KEYS}
+    if not isinstance(raw, dict):
+        raise ValueError("permissions must be an object")
+    if set(raw) != set(PERMISSION_KEYS):
+        raise ValueError(f"permissions must contain exactly: {', '.join(PERMISSION_KEYS)}")
+    if any(type(raw[key]) is not bool for key in PERMISSION_KEYS):
+        raise ValueError("every permission value must be a boolean")
+    return {key: raw[key] for key in PERMISSION_KEYS}
+
+
+def _clean_alerts(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict) or set(raw) != set(ALERT_CODES):
+        raise ValueError(f"alerts must contain exactly: {', '.join(ALERT_CODES)}")
+    alerts = {}
+    for code in ALERT_CODES:
+        item = raw[code]
+        if not isinstance(item, dict):
+            raise ValueError(f"alert {code} must be an object")
+        if set(item) != {"title", "message", "enabled"}:
+            raise ValueError(f"alert {code} must contain title, message, and enabled")
+        if not isinstance(item["title"], str) or not isinstance(item["message"], str):
+            raise ValueError(f"alert {code} title and message must be strings")
+        if type(item["enabled"]) is not bool:
+            raise ValueError(f"alert {code} enabled must be a boolean")
+        title = item["title"].strip()
+        message = item["message"].strip()
+        if item["enabled"] and not (title or message):
+            raise ValueError(f"enabled alert {code} must have a title or message")
+        alerts[code] = {"title": title, "message": message, "enabled": item["enabled"]}
+    return alerts
 
 
 def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
     base = _default_data()
-    raw_data = data if isinstance(data, dict) else {}
-    if isinstance(data, dict):
-        for key in list(base.keys()):
-            if key in data:
-                base[key] = data[key]
-    base["version"] = CONFIG_VERSION
-    base["setup_complete"] = bool(base.get("setup_complete", False))
-    base["access_code_plain"] = (str(base.get("access_code_plain") or "").strip() or DEFAULT_ACCESS_CODE)[:ACCESS_CODE_MAX_LENGTH]
-    base["cloud_api_base"] = str(base.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).strip().rstrip("/")
-    base["workspace_id"] = str(base.get("workspace_id") or "").strip()
-    base["device_id"] = str(base.get("device_id") or "").strip()
-    base["device_name"] = str(base.get("device_name") or os.environ.get("COMPUTERNAME", "Windows PC")).strip()[:80]
-    base["activation"] = base.get("activation") if isinstance(base.get("activation"), dict) else {}
-    base["entitlement_cache"] = base.get("entitlement_cache") if isinstance(base.get("entitlement_cache"), dict) else {}
-    base["billing_status"] = base.get("billing_status") if isinstance(base.get("billing_status"), dict) else {}
-    base["autostart_enabled"] = bool(base.get("autostart_enabled", True))
-    base["show_settings_in_taskbar"] = bool(base.get("show_settings_in_taskbar", False))
-    # New profile / credits / session fields
-    base["user_name"] = str(base.get("user_name") or "").strip()
-    base["user_email"] = str(base.get("user_email") or "").strip()
-    base["user_image_url"] = str(base.get("user_image_url") or "").strip()
-    base["credits_cache"] = base.get("credits_cache") if isinstance(base.get("credits_cache"), dict) else {}
-    base["public_url"] = str(base.get("public_url") or "").strip()
-    base["session_blocked"] = bool(base.get("session_blocked", False))
-    base["session_block_reason"] = str(base.get("session_block_reason") or "").strip()
-    permissions_source = raw_data.get("permissions") if "permissions" in raw_data else None
-    base["permissions"] = _clean_permissions(permissions_source)
-    alerts = _empty_alerts()
-    for key, item in (base.get("alerts") or {}).items():
-        code = str(key or "").upper()
-        if code not in alerts or not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
-        message = str(item.get("message") or "").strip()
-        alerts[code] = {
-            "title": title,
-            "message": message,
-            "enabled": bool(item.get("enabled", bool(title or message))) and bool(title or message),
-        }
-    base["alerts"] = alerts
+    if data is not None:
+        if not isinstance(data, dict):
+            raise ValueError("Zadoo settings must be a JSON object")
+        expected = set(base)
+        unknown = sorted(set(data) - expected)
+        missing = sorted(expected - set(data))
+        if unknown:
+            raise ValueError(f"Unknown Zadoo settings: {', '.join(unknown)}")
+        if missing:
+            raise ValueError(f"Missing Zadoo settings: {', '.join(missing)}")
+        if data.get("version") != CONFIG_VERSION:
+            raise ValueError(f"Zadoo settings version must be {CONFIG_VERSION}")
+        base.update(data)
+    for key in ("setup_complete", "autostart_enabled", "show_settings_in_taskbar"):
+        if type(base[key]) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+    for key in (
+        "access_code", "email_to", "cloud_api_base", "workspace_id", "device_id",
+        "device_name", "device_token", "user_name", "user_email",
+    ):
+        if not isinstance(base[key], str):
+            raise ValueError(f"{key} must be a string")
+        base[key] = base[key].strip()
+    base["cloud_api_base"] = _clean_http_origin(base["cloud_api_base"], "cloud_api_base")
+    if len(base["device_name"]) > 80:
+        raise ValueError("device_name must be 80 characters or fewer")
+    if not base["device_name"]:
+        raise ValueError("device_name is required")
+    if base["setup_complete"] and not base["access_code"]:
+        raise ValueError("configured settings require an access code")
+    base["activation"] = _clean_activation(base["activation"])
+    base["entitlement_cache"] = _clean_entitlement(
+        base["entitlement_cache"], "entitlement_cache", allow_empty=True
+    )
+    base["credits_cache"] = _clean_credits(base["credits_cache"], "credits_cache", allow_empty=True)
+    for key in ("created_at", "updated_at"):
+        if (
+            isinstance(base[key], bool)
+            or not isinstance(base[key], (int, float))
+            or not math.isfinite(base[key])
+        ):
+            raise ValueError(f"{key} must be a number")
+    base["permissions"] = _clean_permissions(base["permissions"])
+    base["alerts"] = _clean_alerts(base["alerts"])
     return base
 
 
 class SettingsStore:
     def __init__(self, path: Path | None = None):
-        self.path = path or settings_path()
+        self.path = path if path is not None else settings_path()
         self._data: dict[str, Any] | None = None
         self._mtime_ns: int | None = None
         # Re-entrant so a locked atomic_update can call load()/save() (also locked).
         self._lock = threading.RLock()
 
+    @contextmanager
+    def _write_lock(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise RuntimeError(f"Unable to lock Zadoo settings at {lock_path}: {exc}") from exc
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
     def load(self, *, reload: bool = False) -> dict[str, Any]:
         with self._lock:
             try:
                 mtime_ns = self.path.stat().st_mtime_ns
-            except Exception:
+            except FileNotFoundError:
                 mtime_ns = None
             if self._data is not None and not reload and mtime_ns == self._mtime_ns:
-                return self._data
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except Exception:
+                return copy.deepcopy(self._data)
+            if self.path.exists():
+                try:
+                    raw = json.loads(self.path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(f"Unable to load Zadoo settings from {self.path}: {exc}") from exc
+            else:
                 raw = None
             data = normalize_settings(raw)
             self._data = data
             self._mtime_ns = mtime_ns
-            if not data.get("env_alerts_imported"):
-                self.import_env_alerts(save=False)
-            return self._data
+            return copy.deepcopy(self._data)
 
-    def save(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            clean = normalize_settings(data if data is not None else self.load())
-            clean["updated_at"] = _now()
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
-            tmp.replace(self.path)
-            self._data = clean
-            try:
-                self._mtime_ns = self.path.stat().st_mtime_ns
-            except Exception:
-                self._mtime_ns = None
-            return clean
+    def _save_unlocked(self, data: dict[str, Any]) -> dict[str, Any]:
+        clean = normalize_settings(data)
+        clean["updated_at"] = time.time()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(clean, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self.path)
+        self._data = clean
+        self._mtime_ns = self.path.stat().st_mtime_ns
+        return copy.deepcopy(clean)
+
+    def save(self, data: dict[str, Any]) -> dict[str, Any]:
+        with self._lock, self._write_lock():
+            return self._save_unlocked(data)
 
     def atomic_update(self, mutator) -> dict[str, Any]:
-        """Thread-safe load -> mutate -> save. Prevents lost updates when the device
-        heartbeat and the per-session heartbeat write the settings file concurrently
-        (e.g. one clearing session_blocked while the other re-writes a stale snapshot).
-        The lock is held only around the in-memory mutate + disk write, never network I/O."""
-        with self._lock:
+        """Cross-process locked load -> mutate -> atomic replace."""
+        with self._lock, self._write_lock():
             data = self.load(reload=True)
-            result = mutator(data)
-            if isinstance(result, dict):
-                data = result
-            return self.save(data)
+            mutator(data)
+            return self._save_unlocked(data)
 
     def configured(self) -> bool:
-        return bool(self.load().get("setup_complete"))
+        return self.load()["setup_complete"]
 
-    def import_env_alerts(self, *, save: bool = True) -> dict[str, Any]:
-        data = self.load()
-        if data.get("env_alerts_imported"):
-            return data
-        changed = False
-        for key in ("A", "B", "C", "D"):
-            combined = os.getenv(f"ALERT_{key}")
-            title = os.getenv(f"ALERT_{key}_TITLE")
-            message = os.getenv(f"ALERT_{key}_MESSAGE")
-            if (not title and not message) and combined:
-                sep = "|" if "|" in combined else "::" if "::" in combined else None
-                if sep:
-                    title, message = combined.split(sep, 1)
-                else:
-                    title, message = combined, ""
-            title = str(title or "").strip()
-            message = str(message or "").strip()
-            if title or message:
-                data["alerts"][key] = {"title": title, "message": message, "enabled": True}
-                changed = True
-        data["env_alerts_imported"] = True
-        if save and changed:
-            self.save(data)
-        return data
-
-    def set_access_code(self, code: str) -> None:
-        data = self.load()
-        clean = str(code or "").strip()
-        data["access_code_plain"] = clean[:ACCESS_CODE_MAX_LENGTH]
-        data["access_code"] = hash_access_code(clean)
-        self.save(data)
+    def get_access_code(self) -> str:
+        return _dpapi_decrypt(self.load()["access_code"])
 
     def verify_access_code(self, code: str) -> bool:
-        clean = str(code or "").strip()
-        data = self.load()
-        plain = str(data.get("access_code_plain") or "").strip()
-        if plain:
-            return bool(clean) and secrets.compare_digest(clean, plain)
-        return verify_access_code(clean, data.get("access_code"))
-
-    def set_resend_api_key(self, api_key: str) -> None:
-        data = self.load()
-        data["resend_api_key"] = _dpapi_encrypt(str(api_key or "").strip())
-        self.save(data)
-
-    def get_resend_api_key(self) -> str:
-        return _dpapi_decrypt(str(self.load().get("resend_api_key") or ""))
-
-    def set_device_token(self, token: str) -> None:
-        data = self.load()
-        data["device_token"] = _dpapi_encrypt(str(token or "").strip())
-        self.save(data)
+        if not isinstance(code, str):
+            raise ValueError("access code must be a string")
+        clean = code.strip()
+        expected = self.get_access_code()
+        return bool(clean and expected) and secrets.compare_digest(clean, expected)
 
     def get_device_token(self) -> str:
-        return _dpapi_decrypt(str(self.load().get("device_token") or ""))
+        return _dpapi_decrypt(self.load()["device_token"])
 
-    def clear_device_token(self) -> None:
-        data = self.load()
-        data["device_token"] = ""
-        data["workspace_id"] = ""
-        data["device_id"] = ""
-        data["entitlement_cache"] = {}
-        data["billing_status"] = {}
-        self.save(data)
+    def clear_account(self) -> None:
+        def _clear(data):
+            for key in ("device_token", "workspace_id", "device_id", "user_name", "user_email"):
+                data[key] = ""
+            for key in ("activation", "entitlement_cache", "credits_cache"):
+                data[key] = {}
+        self.atomic_update(_clear)
 
     def update_cloud_status(self, payload: dict[str, Any]) -> dict[str, Any]:
-        data = self.load()
-        for key in ("workspace_id", "device_id", "device_name", "cloud_api_base"):
+        if not isinstance(payload, dict):
+            raise ValueError("cloud status payload must be an object")
+        allowed = {"workspace_id", "device_id", "device_name", "device_token", "activation"}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(f"Unknown cloud status fields: {', '.join(unknown)}")
+        values = {}
+        for key in ("workspace_id", "device_id", "device_name"):
             if key in payload:
-                data[key] = str(payload.get(key) or "").strip()
-        if payload.get("device_token"):
-            data["device_token"] = _dpapi_encrypt(str(payload.get("device_token") or "").strip())
-        if isinstance(payload.get("activation"), dict):
-            data["activation"] = payload["activation"]
-        if isinstance(payload.get("entitlement_cache"), dict):
-            data["entitlement_cache"] = payload["entitlement_cache"]
-        if isinstance(payload.get("billing_status"), dict):
-            data["billing_status"] = payload["billing_status"]
-        return self.save(data)
+                if not isinstance(payload[key], str):
+                    raise ValueError(f"{key} must be a string")
+                values[key] = payload[key].strip()
+        if "device_token" in payload:
+            if not isinstance(payload["device_token"], str) or not payload["device_token"].strip():
+                raise ValueError("device_token must be a non-empty string")
+            values["device_token"] = _dpapi_encrypt(payload["device_token"].strip())
+        if "activation" in payload:
+            if not isinstance(payload["activation"], dict):
+                raise ValueError("activation must be an object")
+            values["activation"] = copy.deepcopy(payload["activation"])
+        return self.atomic_update(lambda data: data.update(values))
 
-    def public_view(self, *, include_secret: bool = False) -> dict[str, Any]:
+    def owner_view(self) -> dict[str, Any]:
         data = self.load()
-        view = {
-            "setup_complete": bool(data.get("setup_complete")),
-            "access_code": data.get("access_code_plain") or "",
-            "email_to": data.get("email_to") or "",
-            "has_resend_api_key": bool(self.get_resend_api_key()),
-            "permissions": data.get("permissions") or dict(DEFAULT_PERMISSIONS),
-            "alerts": data.get("alerts") or _empty_alerts(),
+        return {
+            "setup_complete": data["setup_complete"],
+            "access_code": _dpapi_decrypt(data["access_code"]),
+            "email_to": data["email_to"],
+            "permissions": data["permissions"],
+            "alerts": data["alerts"],
             "cloud": {
-                "cloud_api_base": data.get("cloud_api_base") or "",
-                "workspace_id": data.get("workspace_id") or "",
-                "device_id": data.get("device_id") or "",
-                "device_name": data.get("device_name") or "",
-                "has_device_token": bool(self.get_device_token()),
-                "activation": data.get("activation") or {},
-                "entitlement_cache": data.get("entitlement_cache") or {},
-                "billing_status": data.get("billing_status") or {},
-                "autostart_enabled": bool(data.get("autostart_enabled", True)),
-                "show_settings_in_taskbar": bool(data.get("show_settings_in_taskbar", False)),
+                "cloud_api_base": data["cloud_api_base"],
+                "workspace_id": data["workspace_id"],
+                "device_id": data["device_id"],
+                "device_name": data["device_name"],
+                "has_device_token": bool(_dpapi_decrypt(data["device_token"])),
+                "activation": data["activation"],
+                "entitlement_cache": data["entitlement_cache"],
+                "autostart_enabled": data["autostart_enabled"],
+                "show_settings_in_taskbar": data["show_settings_in_taskbar"],
             },
         }
-        if include_secret:
-            view["resend_api_key"] = self.get_resend_api_key()
-            view["device_token"] = self.get_device_token()
-        return view
 
     def apply_setup(self, payload: dict[str, Any], *, require_code: str | None = None) -> dict[str, Any]:
-        data = self.load()
-        if data.get("setup_complete") and not self.verify_access_code(str(require_code or "")):
-            raise PermissionError("Invalid access code")
-        new_code = str(payload.get("access_code") or "").strip()
-        if new_code:
-            if len(new_code) > ACCESS_CODE_MAX_LENGTH:
-                raise ValueError(f"access code must be {ACCESS_CODE_MAX_LENGTH} characters or fewer")
-            data["access_code_plain"] = new_code
-            data["access_code"] = hash_access_code(new_code)
-        elif not data.get("access_code") and not data.get("access_code_plain"):
-            raise ValueError("access code is required")
-
+        if not isinstance(payload, dict):
+            raise ValueError("setup payload must be an object")
+        allowed = {
+            "access_code", "email_to", "alerts", "permissions", "device_name",
+            "autostart_enabled", "show_settings_in_taskbar",
+        }
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValueError(f"Unknown setup fields: {', '.join(unknown)}")
+        raw_code = payload.get("access_code", "")
+        if not isinstance(raw_code, str):
+            raise ValueError("access_code must be a string")
+        new_code = raw_code.strip()
+        encrypted_code = _dpapi_encrypt(_validate_access_code(new_code)) if new_code else ""
+        values = {}
         if "email_to" in payload:
-            data["email_to"] = str(payload.get("email_to") or "").strip()
-        if bool(payload.get("clear_resend_api_key", False)):
-            data["resend_api_key"] = ""
-        elif "resend_api_key" in payload:
-            api_key = str(payload.get("resend_api_key") or "").strip()
-            if api_key:
-                data["resend_api_key"] = _dpapi_encrypt(api_key)
-
-        alerts = _empty_alerts()
-        for key, item in (payload.get("alerts") or {}).items():
-            code = str(key or "").upper()
-            if code not in alerts or not isinstance(item, dict):
-                continue
-            title = str(item.get("title") or "").strip()
-            message = str(item.get("message") or "").strip()
-            alerts[code] = {"title": title, "message": message, "enabled": bool(item.get("enabled", bool(title or message))) and bool(title or message)}
-        data["alerts"] = alerts
+            if not isinstance(payload["email_to"], str):
+                raise ValueError("email_to must be a string")
+            values["email_to"] = payload["email_to"].strip()
+        if "alerts" in payload:
+            values["alerts"] = _clean_alerts(payload["alerts"])
         if "permissions" in payload:
-            data["permissions"] = _clean_permissions(payload.get("permissions"))
-        for key in ("cloud_api_base", "workspace_id", "device_id", "device_name"):
+            values["permissions"] = _clean_permissions(payload["permissions"])
+        if "device_name" in payload:
+            if not isinstance(payload["device_name"], str):
+                raise ValueError("device_name must be a string")
+            values["device_name"] = payload["device_name"].strip()
+        for key in ("autostart_enabled", "show_settings_in_taskbar"):
             if key in payload:
-                data[key] = str(payload.get(key) or "").strip()
-        if "device_token" in payload:
-            token = str(payload.get("device_token") or "").strip()
-            if token:
-                data["device_token"] = _dpapi_encrypt(token)
-        if bool(payload.get("clear_device_token", False)):
-            data["device_token"] = ""
-        for key in ("activation", "entitlement_cache", "billing_status"):
-            if isinstance(payload.get(key), dict):
-                data[key] = payload[key]
-        if "autostart_enabled" in payload:
-            data["autostart_enabled"] = bool(payload.get("autostart_enabled"))
-        if "show_settings_in_taskbar" in payload:
-            data["show_settings_in_taskbar"] = bool(payload.get("show_settings_in_taskbar"))
-        data["setup_complete"] = True
-        return self.save(data)
+                if type(payload[key]) is not bool:
+                    raise ValueError(f"{key} must be a boolean")
+                values[key] = payload[key]
+
+        def _apply(data):
+            if data["setup_complete"] and (
+                not isinstance(require_code, str) or not self.verify_access_code(require_code)
+            ):
+                raise PermissionError("Invalid access code")
+            if encrypted_code:
+                data["access_code"] = encrypted_code
+            elif not data["access_code"]:
+                raise ValueError("access code is required")
+            data.update(values)
+            data["setup_complete"] = True
+
+        return self.atomic_update(_apply)
 
 
 _STORE: SettingsStore | None = None

@@ -1,28 +1,28 @@
 # Zadoo
 
-Zadoo is a Windows-focused remote screen, input, clipboard, media, terminal, alert, and Cloudflare tunnel runtime. The source package remains `zadoo_vnc`; the compatibility entrypoint is `zadoo_vnc_single.py`.
+Zadoo is a Windows x64 remote screen, input, clipboard, media, terminal, alert, and Cloudflare tunnel runtime.
 
 ## Setup
 
-Use Python 3.11 on Windows.
+Use Python 3.11.9 on Windows.
 
 ```powershell
-python -m pip install -r requirements.txt
-```
-
-Optional feature groups are defined in `pyproject.toml`:
-
-```powershell
-python -m pip install -e .[media,email,perf,ssh]
+python -m pip install -e .
 ```
 
 ## Run
 
 ```powershell
-python zadoo_vnc_single.py
+python -m zadoo_vnc
 ```
 
-The app starts a local web UI on the fixed port `6173`. Installed builds open the small native `Zadoo Settings` window on first launch; create one visible access code, at most 10 characters, and choose the permissions that code is allowed to use. The Cloudflare tunnel stays disabled until setup is complete.
+Open the native Settings window first, sign in, create one visible access code of at most 10 characters, and choose its permissions:
+
+```powershell
+python -m zadoo_vnc --settings
+```
+
+Running without arguments then starts the host runtime on fixed port `6173`. For local source testing without SaaS/tunnel access, explicitly set `ZADOO_DISABLE_TUNNEL=1` and `ZADOO_ACCESS_CODE`.
 
 ## Configuration
 
@@ -32,35 +32,35 @@ Installed builds store user settings in:
 %ProgramData%\Zadoo\config.json
 ```
 
-Settings include the access-code hash, Resend API key encrypted with Windows DPAPI, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
+Settings include the DPAPI-encrypted access code, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
 
-- One access code is used for all sessions. It is limited to 10 characters, and the old value is never revealed.
+- One access code is used for all sessions. It is limited to 10 characters and is visible only in the local Settings window.
 - Permissions control mouse, keyboard, clipboard pull, clipboard push, system audio, mic, camera, terminal, snapshots, advanced video controls, tunnel refresh, and remote alerts.
 - Alert A-D slots have no defaults. Blank slots are disabled.
-- The Resend area shows `Email not Set` until both the API key and recipient email are configured.
+- Email notification requires `RESEND_API_KEY`, `RESEND_FROM`, and a recipient set through `Email To` or `EMAIL_TO`; status names any missing field.
 - The Settings window can start and stop the runtime, start device activation with the hosted SaaS, refresh entitlement, toggle autostart, and choose whether minimized Settings remains visible on the taskbar.
 
-`.env.example` is now for development/test fallback only. User-facing configuration should be done from the native Zadoo Settings window.
+`.env.example` documents source-development overrides only. User-facing configuration belongs in the native Zadoo Settings window.
 
 ## Hosted SaaS
 
-The hosted billing and dashboard app lives in `web/`.
+The hosted billing and dashboard app lives in the separate `zadoo-web` repository.
 
 ```powershell
-cd web
+cd ..\zadoo-web
 npm install
 npm run prisma:generate
 npm run prisma:migrate
 npm run dev
 ```
 
-It includes an original Zadoo website, pricing, Auth.js Google/email OTP login, dashboard, device activation, billing history, Razorpay checkout, signed webhooks, entitlement APIs, and agent session usage endpoints. Configure `web\.env.local` from `web\.env.example` with Postgres, Auth.js, Razorpay, and email provider credentials.
+It includes an original Zadoo website, pricing, Auth.js Google/email OTP login, dashboard, device activation, billing history, Razorpay checkout, signed webhooks, entitlement APIs, and agent session usage endpoints. Configure that repository from its own environment example with Postgres, Auth.js, Razorpay, and email provider credentials.
 
 ## Screen Sharing Performance
 
-Live screen sharing uses one explicit capture backend at a time. The UI lets the user switch directly between BetterCam and DXCam, and BetterCam is chosen by default when available to avoid DXGI device conflicts between the two libraries. Set `ZADOO_CAPTURE_METHOD=dxcam` on hosts where DXCam is known to be stable. DXCam `0.3.0` is driven through its ring-buffer API, `start(region, target_fps, video_mode)` plus `get_latest_frame()`, because that is the high-throughput path. This installed DXCam API does not expose the researched `processor_backend="cv2"` argument.
+Live screen sharing uses BetterCam desktop duplication directly. MSS provides the one initial frame; afterward unchanged desktops are neither re-encoded nor retransmitted.
 
-Install `imagecodecs` with the requirements file so JPEG encoding uses the fast path. The stream starts at the bandwidth-safe `540p60` profile, and the adaptive controller raises or lowers both resolution and FPS to fit the link: it upshifts toward high FPS on fast/local connections and downshifts resolution first (then FPS) on slow links so text stays legible. Quality and scaling adapt automatically unless the user manually changes the quality slider (which pins quality and disables resolution adaptation for that session). For maximum FPS on a fast local network, set `ZADOO_STREAM_START_PROFILE=720p240` or `1080p240`. For a known slow link, set `ZADOO_TARGET_KBPS` (for example `2000` for a 2 Mbps line) so the controller proactively caps egress instead of waiting for queues to back up.
+The required `imagecodecs` dependency performs JPEG encoding. The stream starts at `half-60-q52` (half-size, 60 FPS, JPEG quality 52), and the always-on adaptive controller adjusts scale, quality, and FPS to fit the host, browser, and link. A manual quality selection pins quality for that session. For maximum FPS on a fast local network, set `ZADOO_STREAM_START_PROFILE=full-240-q52` or `half-240-q54`. For a known slow link, set `ZADOO_TARGET_KBPS` (for example `2000` for a 2 Mbps line).
 
 No API keys or access codes are intentionally bundled. If a previous key or code was exposed in source or logs, rotate it before using public links.
 
@@ -69,33 +69,37 @@ No API keys or access codes are intentionally bundled. If a previous key or code
 The packaging entrypoint is:
 
 ```powershell
-.\scripts\build_windows.ps1 -Arch x64
-.\scripts\build_windows.ps1 -Arch All -PfxPath C:\path\codesign.pfx
+.\scripts\build_windows.ps1
+.\scripts\build_windows.ps1 -PfxPath C:\path\codesign.pfx
+.\scripts\build_windows.ps1 -NoSelfSign
 ```
 
-The script creates isolated build environments under `.build_envs\py311-x64` and `.build_envs\py311-x86`, installs `requirements.txt` for x64 or `requirements-x86.txt` for x86 plus `build_requirements.txt`, validates imports, bundles the matching signed `cloudflared.exe`, builds a PyInstaller one-folder app for the installer, builds portable one-file EXEs, signs the EXEs/installers, and compiles Inno Setup installers.
+The script creates an isolated build environment under `.build_envs\py311-x64`, installs pinned build dependencies, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
 
 Required local tools:
 
-- Python 3.11 x64 for x64 builds.
-- Python 3.11 x86 for x86 builds.
-- Inno Setup 6 for installers.
-- Windows SDK `signtool.exe` and a PFX for release signing. Without a PFX, local builds use a self-signed `CN=Zadoo Local Build` certificate.
-- `C:\Users\divya\Real\app_icon.ico` for the EXE and installer icon.
+- Python 3.11.9 x64; pass `-PythonPath` when it cannot be resolved through the x64 `py` launcher or its standard install path.
+- Node.js 24.18.0 x64 for template JavaScript validation; pass `-NodePath` when it is not on `PATH`.
+- Inno Setup 7.0.1-beta x64 for installers.
+- Windows SDK 10.0.26100.7705 `signtool.exe` and a PFX for release signing.
+- The repository `app_icon.ico` for the EXE and installer icon.
 
-Artifacts are written under `dist\onedir`, `dist\portable`, and `dist\installer`. The x86 build excludes PyAV, pywinpty, DXCam, and BetterCam because those packages do not provide stable Python 3.11 win32 support here; x86 uses the stable fallback capture/camera paths and terminal reports unavailable when PTY support is missing.
+Final artifacts are written under `dist\portable` and `dist\installer`. Pass `-KeepOneDir` to retain `dist\onedir` and PyInstaller work files.
 
 ## Smoke Tests
 
 ```powershell
-python -m compileall zadoo_vnc zadoo_vnc_single.py scripts
+python -m pip install -e ".[test]"
+python -m playwright install chromium
+python -m compileall zadoo_vnc scripts
 python scripts/smoke_test.py
 python scripts/check_template_js.py
 python scripts/smoke_test.py --live http://localhost:6173
+python scripts/terminal_e2e_test.py --code YOUR_CODE
 ```
 
-The live smoke test assumes the app is already running. For configured installs, set `ZADOO_SMOKE_AUTH_CODE` and, if needed, `ZADOO_SMOKE_SHARE_TOKEN` before running the live check.
+The live smoke test assumes the app is already running. For configured installs, set `ZADOO_SMOKE_AUTH_CODE` before running the live check.
 
 ## Notes
 
-The core dependency set covers screen sharing, remote input, text clipboard, templates, and local/tunnel web serving. Audio, webcam, email, SSH PTY, and faster capture backends are optional extras.
+The installation includes every runtime feature: screen sharing, input, clipboard, media, email, terminal, and accelerated capture.

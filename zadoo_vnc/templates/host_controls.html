@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Host Controls  Alerts</title>
+  <title>Host Controls — Alerts</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0f1115; color:#eaeef2; margin:0; }
@@ -29,12 +29,11 @@
     <script>
       const ok = document.getElementById('ok');
       function csrfToken(){
-        try {
-          const found = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith('zadoo_csrf='));
-          return found ? decodeURIComponent(found.split('=').slice(1).join('=')) : '';
-        } catch (_) {
-          return '';
-        }
+        const found = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith('zadoo_csrf='));
+        if (!found) throw new Error('CSRF cookie is missing');
+        const token = decodeURIComponent(found.split('=').slice(1).join('='));
+        if (!token) throw new Error('CSRF cookie is empty');
+        return token;
       }
       document.querySelectorAll('button[data-code]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
@@ -45,8 +44,15 @@
               credentials: 'same-origin',
               headers: { 'X-Zadoo-CSRF': csrfToken() }
             });
-            ok.textContent = res.ok ? ' Sent '+code : ' Failed ('+res.status+')';
-          }catch(e){ ok.textContent = ' Network error'; }
+            const data = await res.json();
+            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+              throw new Error(`Alert API returned a non-object response (HTTP ${res.status})`);
+            }
+            if (!res.ok || data.ok !== true) {
+              throw new Error(typeof data.error === 'string' && data.error ? data.error : `Alert failed (HTTP ${res.status})`);
+            }
+            ok.textContent = ' Sent '+code;
+          }catch(e){ ok.textContent = ' Failed: '+String(e instanceof Error ? e.message : e); }
           setTimeout(()=> ok.textContent='', 2000);
         });
       });

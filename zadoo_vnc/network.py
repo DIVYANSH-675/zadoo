@@ -6,14 +6,8 @@ import socket
 
 def get_local_ip() -> str:
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-    except Exception:
-        try:
-            return socket.gethostbyname(socket.gethostname())
-        except Exception:
-            return "127.0.0.1"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError as exc:
+        raise RuntimeError(f"Unable to determine the local IP address: {exc}") from exc

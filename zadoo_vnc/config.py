@@ -5,70 +5,59 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent
-RUNTIME_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else PROJECT_DIR
+APP_PORT = 6173
+TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
+FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
 def resource_path(name: str) -> Path:
-    """Resolve bundled resources in source, one-folder, and one-file builds."""
+    """Resolve a resource in the source tree or pinned PyInstaller layout."""
     if getattr(sys, "frozen", False):
-        try:
-            bundled_root = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-            candidate = bundled_root / name
-            if candidate.exists():
-                return candidate
-        except Exception:
-            pass
-        candidate = RUNTIME_DIR / name
-        if candidate.exists():
-            return candidate
+        return Path(sys._MEIPASS) / name  # type: ignore[attr-defined]
     return PROJECT_DIR / name
 
 
-BRAND_HEADER_IMAGE_PATH = str(resource_path("brand-header.png"))
-TRIGGER_ICON_IMAGE_PATH = str(resource_path("trigger-icon.png"))
-SPLASH_IMAGE_PATH = str(resource_path("splash.png"))
+def windows_system_executable(*parts: str) -> str:
+    if sys.platform != "win32":
+        raise RuntimeError(f"Windows system executables require Windows; current platform is {sys.platform}")
+    system_root = os.environ.get("SYSTEMROOT", "").strip()
+    if not system_root:
+        raise RuntimeError("SYSTEMROOT environment variable is not set")
+    path = Path(system_root, "System32", *parts)
+    if not path.is_file():
+        raise FileNotFoundError(f"Windows system executable not found: {path}")
+    return str(path)
 
 
 def env_int(name, default, minimum=None, maximum=None):
+    raw_value = str(os.getenv(name, default)).strip()
     try:
-        value = int(str(os.getenv(name, default)).strip())
-    except Exception:
-        value = int(default)
-    if minimum is not None:
-        value = max(int(minimum), value)
-    if maximum is not None:
-        value = min(int(maximum), value)
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer; got {raw_value!r}") from exc
+    if minimum is not None and value < int(minimum):
+        raise ValueError(f"{name} must be at least {minimum}; got {value}")
+    if maximum is not None and value > int(maximum):
+        raise ValueError(f"{name} must be at most {maximum}; got {value}")
     return value
 
 
-def _load_dotenv(path: str = ".env"):
-    """Load simple KEY=VALUE pairs from .env in CWD and project directory."""
-    loaded_paths = set()
+def env_bool(name, default=False):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return bool(default)
+    normalized = str(raw_value).strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES:
+        return False
+    raise ValueError(f"{name} must be a boolean; got {raw_value!r}")
 
-    def _apply(p: str):
-        try:
-            resolved = os.path.realpath(p)
-            if resolved in loaded_paths or not os.path.exists(resolved):
-                return
-            loaded_paths.add(resolved)
-            with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" not in line:
-                        continue
-                    key, val = line.split("=", 1)
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'")
-                    os.environ[key] = val
-        except Exception:
-            pass
 
-    _apply(path)
-    try:
-        _apply(str(PROJECT_DIR / ".env"))
-    except Exception:
-        pass
+def _load_dotenv():
+    """Load source-development overrides from the project .env file."""
+    load_dotenv(PROJECT_DIR / ".env", override=False)

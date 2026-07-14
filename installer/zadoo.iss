@@ -1,19 +1,16 @@
 #define AppName "Zadoo"
 #define AppPublisher "Zadoo"
 #ifndef AppVersion
-#define AppVersion "1.0.0"
-#endif
-#ifndef Arch
-#define Arch "x64"
+#error AppVersion define is required
 #endif
 #ifndef SourceDir
 #error SourceDir define is required
 #endif
 #ifndef OutputDir
-#define OutputDir "..\dist\installer"
+#error OutputDir define is required
 #endif
 #ifndef AppIcon
-#define AppIcon "..\app_icon.ico"
+#error AppIcon define is required
 #endif
 
 [Setup]
@@ -26,7 +23,7 @@ DefaultDirName={autopf}\Zadoo
 DefaultGroupName=Zadoo
 DisableProgramGroupPage=yes
 OutputDir={#OutputDir}
-OutputBaseFilename=Zadoo-{#AppVersion}-{#Arch}-Setup
+OutputBaseFilename=Zadoo-{#AppVersion}-x64-Setup
 SetupIconFile={#AppIcon}
 UninstallDisplayIcon={app}\Zadoo.exe
 WizardImageFile=wizard-large.bmp
@@ -36,12 +33,9 @@ SolidCompression=yes
 WizardStyle=modern
 SetupLogging=yes
 PrivilegesRequired=admin
-#if Arch == "x64"
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
-#else
-ArchitecturesAllowed=x86compatible
-#endif
+SetupArchitecture=x64
+ArchitecturesAllowed=x64os
+ArchitecturesInstallIn64BitMode=x64os
 LicenseFile=NOTICE.txt
 
 [Messages]
@@ -55,7 +49,6 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 
 [Icons]
 Name: "{autoprograms}\Zadoo\Open Zadoo"; Filename: "{app}\Zadoo.exe"; Parameters: "--open"; IconFilename: "{app}\Zadoo.exe"
-Name: "{autoprograms}\Zadoo\Zadoo Settings"; Filename: "{app}\Zadoo.exe"; Parameters: "--settings"; IconFilename: "{app}\Zadoo.exe"
 Name: "{autodesktop}\Open Zadoo"; Filename: "{app}\Zadoo.exe"; Parameters: "--open"; IconFilename: "{app}\Zadoo.exe"; Tasks: desktopicon
 
 [Tasks]

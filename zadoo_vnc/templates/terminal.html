@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>Terminal</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<link rel="stylesheet" href="/static/vendor/xterm-5.3.0.min.css">
 <style>
   html,
   body {
@@ -63,8 +63,7 @@
 <body>
 <div id="term"></div>
 <div id="terminal-load-error">Terminal renderer failed to load.</div>
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="/static/vendor/xterm-5.3.0-fit-0.8.0.min.js"></script>
 <script>
 (function () {
   const termEl = document.getElementById('term');
@@ -73,7 +72,7 @@
   function showLoadError(message) {
     termEl.style.display = 'none';
     errorEl.style.display = 'block';
-    errorEl.textContent = message || 'Terminal renderer failed to load.';
+    errorEl.textContent = message;
   }
 
   if (!window.Terminal || !window.FitAddon) {
@@ -126,43 +125,41 @@
   let ws = null;
   let lastCols = 0;
   let lastRows = 0;
-  const pendingInput = [];
+  let pendingInput = '';
 
   term.loadAddon(fitAddon);
   term.open(termEl);
   term.focus();
 
   function fitAndReport(force) {
-    try {
-      fitAddon.fit();
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      if (force || term.cols !== lastCols || term.rows !== lastRows) {
-        lastCols = term.cols;
-        lastRows = term.rows;
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-      }
-    } catch (_) {}
+    if (!termEl.clientWidth || !termEl.clientHeight) return;
+    fitAddon.fit();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (force || term.cols !== lastCols || term.rows !== lastRows) {
+      lastCols = term.cols;
+      lastRows = term.rows;
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    }
   }
 
   function sendInput(data) {
-    const normalized = String(data || '');
+    if (typeof data !== 'string') throw new TypeError('Terminal input must be text');
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(normalized);
+      ws.send(data);
     } else {
-      pendingInput.push(normalized);
+      pendingInput += data;
     }
   }
 
   function flushPendingInput() {
-    while (pendingInput.length && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(pendingInput.shift());
+    if (pendingInput && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(pendingInput);
+      pendingInput = '';
     }
   }
 
   function focusTerminal() {
-    try { term.focus(); } catch (_) {}
+    term.focus();
   }
 
   function sendControlCode(key) {
@@ -174,17 +171,21 @@
   }
 
   async function pasteClipboardText() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      term.write('\r\n\x1b[91mClipboard read is unavailable.\x1b[0m\r\n');
+      return;
+    }
     try {
-      if (!navigator.clipboard || !navigator.clipboard.readText) return;
       const text = await navigator.clipboard.readText();
       if (text) sendInput(text.replace(/\r?\n/g, '\r'));
-    } catch (_) {}
+    } catch (error) {
+      term.write(`\r\n\x1b[91mClipboard read failed: ${String(error)}\x1b[0m\r\n`);
+    }
   }
 
   function connectShell() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ssh`);
-    ws.binaryType = 'arraybuffer';
+    ws = new WebSocket(`${proto}://${location.host}/terminal`);
 
     ws.onopen = function () {
       fitAndReport(true);
@@ -193,37 +194,42 @@
     };
 
     ws.onmessage = function (event) {
-      let data = event.data;
-      if (data instanceof ArrayBuffer) {
-        data = new TextDecoder('utf-8').decode(new Uint8Array(data));
+      const data = event.data;
+      if (typeof data !== 'string') {
+        term.write(`\r\n\x1b[91mTerminal received unsupported data: ${Object.prototype.toString.call(data)}\x1b[0m\r\n`);
+        return;
       }
-      term.write(String(data || ''));
+      term.write(data);
     };
 
     ws.onerror = function () {
       term.write('\r\n\x1b[91mTerminal connection error.\x1b[0m\r\n');
     };
 
-    ws.onclose = function () {
-      term.write('\r\n\x1b[90mTerminal disconnected.\x1b[0m\r\n');
+    ws.onclose = function (event) {
+      const detail = event.reason ? `: ${event.reason}` : '';
+      term.write(`\r\n\x1b[90mTerminal disconnected (code ${event.code})${detail}.\x1b[0m\r\n`);
     };
   }
 
   term.attachCustomKeyEventHandler(function (event) {
     if (!event || event.type !== 'keydown') return true;
     if (event.ctrlKey && !event.altKey && !event.metaKey) {
-      const key = String(event.key || '').toLowerCase();
+      if (typeof event.key !== 'string') return true;
+      const key = event.key.toLowerCase();
       if (event.shiftKey && key === 'c') {
-        try {
-          const selected = term.getSelection();
-          if (selected && navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(selected).catch(function () {});
-          }
-        } catch (_) {}
+        const selected = term.getSelection();
+        if (selected && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(selected).catch(function (error) {
+            term.write(`\r\n\x1b[91mClipboard write failed: ${String(error)}\x1b[0m\r\n`);
+          });
+        } else if (selected) {
+          term.write('\r\n\x1b[91mClipboard write is unavailable.\x1b[0m\r\n');
+        }
         event.preventDefault();
         return false;
       }
-      if ((event.shiftKey && key === 'v') || (!event.shiftKey && key === 'v')) {
+      if (key === 'v') {
         pasteClipboardText();
         event.preventDefault();
         return false;
@@ -250,14 +256,12 @@
     }
   });
 
-  if (window.ResizeObserver) {
-    const observer = new ResizeObserver(function () { fitAndReport(false); });
-    observer.observe(termEl);
-  }
+  const observer = new ResizeObserver(function () { fitAndReport(false); });
+  observer.observe(termEl);
 
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(function () { fitAndReport(false); }).catch(function () {});
-  }
+  document.fonts.ready.then(function () { fitAndReport(false); }).catch(function (error) {
+    term.write(`\r\n\x1b[91mTerminal font loading failed: ${String(error)}\x1b[0m\r\n`);
+  });
 
   requestAnimationFrame(function () {
     fitAndReport(false);

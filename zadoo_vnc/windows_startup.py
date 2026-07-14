@@ -1,45 +1,39 @@
 """Windows startup task helpers for the Zadoo Settings app."""
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
+
+from .config import windows_system_executable
 
 TASK_NAME = "Zadoo"
 
 
-def _hidden_flag() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def _runtime_command_text() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --open'
-    return f'"{sys.executable}" -m zadoo_vnc.app --open'
-
-
 def startup_task_exists() -> bool:
-    if os.name != "nt":
-        return False
     result = subprocess.run(
-        ["schtasks", "/query", "/tn", TASK_NAME],
+        [windows_system_executable("schtasks.exe"), "/query", "/tn", TASK_NAME],
         capture_output=True,
-        creationflags=_hidden_flag(),
+        text=True,
+        timeout=10,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    message = (result.stderr or result.stdout or "").strip()
+    if "cannot find" in message.lower() or "does not exist" in message.lower():
+        return False
+    raise RuntimeError(message or f"schtasks query exited {result.returncode}")
 
 
 def set_startup_task(enabled: bool) -> tuple[bool, str]:
-    if os.name != "nt":
-        return False, "Startup tasks are only available on Windows"
     if enabled:
         command = [
-            "schtasks",
+            windows_system_executable("schtasks.exe"),
             "/create",
             "/tn",
             TASK_NAME,
             "/tr",
-            _runtime_command_text(),
+            f'"{sys.executable}"' + ("" if getattr(sys, "frozen", False) else " -m zadoo_vnc"),
             "/sc",
             "onlogon",
             "/rl",
@@ -47,13 +41,17 @@ def set_startup_task(enabled: bool) -> tuple[bool, str]:
             "/f",
         ]
     else:
-        command = ["schtasks", "/delete", "/tn", TASK_NAME, "/f"]
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        creationflags=_hidden_flag(),
-    )
+        command = [windows_system_executable("schtasks.exe"), "/delete", "/tn", TASK_NAME, "/f"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "schtasks did not finish within 10 seconds"
     if result.returncode == 0:
         return True, "Startup enabled" if enabled else "Startup disabled"
     message = (result.stderr or result.stdout or "").strip() or f"schtasks exited {result.returncode}"

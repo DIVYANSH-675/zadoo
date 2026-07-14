@@ -7,9 +7,9 @@ import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = ROOT / "zadoo_vnc" / "templates"
+VENDOR_DIR = ROOT / "zadoo_vnc" / "static" / "vendor"
 
 
 class ScriptCollector(HTMLParser):
@@ -45,8 +45,7 @@ class ScriptCollector(HTMLParser):
 def main() -> None:
     node = shutil.which("node")
     if not node:
-        print("SKIP: Node.js not found; template JavaScript syntax check skipped")
-        return
+        raise SystemExit("Node.js is required for template JavaScript validation")
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="zadoo-js-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -59,11 +58,15 @@ def main() -> None:
                 result = subprocess.run([node, "--check", str(js_path)], capture_output=True, text=True)
                 if result.returncode != 0:
                     failures.append(f"{html_path.name} script {index}: {result.stderr.strip() or result.stdout.strip()}")
+        for js_path in sorted(VENDOR_DIR.glob("*.js")):
+            result = subprocess.run([node, "--check", str(js_path)], capture_output=True, text=True)
+            if result.returncode != 0:
+                failures.append(f"{js_path.name}: {result.stderr.strip() or result.stdout.strip()}")
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}")
         raise SystemExit(1)
-    print("OK: template JavaScript syntax")
+    print("OK: template and vendor JavaScript syntax")
 
 
 if __name__ == "__main__":

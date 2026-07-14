@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import time
+from pathlib import Path
+
+_PLAYWRIGHT_DLL_DIRECTORY = os.add_dll_directory(str(Path(sys.prefix) / "Scripts"))
 
 try:
     from playwright.sync_api import sync_playwright
-except ImportError:  # optional dev dependency — not in requirements.txt/build_requirements.txt
+except ImportError as exc:
     sync_playwright = None
+    playwright_import_error = exc
 
 
 def _norm(text: str) -> str:
@@ -19,10 +25,7 @@ def _exact_count(text: str, expected: str) -> int:
 
 
 def _screen_text(screen) -> str:
-    try:
-        return screen.inner_text(timeout=4000)
-    except Exception:
-        return ""
+    return screen.inner_text(timeout=4000)
 
 
 def _wait_count(screen, expected: str, min_count: int, seconds: float = 8.0):
@@ -113,33 +116,47 @@ def _run_matrix(label, page, screen, token):
 def _authenticate_in_browser(page, base: str, code: str):
     page.goto(f"{base}/", wait_until="domcontentloaded", timeout=15000)
     page.wait_for_timeout(1200)
-    if page.locator("#auth-code").count():
-        page.locator("#auth-code").fill(code)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(2500)
+    page.locator("#auth-code").fill(code)
+    page.keyboard.press("Enter")
+    page.wait_for_function("window.__zadooAuthenticated === true", timeout=10000)
+
+
+def _verify_local_ui_assets(page):
+    page.wait_for_function("typeof window.CodeMirror === 'function'", timeout=10000)
+    editor_version = page.evaluate("window.CodeMirror.version")
+    page.locator("#ppAmountLabel").wait_for(state="visible", timeout=10000)
+    page.wait_for_function("!document.querySelector('#ppAmountLabel').textContent.includes('Loading')", timeout=10000)
+    image_button = page.locator("#btn-clipboard-image")
+    image_input = page.locator("#clipboard-image-input")
+    ok = (
+        editor_version == "5.65.21"
+        and image_button.is_enabled()
+        and image_input.get_attribute("accept") == "image/png,image/jpeg"
+    )
+    print(f"LOCAL_UI_ASSETS: {'PASS' if ok else 'FAIL'} CodeMirror={editor_version}")
+    return ok
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:6173")
-    parser.add_argument("--code", default="ZADOO123")
+    parser.add_argument("--code", required=True)
     args = parser.parse_args()
 
     base = args.url.rstrip("/")
     token = str(int(time.time() * 1000))[-8:]
     if sync_playwright is None:
-        print(
-            "SKIP: playwright is not installed (optional dev dependency). Install it with:\n"
-            "    python -m pip install playwright\n"
-            "    python -m playwright install chromium"
-        )
-        return 0
+        print(f"ERROR: Playwright import failed: {playwright_import_error}")
+        return 2
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1300, "height": 900})
+        external_requests = []
+        context.on("request", lambda request: external_requests.append(request.url) if not request.url.startswith(base) else None)
 
         direct = context.new_page()
         _authenticate_in_browser(direct, base, args.code)
+        ok_ui = _verify_local_ui_assets(direct)
         direct.goto(f"{base}/terminal.html", wait_until="domcontentloaded", timeout=15000)
         direct.wait_for_selector(".xterm-helper-textarea", state="attached", timeout=10000)
         direct.locator(".xterm").click(force=True)
@@ -155,7 +172,9 @@ def main() -> int:
         ok_panel = _run_matrix("PANEL", page, frame.locator(".xterm-screen"), token)
 
         browser.close()
-    return 0 if ok_direct and ok_panel else 1
+    ok_local = not external_requests
+    print(f"LOCAL_ASSET_REQUESTS: {'PASS' if ok_local else 'FAIL'} external={external_requests}")
+    return 0 if ok_ui and ok_direct and ok_panel and ok_local else 1
 
 
 if __name__ == "__main__":

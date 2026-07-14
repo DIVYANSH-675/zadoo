@@ -1,25 +1,31 @@
 """Small native settings window for installed Zadoo builds."""
 from __future__ import annotations
 
+import json
+import logging
+import os
 import subprocess
 import sys
-import json
 import threading
 import time
+import tkinter as tk
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from pathlib import Path
+from contextlib import suppress
 from tkinter import BOTH, END, LEFT, RIGHT, StringVar, Tk, messagebox, ttk
-import tkinter as tk
 
-from .config import PROJECT_DIR
-from .dependencies import HAS_WINPTY
+from .config import APP_PORT, PROJECT_DIR, resource_path
 from .saas import ZadooCloudClient
-from .settings import ACCESS_CODE_MAX_LENGTH, DEFAULT_ACCESS_CODE, DEFAULT_CLOUD_API_BASE, PERMISSION_KEYS, SettingsStore, get_settings_store
+from .settings import (
+    ACCESS_CODE_MAX_LENGTH,
+    PERMISSION_KEYS,
+    SettingsStore,
+    get_settings_store,
+)
 from .windows_startup import set_startup_task, startup_task_exists
 
-APP_PORT = 6173
 BG = "#f4f7fb"
 SURFACE = "#ffffff"
 SURFACE_ALT = "#eaf0f7"
@@ -52,63 +58,56 @@ def _local_url(path: str = "/") -> str:
 
 def _local_server_running() -> bool:
     try:
-        with urllib.request.urlopen(_local_url("/api/settings/status"), timeout=0.6) as response:
-            return int(getattr(response, "status", 0) or 0) < 500
-    except Exception:
+        with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=0.6) as response:
+            return response.status == 200
+    except OSError:
         return False
 
 
-def _post_local_json(path: str, payload: dict, timeout: float = 1.5) -> dict:
-    # IMPORTANT: send NO request body. The runtime's websockets-based HTTP server can't
-    # read POST bodies, so the admin code travels in the X-Zadoo-Code header (and any
-    # other params in the query string). A body would stall the request.
-    code = str(payload.get("admin_code") or "")
-    extras = {k: v for k, v in (payload or {}).items() if k != "admin_code" and v is not None}
+def _get_local_json(path: str, payload: dict, timeout: float = 1.5) -> dict:
+    code = str(payload.get("admin_code", ""))
+    extras = {k: v for k, v in payload.items() if k != "admin_code" and v is not None}
     url = _local_url(path)
     if extras:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(extras)
     request = urllib.request.Request(
         url,
-        data=None,
         headers={"X-Zadoo-Code": code},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", "replace"))
-
-
-def _notify_settings_reload(access_code: str) -> None:
-    request = urllib.request.Request(
-        _local_url("/api/settings/reload"),
-        headers={"X-Zadoo-Code": str(access_code or "")},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=1.2) as response:
-            response.read()
-    except Exception:
-        pass
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        raw = exc.read()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Local API {path} returned invalid JSON (HTTP {status}): {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Local API {path} returned a non-object response (HTTP {status})")
+    if type(data.get("success")) is not bool:
+        raise RuntimeError(f"Local API {path} response is missing boolean success (HTTP {status})")
+    if status >= 400 and data["success"]:
+        raise RuntimeError(f"Local API {path} returned success=true with HTTP {status}")
+    if not data["success"] and (not isinstance(data.get("error"), str) or not data["error"].strip()):
+        raise RuntimeError(f"Local API {path} failure is missing error (HTTP {status})")
+    return data
 
 
-def _runtime_command() -> list[str]:
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--open"]
-    return [sys.executable, "-m", "zadoo_vnc.app", "--open"]
+def _notify_settings_reload(access_code: str) -> None:
+    result = _get_local_json("/api/settings/reload", {"admin_code": access_code}, timeout=1.2)
+    if result["success"] is not True:
+        raise RuntimeError(result["error"])
 
 
 def _find_icon() -> str:
-    candidates = [
-        Path(getattr(sys, "_MEIPASS", "")) / "app_icon.ico",
-        Path(sys.executable).with_name("app_icon.ico"),
-        PROJECT_DIR / "app_icon.ico",
-    ]
-    for path in candidates:
-        try:
-            if path.exists():
-                return str(path)
-        except Exception:
-            pass
-    return ""
+    path = resource_path("app_icon.ico")
+    if not path.is_file():
+        raise FileNotFoundError(f"Zadoo icon not found: {path}")
+    return str(path)
 
 
 class ZadooSettingsWindow:
@@ -117,34 +116,24 @@ class ZadooSettingsWindow:
         self.cloud = ZadooCloudClient(self.store)
         # Make the process DPI-aware BEFORE creating Tk so the window renders crisply and at the
         # right size on high-DPI / scaled displays instead of being bitmap-stretched.
-        try:
-            from .dpi import ensure_process_dpi_aware_once
-            ensure_process_dpi_aware_once()
-        except Exception:
-            pass
+        from .dpi import ensure_process_dpi_aware_once
+        ensure_process_dpi_aware_once()
         self.root = Tk()
         self.root.title("Zadoo Settings")
         # Match Tk scaling to the monitor DPI (tk scaling = DPI/72) so fonts and widgets are
         # sized correctly for every device, and remember the ratio for window sizing below.
-        try:
-            dpi = float(self.root.winfo_fpixels("1i"))
-            self._ui_scale = max(1.0, dpi / 96.0) if dpi > 0 else 1.0
-            if dpi > 0:
-                self.root.tk.call("tk", "scaling", dpi / 72.0)
-        except Exception:
-            self._ui_scale = 1.0
+        dpi = float(self.root.winfo_fpixels("1i"))
+        if dpi <= 0:
+            raise RuntimeError(f"Tk reported an invalid display DPI: {dpi}")
+        self._ui_scale = max(1.0, dpi / 96.0)
+        self.root.tk.call("tk", "scaling", dpi / 72.0)
         self.root.minsize(int(420 * self._ui_scale), int(320 * self._ui_scale))
         self._fit_geometry(520, 380)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.root.bind("<Unmap>", self._on_unmap)
         self._hidden = False
-        icon = _find_icon()
-        if icon:
-            try:
-                self.root.iconbitmap(icon)
-            except Exception:
-                pass
+        self.root.iconbitmap(_find_icon())
 
         self.data = {}
         self.saved_access_code = ""
@@ -154,17 +143,15 @@ class ZadooSettingsWindow:
         self.show_taskbar_var = tk.BooleanVar(value=False)
         self._activation_poll_after: str | None = None
         self._activation_poll_deadline = 0.0
-        self._has_credits = False
+        self._activation_request_active = False
+        self._start_request_active = False
+        self._signout_active = False
         # Live runtime state (kept fresh by a background poll so the public-link label
         # updates automatically when Zadoo starts/stops — without blocking the UI).
         self._runtime_running = False
         self._runtime_url = ""
-        self._runtime_poll_after: str | None = None
-        self._balance_poll_after: str | None = None
         self._last_focus_refresh = 0.0
-        # Account tab avatar image reference (prevent GC)
-        self._avatar_photo: tk.PhotoImage | None = None
-
+        self._startup_status_loaded = False
         self._autosave_after: str | None = None
         self._loading = False
         self._build_style()
@@ -172,18 +159,16 @@ class ZadooSettingsWindow:
         self.reload()
         self._wire_autosave()  # settings persist automatically (no Save button)
         self._poll_runtime_status()  # start the live public-link / running-state poll
-        self._poll_account_balance()  # start the live balance/credits poll
+        self.root.after(60_000, self._poll_account_balance)
         # Refresh balance the moment the window regains focus (e.g. back from paying).
         self.root.bind("<FocusIn>", lambda _e: self._refresh_balance_now())
         if self.store.get_device_token():
+            self._last_focus_refresh = time.time()
             self._fetch_latest_account_details_async(show_status=False)
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        style.theme_use("clam")
         style.configure(".", font=("Segoe UI", 9), background=BG, foreground=TEXT)
         style.configure("Root.TFrame", background=BG)
         style.configure("Surface.TFrame", background=SURFACE)
@@ -286,20 +271,15 @@ class ZadooSettingsWindow:
     def _fit_geometry(self, base_w: int, base_h: int) -> None:
         """Scale the requested size to the monitor DPI, then clamp to the screen and centre so
         the window fits and looks right on every device — no scrollbars needed."""
-        try:
-            scale = getattr(self, "_ui_scale", 1.0) or 1.0
-            sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            w = max(int(360 * scale), min(int(base_w * scale), sw - 40))
-            h = max(int(300 * scale), min(int(base_h * scale), sh - 96))
-            x = max(0, (sw - w) // 2)
-            y = max(0, (sh - h) // 3)
-            self.root.geometry(f"{w}x{h}+{x}+{y}")
-        except Exception:
-            try:
-                self.root.geometry(f"{int(base_w)}x{int(base_h)}")
-            except Exception:
-                pass
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        if min(sw, sh) <= 0:
+            raise RuntimeError(f"Tk reported an invalid screen size: {sw}x{sh}")
+        w = max(int(360 * self._ui_scale), min(int(base_w * self._ui_scale), sw - 40))
+        h = max(int(300 * self._ui_scale), min(int(base_h * self._ui_scale), sh - 96))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 3)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _tab_body(self, parent):
         """Return a padded content frame filling `parent`. No scrollbars — the window itself
@@ -328,8 +308,7 @@ class ZadooSettingsWindow:
         self.email_to = ttk.Entry(form)
         self.email_to.grid(row=3, column=0, sticky="ew", pady=(2, 10))
 
-        # Resend API key is configured through the backend, not exposed in the UI.
-        self.email_state = ttk.Label(form, text="Email not Set", style="Surface.TLabel")
+        self.email_state = ttk.Label(form, text="", style="Surface.TLabel")
         self.email_state.grid(row=4, column=0, sticky="w")
         form.columnconfigure(0, weight=1)
 
@@ -419,7 +398,7 @@ class ZadooSettingsWindow:
 
         credits_btns = ttk.Frame(self.credits_card, style="Surface.TFrame")
         credits_btns.pack(anchor="w", pady=(8, 0))
-        ttk.Button(credits_btns, text="＋ Add Credit", command=self._add_balance,
+        ttk.Button(credits_btns, text="+ Add Credit", command=self._add_balance,
                    style="Primary.TButton").pack(side=LEFT)
         ttk.Button(credits_btns, text="View Plans →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
         ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
@@ -436,44 +415,7 @@ class ZadooSettingsWindow:
         self.runtime_state = ttk.Label(body, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
 
-    def _ensure_check_images(self) -> None:
-        """Build a green ✓ 'checked' indicator and an empty 'unchecked' box (cached)."""
-        if getattr(self, "_chk_on", None) is not None or getattr(self, "_chk_images_failed", False):
-            return
-        try:
-            from PIL import Image, ImageDraw, ImageTk
-            size = 18
-            off = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            on = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            doff, don = ImageDraw.Draw(off), ImageDraw.Draw(on)
-            try:
-                doff.rounded_rectangle([1, 1, size - 2, size - 2], radius=4, outline="#9aa6b5", width=2)
-                don.rounded_rectangle([1, 1, size - 2, size - 2], radius=4, fill=ACCENT, outline=ACCENT_DARK, width=1)
-            except Exception:
-                doff.rectangle([1, 1, size - 2, size - 2], outline="#9aa6b5", width=2)
-                don.rectangle([1, 1, size - 2, size - 2], fill=ACCENT, outline=ACCENT_DARK, width=1)
-            # white checkmark
-            don.line([(4, 9), (8, 13)], fill="#ffffff", width=2)
-            don.line([(8, 13), (14, 5)], fill="#ffffff", width=2)
-            self._chk_off = ImageTk.PhotoImage(off)
-            self._chk_on = ImageTk.PhotoImage(on)
-        except Exception:
-            self._chk_off = None
-            self._chk_on = None
-            self._chk_images_failed = True
-
     def _check_button(self, parent, text, var):
-        """A checkbox that shows a green ✓ (not the themed ✗) when on."""
-        self._ensure_check_images()
-        if getattr(self, "_chk_on", None) is not None:
-            return tk.Checkbutton(
-                parent, text="  " + text, variable=var,
-                image=self._chk_off, selectimage=self._chk_on, indicatoron=False,
-                compound="left", bg=SURFACE, activebackground=SURFACE, selectcolor=SURFACE,
-                fg=TEXT, activeforeground=TEXT, font=("Segoe UI", 9),
-                borderwidth=0, highlightthickness=0, relief="flat",
-                offrelief="flat", overrelief="flat", anchor="w", cursor="hand2",
-            )
         return ttk.Checkbutton(parent, text=text, variable=var)
 
     def _build_permissions_tab(self) -> None:
@@ -483,24 +425,10 @@ class ZadooSettingsWindow:
 
         perms = ttk.LabelFrame(body, text="Allowed controls for this password", style="Card.TLabelframe")
         perms.pack(fill=BOTH, expand=True)
-        self._ensure_check_images()
         for index, key in enumerate(PERMISSION_KEYS):
             var = tk.BooleanVar(value=False)
             self.permission_vars[key] = var
-            if self._chk_on is not None:
-                # Custom green ✓ indicator (the themed glyph rendered like an ✗).
-                button = tk.Checkbutton(
-                    perms, text="  " + PERMISSION_LABELS.get(key, key), variable=var,
-                    image=self._chk_off, selectimage=self._chk_on, indicatoron=False,
-                    compound="left", bg=SURFACE, activebackground=SURFACE, selectcolor=SURFACE,
-                    fg=TEXT, activeforeground=TEXT, font=("Segoe UI", 9),
-                    borderwidth=0, highlightthickness=0, relief="flat",
-                    offrelief="flat", overrelief="flat", anchor="w", cursor="hand2",
-                )
-            else:
-                button = ttk.Checkbutton(perms, text=PERMISSION_LABELS.get(key, key), variable=var)
-            if key == "terminal" and not HAS_WINPTY:
-                button.configure(state="disabled")
+            button = self._check_button(perms, PERMISSION_LABELS.get(key, key), var)
             button.grid(
                 row=index // 3,
                 column=index % 3,
@@ -534,16 +462,16 @@ class ZadooSettingsWindow:
             ttk.Entry(frame, textvariable=message).pack(fill="x", pady=(2, 8))
 
     def _set_status(self, text: str) -> None:
-        self.status_label.configure(text=text or "")
+        self.status_label.configure(text=text)
 
     def _setup_complete(self) -> bool:
-        return bool(self.data.get("setup_complete"))
+        return self.data["setup_complete"]
 
     def reload(self) -> None:
         self._loading = True  # suppress autosave while we populate fields programmatically
         try:
             self.data = self.store.load(reload=True)
-            self.saved_access_code = str(self.data.get("access_code_plain") or "")
+            self.saved_access_code = self.store.get_access_code()
             is_signed_in = bool(self.store.get_device_token())
             self._load_account_values()
             if is_signed_in:
@@ -560,12 +488,18 @@ class ZadooSettingsWindow:
 
     def _load_access_values(self) -> None:
         self.access_code.delete(0, END)
-        self.access_code.insert(0, self.saved_access_code or DEFAULT_ACCESS_CODE)
-        # Default "Email To" to the account used for sign-in when not explicitly set.
-        email_to = str(self.data.get("email_to") or "").strip() or str(self.data.get("user_email") or "").strip()
+        self.access_code.insert(0, self.saved_access_code)
+        email_to = self.data["email_to"].strip()
         self.email_to.delete(0, END)
         self.email_to.insert(0, email_to)
-        self.email_state.configure(text="Email configured" if email_to else "Email not Set")
+        missing = []
+        if not os.getenv("RESEND_API_KEY", "").strip():
+            missing.append("RESEND_API_KEY")
+        if not os.getenv("RESEND_FROM", "").strip():
+            missing.append("RESEND_FROM")
+        if not email_to:
+            missing.append("Email To")
+        self.email_state.configure(text=f"Missing: {', '.join(missing)}" if missing else "Email configured")
 
     def _load_account_values(self) -> None:
         # Check signed in state
@@ -593,7 +527,7 @@ class ZadooSettingsWindow:
                 if tab_id not in existing_tabs:
                     self.tabs.insert(idx, tab_widget, text=label)
 
-            _s = getattr(self, "_ui_scale", 1.0) or 1.0
+            _s = self._ui_scale
             self.root.minsize(int(480 * _s), int(360 * _s))
             if self.root.winfo_width() < int(660 * _s):
                 self._fit_geometry(780, 560)
@@ -602,16 +536,16 @@ class ZadooSettingsWindow:
             self.footer.pack_forget()
             self.signin_welcome_frame.pack(fill=BOTH, expand=True, pady=(10, 8))
 
-            _s = getattr(self, "_ui_scale", 1.0) or 1.0
+            _s = self._ui_scale
             self.root.minsize(int(420 * _s), int(320 * _s))
             if self.root.winfo_width() > int(560 * _s):
                 self._fit_geometry(520, 380)
 
             # Check if there is an active activation process running
-            activation = self.data.get("activation") or {}
+            activation = self.data["activation"]
             code = str(activation.get("code") or "")
             if code:
-                self.welcome_status_label.configure(text=f"Waiting for browser sign-in approval...")
+                self.welcome_status_label.configure(text="Waiting for browser sign-in approval...")
                 if not self._activation_poll_after and self._activation_poll_deadline == 0.0:
                     self._activation_poll_deadline = time.time() + 900
                     self._schedule_activation_poll()
@@ -633,33 +567,32 @@ class ZadooSettingsWindow:
             self.signin_frame.pack(fill="x", pady=(0, 10))
 
         # Profile card details
-        name = str(self.data.get("user_name") or "").strip()
-        email = str(self.data.get("user_email") or "").strip()
-        workspace = str(self.data.get("workspace_id") or "")
-        device = str(self.data.get("device_id") or "")
+        name = self.data["user_name"].strip()
+        email = self.data["user_email"].strip()
+        workspace = self.data["workspace_id"]
+        device = self.data["device_id"]
 
         if is_signed_in:
             display_name = name or email or "Active Account"
             self.profile_name_label.configure(text=display_name)
             self.profile_email_label.configure(text=email if name else "")
-            self._load_avatar_async(str(self.data.get("user_image_url") or ""), display_name)
+            initials = "".join(part[0].upper() for part in display_name.split() if part)[:2] or "?"
+            self.avatar_label.configure(text=initials, image="")
         else:
             self.profile_name_label.configure(text="Not signed in")
             self.profile_email_label.configure(text="")
             self.avatar_label.configure(text="?", image="")
-            self._avatar_photo = None
 
         self.account_state.configure(
             text=(f"Workspace {workspace[:8]}  ·  Device {device[:8]}" if workspace and device else "")
         )
 
         # Device name field
-        cloud = (self.data.get("cloud") or {}) if "cloud" in self.data else self.data
         self.device_name.delete(0, END)
-        self.device_name.insert(0, str(cloud.get("device_name") or self.data.get("device_name") or ""))
+        self.device_name.insert(0, self.data["device_name"])
 
         # Activation code
-        activation = self.data.get("activation") or {}
+        activation = self.data["activation"]
         code = str(activation.get("code") or "")
         self.activation_code.configure(state="normal")
         self.activation_code.delete(0, END)
@@ -675,22 +608,14 @@ class ZadooSettingsWindow:
         else:
             self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
 
-        # Credits — heartbeat updates entitlement_cache (not credits_cache), so fall
-        # back to entitlement_cache values to avoid a stale display.
-        credits = self.data.get("credits_cache") or {}
-        entitlement = self.data.get("entitlement_cache") or {}
-        included = int(credits.get("includedMinutesRemaining")
-                       or entitlement.get("includedMinutesRemaining") or 0)
-        wallet = int(credits.get("walletMinutes")
-                     or entitlement.get("walletMinutesRemaining") or 0)
-        total = int(credits.get("totalMinutesRemaining") or (included + wallet))
-        plan = str(credits.get("planCode") or entitlement.get("planCode") or "")
+        credits = self.data["credits_cache"]
+        entitlement = self.data["entitlement_cache"]
+        included = credits["includedMinutesRemaining"] if credits else 0
+        wallet = credits["walletMinutes"] if credits else 0
+        total = credits["totalMinutesRemaining"] if credits else 0
+        plan = credits["planCode"] if credits else None
 
-        allowed_flag = entitlement.get("allowed", credits.get("allowed"))
-        self._has_credits = bool(total > 0 or allowed_flag is True)
-        self._account_total = total
-
-        if credits or entitlement:
+        if credits:
             self.credits_included_label.configure(text=f"Included: {included} min")
             self.credits_wallet_label.configure(text=f"Wallet: {wallet} min")
             self.credits_total_label.configure(text=f"Total remaining: {total} min{(' · ' + plan) if plan else ''}")
@@ -699,9 +624,9 @@ class ZadooSettingsWindow:
             self.credits_wallet_label.configure(text="")
             self.credits_total_label.configure(text="")
 
-        allowed = entitlement.get("allowed", credits.get("allowed"))
-        reason = entitlement.get("reason") or credits.get("reason") or ""
-        if allowed is not None:
+        if entitlement:
+            allowed = entitlement["allowed"]
+            reason = entitlement["reason"]
             self.billing_state.configure(
                 text=f"{'✓ Active' if allowed else '✗ Blocked'}{': ' + reason if reason else ''}",
                 foreground=(ACCENT if allowed else DANGER)
@@ -709,58 +634,12 @@ class ZadooSettingsWindow:
         else:
             self.billing_state.configure(text="", foreground=MUTED)
 
-    def _load_avatar_async(self, image_url: str, name: str) -> None:
-        """Download avatar in background thread, fall back to initials canvas."""
-        initials = "".join(p[0].upper() for p in name.split() if p)[:2] or "?"
-        self.avatar_label.configure(text=initials, image="")
-        self._avatar_photo = None
-        if not image_url:
-            return
-
-        def _do_load():
-            try:
-                import io
-                import tempfile
-                from PIL import Image, ImageTk
-                import urllib.request as _ur
-                req = _ur.Request(image_url, headers={"User-Agent": "ZadooDesktop/1.0"})
-                with _ur.urlopen(req, timeout=5) as resp:
-                    data = resp.read()
-                img = Image.open(io.BytesIO(data)).resize((48, 48), Image.LANCZOS)
-                # Circular crop
-                mask = Image.new("L", (48, 48), 0)
-                from PIL import ImageDraw
-                ImageDraw.Draw(mask).ellipse((0, 0, 47, 47), fill=255)
-                img.putalpha(mask)
-                photo = ImageTk.PhotoImage(img)
-                def _set():
-                    try:
-                        self._avatar_photo = photo
-                        self.avatar_label.configure(image=photo, text="")
-                    except Exception:
-                        pass
-                self.root.after(0, _set)
-            except Exception:
-                pass  # Keep initials fallback
-
-        import threading
-        threading.Thread(target=_do_load, daemon=True).start()
-
     def _admin_code(self) -> str:
         return self.saved_access_code or self.access_code.get().strip()
 
-    def _store_public_url(self, pub_url: str) -> None:
-        try:
-            data = self.store.load(reload=True)
-            data["public_url"] = pub_url
-            self.store.save(data)
-            self.data = data
-        except Exception:
-            pass
-
     def _open_public_url(self) -> None:
         # Clicking the public link opens it in the browser; if there's none yet, hint to Start.
-        pub_url = str(self.data.get("public_url") or "").strip()
+        pub_url = self._runtime_url
         if pub_url:
             webbrowser.open(pub_url)
         elif not _local_server_running():
@@ -774,62 +653,59 @@ class ZadooSettingsWindow:
         def _check():
             running = False
             url = ""
+            error = ""
             try:
-                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=1.2) as resp:
-                    data = json.loads(resp.read().decode("utf-8", "replace"))
-                running = bool(data.get("running", True))
-                url = str(data.get("public_url") or "")
-            except Exception:
-                running = False
-                url = ""
-            try:
-                self.root.after(0, lambda: self._apply_runtime_status(running, url))
-            except Exception:
+                data = _get_local_json("/api/runtime/status", {}, timeout=1.2)
+                if not data["success"]:
+                    raise RuntimeError(data["error"])
+                if not isinstance(data.get("running"), bool):
+                    raise RuntimeError("Runtime status is missing running")
+                if data.get("public_url") is not None and not isinstance(data["public_url"], str):
+                    raise RuntimeError("Runtime status public_url must be a string or null")
+                running = data["running"]
+                url = data["public_url"] or ""
+            except OSError:
                 pass
-        try:
-            threading.Thread(target=_check, daemon=True).start()
-        except Exception:
-            pass
+            except Exception as exc:
+                error = str(exc)
+                logging.error("Runtime status failed: %s", error)
+            with suppress(tk.TclError):
+                self.root.after(0, lambda: self._apply_runtime_status(running, url, error))
+        threading.Thread(target=_check, daemon=True).start()
 
-    def _apply_runtime_status(self, running: bool, url: str) -> None:
+    def _apply_runtime_status(self, running: bool, url: str, error: str) -> None:
         self._runtime_running = running
         self._runtime_url = url
-        try:
-            if running and url:
+        with suppress(tk.TclError):
+            if error:
+                self.public_url_label.configure(text=error, foreground=DANGER)
+            elif running and url:
                 self.public_url_label.configure(text=url, foreground=ACCENT)
             elif running:
                 self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
             else:
                 self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
-        except Exception:
-            pass
-        try:
-            self._runtime_poll_after = self.root.after(4000, self._poll_runtime_status)
-        except Exception:
-            self._runtime_poll_after = None
+        with suppress(tk.TclError):
+            self.root.after(4000, self._poll_runtime_status)
 
     def _poll_account_balance(self) -> None:
         """Background-poll the cloud so the Credits card updates on its own (e.g. after a
         top-up) without the user having to click Refresh."""
         if self.store.get_device_token():
-            def _check():
-                for fetch in (self.cloud.fetch_credits, self.cloud.entitlement):
-                    try:
-                        fetch()
-                    except Exception:
-                        pass
-                try:
-                    self.root.after(0, self.reload)
-                except Exception:
-                    pass
-            try:
-                threading.Thread(target=_check, daemon=True).start()
-            except Exception:
-                pass
-        try:
-            self._balance_poll_after = self.root.after(12000, self._poll_account_balance)
-        except Exception:
-            self._balance_poll_after = None
+            self._refresh_account_in_background()
+        with suppress(tk.TclError):
+            self.root.after(60_000, self._poll_account_balance)
+
+    def _refresh_account_in_background(self) -> None:
+        def _check():
+            for error in self._cloud_fetch_errors(
+                (("credits", self.cloud.fetch_credits), ("entitlement", self.cloud.entitlement))
+            ):
+                logging.error("Cloud refresh failed: %s", error)
+            with suppress(tk.TclError):
+                self.root.after(0, self.reload)
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def _refresh_balance_now(self) -> None:
         """Immediate one-shot balance refresh (used when the window regains focus, e.g.
@@ -837,54 +713,67 @@ class ZadooSettingsWindow:
         if not self.store.get_device_token():
             return
         now = time.time()
-        if now - getattr(self, "_last_focus_refresh", 0.0) < 3.0:
+        if now - self._last_focus_refresh < 3.0:
             return  # debounce: FocusIn can fire repeatedly
         self._last_focus_refresh = now
-        def _check():
-            for fetch in (self.cloud.fetch_credits, self.cloud.entitlement):
-                try:
-                    fetch()
-                except Exception:
-                    pass
-            try:
-                self.root.after(0, self.reload)
-            except Exception:
-                pass
-        try:
-            threading.Thread(target=_check, daemon=True).start()
-        except Exception:
-            pass
+        self._refresh_account_in_background()
 
     def _begin_public_url_autopoll(self, attempts: int = 8) -> None:
         """After Start, poll the runtime until the public link appears — or until the
         runtime tells us the tunnel is disabled (then show WHY instead of hanging)."""
         if attempts <= 0:
             return
-        import threading
         def _poll():
             url = ""
             block_reason = ""
+            tunnel_error = ""
             tunnel_enabled = True
             running = False
             try:
-                with urllib.request.urlopen(_local_url("/api/runtime/status"), timeout=3.0) as resp:
-                    status = json.loads(resp.read().decode("utf-8", "replace"))
-                    running = True
-                    url = str(status.get("public_url") or "").strip()
-                    tunnel_enabled = bool(status.get("tunnel_enabled", True))
-                    block_reason = str(status.get("tunnel_block_reason") or "").strip()
-            except Exception:
-                pass
+                status = _get_local_json("/api/runtime/status", {}, timeout=3.0)
+                if not status["success"]:
+                    raise RuntimeError(status["error"])
+                if not isinstance(status.get("running"), bool):
+                    raise RuntimeError("Runtime status is missing running")
+                if not isinstance(status.get("tunnel_enabled"), bool):
+                    raise RuntimeError("Runtime status is missing tunnel_enabled")
+                for field in ("public_url", "tunnel_error"):
+                    if status.get(field) is not None and not isinstance(status[field], str):
+                        raise RuntimeError(f"Runtime status {field} must be a string or null")
+                if not isinstance(status.get("tunnel_block_reason"), str):
+                    raise RuntimeError("Runtime status tunnel_block_reason must be a string")
+                running = status["running"]
+                url = (status["public_url"] or "").strip()
+                tunnel_enabled = status["tunnel_enabled"]
+                block_reason = status["tunnel_block_reason"].strip()
+                tunnel_error = (status["tunnel_error"] or "").strip()
+                if not tunnel_enabled and not block_reason:
+                    raise RuntimeError("Runtime status is missing tunnel_block_reason")
+            except (
+                OSError,
+                TimeoutError,
+                urllib.error.URLError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                RuntimeError,
+            ) as exc:
+                tunnel_error = str(exc)
             def _update():
                 if url:
+                    self._runtime_running = True
+                    self._runtime_url = url
                     self.public_url_label.configure(text=url, foreground=ACCENT)
-                    self._store_public_url(url)
                     self._set_status("Public link ready — click it to open.")
+                elif running and tunnel_error:
+                    self.public_url_label.configure(text=tunnel_error, foreground=DANGER)
+                    self._set_status(tunnel_error)
                 elif running and not tunnel_enabled:
                     # Runtime is up but the tunnel is off (billing/sign-in/etc) — stop hanging.
-                    msg = block_reason or "Tunnel is disabled."
-                    self.public_url_label.configure(text=msg, foreground=DANGER)
-                    self._set_status(msg + "  Fix it, then click Start again.")
+                    self.public_url_label.configure(text=block_reason, foreground=DANGER)
+                    self._set_status(block_reason + "  Fix it, then click Start again.")
+                elif attempts <= 1 and tunnel_error:
+                    self.public_url_label.configure(text=tunnel_error, foreground=DANGER)
+                    self._set_status(tunnel_error)
                 elif attempts <= 1:
                     self.public_url_label.configure(text="Tunnel not ready — click Refresh", foreground=MUTED)
                     self._set_status("Tunnel is taking longer than expected. Click Refresh, or Stop and Start again.")
@@ -900,30 +789,33 @@ class ZadooSettingsWindow:
             self._set_status("Zadoo is not running — click Start Zadoo first.")
             return
         self._set_status("Generating new public URL...")
-        import threading
         def _do_refresh():
             pub_url = ""
             error = ""
             try:
-                result = _post_local_json(
+                result = _get_local_json(
                     "/api/runtime/refresh-tunnel",
                     {"admin_code": self._admin_code()},
                     timeout=30.0,
                 )
-                if result.get("success"):
-                    pub_url = str(result.get("public_url") or result.get("url") or "").strip()
+                if result["success"] is True:
+                    pub_url = result.get("url")
+                    if not isinstance(pub_url, str) or not pub_url.strip():
+                        raise RuntimeError("Tunnel refresh response is missing url")
+                    pub_url = pub_url.strip()
                 else:
-                    error = str(result.get("error") or "Could not refresh tunnel")
+                    error = result["error"]
             except Exception as exc:
-                error = str(exc) or "Could not refresh tunnel"
+                error = str(exc)
             def _update():
                 if pub_url:
+                    self._runtime_running = True
+                    self._runtime_url = pub_url
                     self.public_url_label.configure(text=pub_url, foreground=ACCENT)
-                    self._store_public_url(pub_url)
                     self._set_status("New public URL ready.")
                 else:
-                    self.public_url_label.configure(text="Waiting for tunnel...", foreground=MUTED)
-                    self._set_status(error or "Tunnel not ready yet — try again in a moment.")
+                    self.public_url_label.configure(text=error, foreground=DANGER)
+                    self._set_status(error)
             self.root.after(0, _update)
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -933,64 +825,63 @@ class ZadooSettingsWindow:
     def _fetch_latest_account_details_async(self, show_status: bool = False) -> None:
         if show_status:
             self._set_status("Refreshing account info...")
-        import threading
         def _do_fetch():
-            fetched_profile = False
-            fetched_credits = False
-            try:
-                r = self.cloud.fetch_profile()
-                if r.get("success"):
-                    fetched_profile = True
-            except Exception:
-                pass
-            try:
-                r = self.cloud.fetch_credits()
-                if r.get("success"):
-                    fetched_credits = True
-            except Exception:
-                pass
+            errors = self._cloud_fetch_errors(
+                (("profile", self.cloud.fetch_profile), ("credits", self.cloud.fetch_credits))
+            )
             def _done():
                 try:
                     self.reload()
                     if show_status:
-                        if fetched_profile and fetched_credits:
-                            self._set_status("Account info updated.")
-                        else:
-                            self._set_status("Partial refresh — check your internet connection.")
-                except Exception:
-                    pass
+                        self._set_status("; ".join(errors) if errors else "Account info updated.")
+                except Exception as exc:
+                    self._set_status(f"Account reload failed: {exc}")
             self.root.after(0, _done)
         threading.Thread(target=_do_fetch, daemon=True).start()
 
+    @staticmethod
+    def _cloud_fetch_errors(fetches) -> list[str]:
+        errors = []
+        for label, fetch in fetches:
+            try:
+                result = fetch()
+                if result["success"] is not True:
+                    errors.append(f"{label}: {result['error']}")
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+        return errors
+
     def _open_pricing(self) -> None:
-        base = str(self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).rstrip("/")
+        base = self.data["cloud_api_base"].rstrip("/")
         webbrowser.open(f"{base}/pricing")
 
     def _add_balance(self) -> None:
-        base = str(self.data.get("cloud_api_base") or DEFAULT_CLOUD_API_BASE).rstrip("/")
+        base = self.data["cloud_api_base"].rstrip("/")
         webbrowser.open(f"{base}/dashboard/billing")
 
 
 
     def _load_runtime_values(self) -> None:
-        self.autostart_var.set(bool(self.data.get("autostart_enabled", True)))
-        self.show_taskbar_var.set(bool(self.data.get("show_settings_in_taskbar", False)))
-        self.runtime_state.configure(text="Startup task installed" if startup_task_exists() else "Startup task not installed")
+        self.autostart_var.set(self.data["autostart_enabled"])
+        self.show_taskbar_var.set(self.data["show_settings_in_taskbar"])
+        if not self._startup_status_loaded:
+            self.runtime_state.configure(
+                text="Startup task installed" if startup_task_exists() else "Startup task not installed"
+            )
+            self._startup_status_loaded = True
 
     def _load_permission_values(self) -> None:
-        permissions = self.data.get("permissions") or {}
+        permissions = self.data["permissions"]
         for key, var in self.permission_vars.items():
-            var.set(bool(permissions.get(key)))
-        if not HAS_WINPTY and "terminal" in self.permission_vars:
-            self.permission_vars["terminal"].set(False)
+            var.set(permissions[key])
 
     def _load_alert_values(self) -> None:
-        alerts = self.data.get("alerts") or {}
+        alerts = self.data["alerts"]
         for code, vars_for_code in self.alert_vars.items():
-            item = alerts.get(code) or {}
-            vars_for_code["enabled"].set(bool(item.get("enabled")))
-            vars_for_code["title"].set(str(item.get("title") or ""))
-            vars_for_code["message"].set(str(item.get("message") or ""))
+            item = alerts[code]
+            vars_for_code["enabled"].set(item["enabled"])
+            vars_for_code["title"].set(item["title"])
+            vars_for_code["message"].set(item["message"])
 
     def allow_all_permissions(self) -> None:
         for var in self.permission_vars.values():
@@ -1003,14 +894,14 @@ class ZadooSettingsWindow:
     def _collect_payload(self) -> dict:
         alerts = {}
         for code, vars_for_code in self.alert_vars.items():
-            title = str(vars_for_code["title"].get() or "").strip()
-            message = str(vars_for_code["message"].get() or "").strip()
+            title = str(vars_for_code["title"].get()).strip()
+            message = str(vars_for_code["message"].get()).strip()
             alerts[code] = {
                 "enabled": bool(vars_for_code["enabled"].get()) and bool(title or message),
                 "title": title,
                 "message": message,
             }
-        payload = {
+        return {
             "admin_code": self.saved_access_code or self.access_code.get().strip(),
             "access_code": self.access_code.get().strip(),
             "email_to": self.email_to.get().strip(),
@@ -1020,36 +911,24 @@ class ZadooSettingsWindow:
             "permissions": {key: bool(var.get()) for key, var in self.permission_vars.items()},
             "alerts": alerts,
         }
-        if not HAS_WINPTY:
-            payload["permissions"]["terminal"] = False
-        return payload
-
     def _wire_autosave(self) -> None:
         """Persist settings automatically whenever a field changes (replaces the Save button)."""
         for entry in (self.access_code, self.email_to, self.device_name):
-            try:
-                entry.bind("<KeyRelease>", self._schedule_autosave, add="+")
-                entry.bind("<FocusOut>", self._schedule_autosave, add="+")
-            except Exception:
-                pass
+            entry.bind("<KeyRelease>", self._schedule_autosave, add="+")
+            entry.bind("<FocusOut>", self._schedule_autosave, add="+")
         toggles = [self.autostart_var, self.show_taskbar_var]
         toggles.extend(self.permission_vars.values())
         for vars_for_code in self.alert_vars.values():
             toggles.extend(vars_for_code.values())
         for var in toggles:
-            try:
-                var.trace_add("write", self._schedule_autosave)
-            except Exception:
-                pass
+            var.trace_add("write", self._schedule_autosave)
 
     def _schedule_autosave(self, *_args) -> None:
-        if getattr(self, "_loading", False):
+        if self._loading:
             return
-        try:
+        with suppress(tk.TclError):
             if self._autosave_after:
                 self.root.after_cancel(self._autosave_after)
-        except Exception:
-            pass
         self._autosave_after = self.root.after(700, self._autosave)
 
     def _autosave(self) -> None:
@@ -1059,63 +938,92 @@ class ZadooSettingsWindow:
             return
         try:
             payload = self._collect_payload()
-        except Exception:
+        except Exception as exc:
+            self._set_status(f"Save failed: {exc}")
             return
         code = str(payload.get("access_code") or "")
         # Wait for a complete, valid access code before writing — don't nag mid-typing.
         if not code or len(code) > ACCESS_CODE_MAX_LENGTH:
             return
         try:
-            self.store.apply_setup(payload, require_code=payload.get("admin_code"))
-            self.apply_startup(show_status=False)
-            if _local_server_running():
-                _notify_settings_reload(payload.get("access_code", ""))
+            previous_autostart = self.data["autostart_enabled"]
+            setup = {key: value for key, value in payload.items() if key != "admin_code"}
+            self.data = self.store.apply_setup(setup, require_code=payload["admin_code"])
+            desired_autostart = payload["autostart_enabled"]
+            if desired_autostart != previous_autostart:
+                ok, message = set_startup_task(desired_autostart)
+                if not ok:
+                    self.data = self.store.atomic_update(
+                        lambda data: data.__setitem__("autostart_enabled", previous_autostart)
+                    )
+                    self._loading = True
+                    try:
+                        self.autostart_var.set(previous_autostart)
+                    finally:
+                        self._loading = False
+                    raise RuntimeError(message)
+                self.runtime_state.configure(
+                    text="Startup task installed" if startup_task_exists() else "Startup task not installed"
+                )
+                self._startup_status_loaded = True
             self.saved_access_code = code
-            self._set_status("Saved ✓")
-        except PermissionError:
-            # Access code changed mid-edit; will retry on the next change.
-            pass
-        except Exception:
-            pass
+            reload_error = ""
+            if _local_server_running():
+                try:
+                    _notify_settings_reload(code)
+                except Exception as exc:
+                    reload_error = str(exc)
+                    logging.error("Runtime settings reload failed: %s", exc)
+            self._set_status(
+                f"Saved locally; runtime reload failed: {reload_error}"
+                if reload_error else "Saved ✓"
+            )
+        except Exception as exc:
+            self._set_status(f"Save failed: {exc}")
 
     def _save_cloud_fields_only(self) -> None:
-        data = self.store.load(reload=True)
-        data["device_name"] = self.device_name.get().strip() or data.get("device_name") or "Windows PC"
-        self.store.save(data)
-        self.data = data
+        device_name = self.device_name.get().strip()
+        if not device_name:
+            raise ValueError("device name is required")
+        self.data = self.store.atomic_update(lambda data: data.__setitem__("device_name", device_name))
 
     def start_activation(self) -> None:
+        if self._activation_request_active:
+            return
         try:
-            # Auto-populate device name from hostname if not set
-            import platform as _platform
-            data = self.store.load(reload=True)
-            if not data.get("device_name"):
-                data["device_name"] = _platform.node() or "Windows PC"
-                self.store.save(data)
-                self.data = data
             self._save_cloud_fields_only()
             self.welcome_status_label.configure(text="Opening browser...")
-            result = self.cloud.start_activation()
-            self.reload()
-            if result.get("success"):
-                connect_url = str(result.get("connectUrl") or (self.data.get("activation") or {}).get("connect_url") or "")
-                if connect_url:
-                    webbrowser.open(connect_url)
-                self._activation_poll_deadline = time.time() + 900
-                self._schedule_activation_poll()
-                self.welcome_status_label.configure(text="Browser opened — please sign in then come back here.")
-            else:
-                err = str(result.get("error") or "Activation failed")
-                self.welcome_status_label.configure(text=f"Error: {err}")
         except Exception as exc:
-            self.welcome_status_label.configure(text=str(exc) or "Activation failed")
+            self.welcome_status_label.configure(text=str(exc))
+            return
+
+        self._activation_request_active = True
+
+        def _start():
+            try:
+                result = self.cloud.start_activation()
+            except Exception as exc:
+                result = {"success": False, "error": str(exc)}
+
+            def _done():
+                self._activation_request_active = False
+                self.reload()
+                if result["success"]:
+                    webbrowser.open(result["connectUrl"])
+                    self._activation_poll_deadline = time.time() + 900
+                    self._schedule_activation_poll()
+                    self.welcome_status_label.configure(text="Browser opened — please sign in then come back here.")
+                else:
+                    self.welcome_status_label.configure(text=f"Error: {result['error']}")
+
+            self.root.after(0, _done)
+
+        threading.Thread(target=_start, daemon=True).start()
 
     def _schedule_activation_poll(self, delay_ms: int = 2500) -> None:
-        try:
+        with suppress(tk.TclError):
             if self._activation_poll_after:
                 self.root.after_cancel(self._activation_poll_after)
-        except Exception:
-            pass
         self._activation_poll_after = self.root.after(delay_ms, self._poll_activation_auto)
 
     def _poll_activation_auto(self) -> None:
@@ -1123,106 +1031,102 @@ class ZadooSettingsWindow:
         self.poll_activation(auto=True)
 
     def poll_activation(self, auto: bool = False) -> None:
-        try:
-            result = self.cloud.poll_activation()
-            if result.get("status") == "claimed":
-                self._activation_poll_deadline = 0.0
-                # New account: wipe any state cached from a previous account, then pull
-                # THIS account's fresh profile + credits + entitlement before reloading.
-                import threading
-                def _post_signin():
+        if self._activation_request_active:
+            return
+        self._activation_request_active = True
+
+        def _poll():
+            errors = []
+            try:
+                result = self.cloud.poll_activation()
+            except Exception as exc:
+                result = {"success": False, "error": str(exc)}
+            if result["success"] and result["status"] == "claimed":
+                try:
+                    def _wipe(data):
+                        data["entitlement_cache"] = {}
+                        data["credits_cache"] = {}
+                    self.store.atomic_update(_wipe)
+                except Exception as exc:
+                    errors.append(f"local account reset: {exc}")
+                for label, fetch in (
+                    ("profile", self.cloud.fetch_profile),
+                    ("credits", self.cloud.fetch_credits),
+                    ("entitlement", self.cloud.entitlement),
+                ):
                     try:
-                        def _wipe(data):
-                            data["entitlement_cache"] = {}
-                            data["credits_cache"] = {}
-                            data["billing_status"] = {}
-                            data["session_blocked"] = False
-                            data["session_block_reason"] = ""
-                            data["public_url"] = ""
-                        self.store.atomic_update(_wipe)
-                    except Exception:
-                        pass
-                    for fetch in (self.cloud.fetch_profile, self.cloud.fetch_credits, self.cloud.entitlement):
-                        try:
-                            fetch()
-                        except Exception:
-                            pass
-                    self.root.after(0, lambda: (self.reload(), self._set_status("Signed in ✓")))
-                threading.Thread(target=_post_signin, daemon=True).start()
-            elif result.get("status") == "pending":
-                if not auto:
-                    self.welcome_status_label.configure(text="Still waiting — please complete sign-in in the browser.")
-                if auto and time.time() < self._activation_poll_deadline:
-                    self._schedule_activation_poll()
-            else:
-                err = str(result.get("error") or "Activation check failed")
-                if not auto:
-                    self.welcome_status_label.configure(text=f"Error: {err}")
-        except Exception as exc:
-            if not auto:
-                self.welcome_status_label.configure(text=str(exc) or "Check failed")
+                        fetched = fetch()
+                        if not fetched["success"]:
+                            errors.append(f"{label}: {fetched['error']}")
+                    except Exception as exc:
+                        errors.append(f"{label}: {exc}")
 
+            def _done():
+                self._activation_request_active = False
+                if result["success"] and result["status"] == "claimed":
+                    self._activation_poll_deadline = 0.0
+                    self.reload()
+                    self._set_status("; ".join(errors) if errors else "Signed in ✓")
+                elif result["success"] and result["status"] == "pending":
+                    if not auto:
+                        self.welcome_status_label.configure(text="Still waiting — please complete sign-in in the browser.")
+                    if auto and time.time() < self._activation_poll_deadline:
+                        self._schedule_activation_poll()
+                else:
+                    self.welcome_status_label.configure(text=f"Error: {result['error']}")
 
-    def refresh_entitlement(self) -> None:
-        try:
-            result = self.cloud.entitlement()
-            self.reload()
-            if result.get("success"):
-                entitlement = result.get("entitlement") or {}
-                self._set_status("Entitlement refreshed" if entitlement.get("allowed") else str(entitlement.get("reason") or "Billing blocked"))
-            else:
-                self._set_status(str(result.get("error") or "Entitlement refresh failed"))
-        except Exception as exc:
-            self._set_status(str(exc) or "Entitlement refresh failed")
+            self.root.after(0, _done)
+
+        threading.Thread(target=_poll, daemon=True).start()
 
     def sign_out(self) -> None:
         """Stop Zadoo immediately, mark the device offline, and clear all account data."""
+        if self._signout_active:
+            return
         if not messagebox.askyesno(
             "Sign Out",
             "Are you sure you want to sign out?\n\nThis will stop Zadoo and unlink this device from your Zadoo account.",
             icon="warning",
         ):
             return
-        # 1. Stop the running runtime NOW — frees port 6173 and (via the stop handler)
-        #    tells the cloud the device is going offline so the website link disappears.
-        try:
-            if _local_server_running():
+        self._signout_active = True
+        self._set_status("Signing out...")
+        admin_code = self._admin_code()
+
+        def _sign_out():
+            errors = []
+            try:
+                result = self.cloud.go_offline()
+                if not result["success"]:
+                    errors.append(f"cloud offline: {result['error']}")
+            except Exception as exc:
+                errors.append(f"cloud offline: {exc}")
+            runtime_running = _local_server_running()
+            if runtime_running:
                 try:
-                    _post_local_json("/api/runtime/stop", {"admin_code": self._admin_code()})
-                except Exception:
-                    pass
-                for _ in range(20):  # wait up to ~5s for the port to actually free
-                    if not _local_server_running():
-                        break
+                    result = _get_local_json("/api/runtime/stop", {"admin_code": admin_code})
+                    if not result["success"]:
+                        errors.append(f"runtime stop: {result['error']}")
+                except Exception as exc:
+                    errors.append(f"runtime stop: {exc}")
+                deadline = time.monotonic() + 5
+                while _local_server_running() and time.monotonic() < deadline:
                     time.sleep(0.25)
-        except Exception:
-            pass
-        # 2. Belt-and-suspenders: mark this device offline on the cloud while the token is
-        #    still valid (covers the case where the runtime wasn't running).
-        try:
-            self.cloud.go_offline()
-        except Exception:
-            pass
-        try:
-            # 3. Clear token + ALL cached account state so nothing leaks to the next account.
-            self.store.clear_device_token()
-            data = self.store.load(reload=True)
-            data["user_name"] = ""
-            data["user_email"] = ""
-            data["user_image_url"] = ""
-            data["credits_cache"] = {}
-            data["entitlement_cache"] = {}
-            data["billing_status"] = {}
-            data["activation"] = {}
-            data["session_blocked"] = False
-            data["session_block_reason"] = ""
-            data["public_url"] = ""
-            self.store.save(data)
-        except Exception as exc:
-            self._set_status(f"Sign out error: {exc}")
-            return
-        self.reload()
-        self._set_status("Signed out — Zadoo stopped")
+                if _local_server_running():
+                    errors.append("runtime stop: port 6173 remained active after 5 seconds")
+            try:
+                self.store.clear_account()
+            except Exception as exc:
+                errors.append(f"local account clear: {exc}")
+
+            def _done():
+                self._signout_active = False
+                self.reload()
+                self._set_status("; ".join(errors) if errors else "Signed out — Zadoo stopped")
+
+            self.root.after(0, _done)
+
+        threading.Thread(target=_sign_out, daemon=True).start()
 
     def copy_activation_code(self) -> None:
         code = self.activation_code.get().strip()
@@ -1234,17 +1138,23 @@ class ZadooSettingsWindow:
         self._set_status("Sign-in code copied")
 
     def apply_startup(self, *, show_status: bool = True) -> None:
-        data = self.store.load(reload=True)
-        data["autostart_enabled"] = bool(self.autostart_var.get())
-        data["show_settings_in_taskbar"] = bool(self.show_taskbar_var.get())
-        self.store.save(data)
-        ok, message = set_startup_task(bool(self.autostart_var.get()))
+        desired = bool(self.autostart_var.get())
+        ok, message = set_startup_task(desired)
+        if not ok:
+            if show_status:
+                self._set_status(f"Startup not changed: {message}")
+            return
+        show_taskbar = bool(self.show_taskbar_var.get())
+        self.data = self.store.atomic_update(
+            lambda data: data.update(
+                autostart_enabled=desired,
+                show_settings_in_taskbar=show_taskbar,
+            )
+        )
         if show_status:
-            self._set_status(message if ok else f"Startup not changed: {message}")
-        try:
-            self.runtime_state.configure(text="Startup task installed" if startup_task_exists() else "Startup task not installed")
-        except Exception:
-            pass
+            self._set_status(message)
+        self.runtime_state.configure(text="Startup task installed" if startup_task_exists() else "Startup task not installed")
+        self._startup_status_loaded = True
 
     def stop_zadoo(self) -> None:
         if not _local_server_running():
@@ -1252,63 +1162,83 @@ class ZadooSettingsWindow:
             return
         try:
             payload = {"admin_code": self.saved_access_code or self.access_code.get().strip()}
-            result = _post_local_json("/api/runtime/stop", payload)
-            self._set_status(str(result.get("message") or "Zadoo runtime stopping"))
+            result = _get_local_json("/api/runtime/stop", payload)
+            if not result["success"]:
+                raise RuntimeError(result["error"])
+            if not isinstance(result.get("message"), str) or not result["message"].strip():
+                raise RuntimeError("Runtime stop response is missing message")
+            self._set_status(result["message"])
         except Exception as exc:
-            self._set_status(str(exc) or "Could not stop Zadoo")
+            self._set_status(str(exc))
 
     def start_zadoo(self) -> None:
+        if self._start_request_active:
+            return
         if not self.store.get_device_token():
             self._set_status("Sign in to Zadoo first")
             return
-        # Zadoo STARTS regardless of remaining credits (billing is enforced inside the
-        # session via the grace/lock + payment panel). Only a revoked device is blocked.
+        code = self.access_code.get().strip()
+        if not code:
+            self._set_status("Access code is required")
+            return
         try:
-            result = self.cloud.entitlement()
-            entitlement = (result.get("entitlement") if isinstance(result, dict) else None) or {}
-            self.reload()  # refresh UI with latest entitlement
-            if entitlement.get("revoked"):
-                self._set_status(str(entitlement.get("reason") or "Device is revoked"))
-                return
-        except Exception:
-            pass  # network error — let the runtime start anyway
-        if (self.data.get("entitlement_cache") or {}).get("revoked"):
-            self._set_status("Device is revoked")
+            payload = self._collect_payload()
+            setup = {key: value for key, value in payload.items() if key != "admin_code"}
+            self.store.apply_setup(setup, require_code=payload["admin_code"])
+            self.saved_access_code = code
+        except Exception as exc:
+            self._set_status(str(exc))
             return
-        # Balance is 0 → HARD BLOCK. Zadoo does not start with no credit; the user must
-        # add credit first. We only offer to open the Add Credit page.
-        if int(getattr(self, "_account_total", 0) or 0) <= 0:
-            if messagebox.askyesno(
-                "Your balance is 0",
-                "Your account balance is 0 minutes.\n\n"
-                "Add credit to start a session.\n\n"
-                "Add credit now?",
-                icon="warning",
-            ):
-                self._add_balance()
-            self._set_status("Your balance is 0 — add credit to start")
-            return
-        # If a (possibly stale) runtime is already running, restart it GRACEFULLY so a
-        # fresh tunnel/public link is created. We use the graceful stop endpoint (not
-        # taskkill /T), so this Settings window is never tree-killed.
-        if _local_server_running():
-            self.public_url_label.configure(text="Restarting Zadoo…", foreground=MUTED)
-            self._set_status("Restarting Zadoo to refresh the public link…")
+        admin_code = self._admin_code()
+        self._start_request_active = True
+        self._set_status("Checking cloud entitlement...")
+
+        def _check_and_stop():
+            error = ""
+            restarted = False
             try:
-                _post_local_json("/api/runtime/stop", {"admin_code": self._admin_code()})
-            except Exception:
-                pass
-            self.root.after(1200, self._launch_runtime)
-            return
-        self._launch_runtime()
+                result = self.cloud.entitlement()
+                if not result["success"]:
+                    raise RuntimeError(f"Cloud entitlement check failed: {result['error']}")
+                entitlement = result["entitlement"]
+                if entitlement["revoked"]:
+                    raise RuntimeError(entitlement["reason"])
+                if _local_server_running():
+                    stopped = _get_local_json("/api/runtime/stop", {"admin_code": admin_code})
+                    if not stopped["success"]:
+                        raise RuntimeError(stopped["error"])
+                    deadline = time.monotonic() + 5
+                    while _local_server_running() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    if _local_server_running():
+                        raise RuntimeError("Zadoo runtime did not stop within 5 seconds")
+                    restarted = True
+            except Exception as exc:
+                error = str(exc)
+
+            def _done():
+                self._start_request_active = False
+                self.reload()
+                if error:
+                    self._set_status(error)
+                elif restarted:
+                    self.public_url_label.configure(text="Restarting Zadoo…", foreground=MUTED)
+                    self._set_status("Restarting Zadoo to refresh the public link…")
+                    self._launch_runtime()
+                else:
+                    self._launch_runtime()
+
+            self.root.after(0, _done)
+
+        threading.Thread(target=_check_and_stop, daemon=True).start()
 
     def _launch_runtime(self) -> None:
         try:
             subprocess.Popen(
-                _runtime_command(),
+                [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-m", "zadoo_vnc"],
                 cwd=str(PROJECT_DIR),
                 close_fds=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             # Keep Settings open (do not hide). Show the public link as the tunnel comes up.
             self.public_url_label.configure(text="Starting Zadoo…", foreground=MUTED)
@@ -1325,18 +1255,14 @@ class ZadooSettingsWindow:
         if self._hidden:
             return
         self._hidden = True
-        try:
+        with suppress(tk.TclError):
             self.root.withdraw()
-        except Exception:
-            pass
         self.root.after(50, self.root.quit)
 
     def run(self) -> None:
         self.root.mainloop()
-        try:
+        with suppress(tk.TclError):
             self.root.destroy()
-        except Exception:
-            pass
 
 
 def run_settings_window() -> None:

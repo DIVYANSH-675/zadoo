@@ -7,26 +7,30 @@ name = "zadoo-vnc"
 version = "1.0.0"
 description = "Windows-focused web VNC runtime with screen capture, input, clipboard, and Cloudflare tunnel support."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "websockets==15.0.1",
   "mss==10.2.0",
-  "PyAutoGUI==0.9.54",
   "Pillow==12.0.0",
   "numpy==2.2.6",
-  "pyperclip==1.11.0",
   "keyboard==0.13.5",
   "pywin32==311; platform_system == 'Windows'",
   "python-dotenv==1.2.1",
   "pygrabber==0.2; platform_system == 'Windows'",
   "av==16.1.0",
+  "sounddevice==0.5.2",
+  "soundcard==0.4.6",
+  "resend==2.30.0",
+  "bettercam==1.0.0",
+  "imagecodecs==2026.3.6",
+  "pywinpty==3.0.3; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
-media = ["sounddevice==0.5.2", "soundcard==0.4.6", "av==16.1.0"]
-email = ["resend==2.30.0"]
-perf = ["dxcam==0.3.0", "opencv-python==4.13.0.92", "fast-ctypes-screenshots==0.10", "bettercam==1.0.0", "imagecodecs==2026.3.6"]
-ssh = ["paramiko==4.0.0", "pywinpty==3.0.3; platform_system == 'Windows'"]
+test = [
+  "playwright==1.61.0",
+  "msvc-runtime==14.44.35112; platform_system == 'Windows'",
+]
 
 [project.scripts]
 zadoo-vnc = "zadoo_vnc.app:main"
@@ -35,7 +39,22 @@ zadoo-vnc = "zadoo_vnc.app:main"
 packages = ["zadoo_vnc"]
 
 [tool.setuptools.package-data]
-zadoo_vnc = ["templates/*.html"]
+zadoo_vnc = ["templates/*.html", "static/vendor/*"]
 
-[tool.vercel]
-entrypoint = "zadoo_vnc/app.py"
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "S", "ASYNC", "PERF", "RUF", "C4", "PIE", "SIM", "RET", "ARG", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/check_template_js.py" = ["S603"]
+"scripts/smoke_test.py" = ["S310"]
+"zadoo_vnc/input_control.py" = ["RUF012"]
+"zadoo_vnc/logging_utils.py" = ["SIM115"]
+"zadoo_vnc/routes.py" = ["RUF012", "S310"]
+"zadoo_vnc/saas.py" = ["S310"]
+"zadoo_vnc/server.py" = ["S104"]
+"zadoo_vnc/settings_window.py" = ["S310", "S603"]
+"zadoo_vnc/tunnel.py" = ["S603"]
+"zadoo_vnc/windows_startup.py" = ["S603"]
