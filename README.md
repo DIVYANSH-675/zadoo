@@ -74,7 +74,7 @@ The packaging entrypoint is:
 .\scripts\build_windows.ps1 -NoSelfSign
 ```
 
-The script creates an isolated build environment under `.build_envs\py311-x64`, installs the fully pinned runtime and build dependency graphs from `requirements-runtime.lock` and `requirements-build.lock` with SHA-256 enforcement, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, verifies the pinned Inno Setup compiler version, SHA-256, architecture, and signature, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
+The script creates an isolated build environment under `.build_envs\py311-x64`, installs the fully pinned runtime and build dependency graphs from `requirements-runtime.lock` and `requirements-build.lock` with SHA-256 enforcement, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, verifies the pinned Inno Setup installer and compiler version, SHA-256, architecture, and signatures, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
 
 Required local tools:
 
@@ -84,7 +84,13 @@ Required local tools:
 - Windows SDK 10.0.26100.7705 `signtool.exe` and a PFX for release signing.
 - The repository `app_icon.ico` for the EXE and installer icon.
 
-Final artifacts are written under `dist\portable` and `dist\installer`. Pass `-KeepOneDir` to retain `dist\onedir` and PyInstaller work files.
+Final artifacts are written under `dist\portable` and `dist\installer`. Each fresh build removes stale `dist` output and writes `dist\release-manifest.json` plus `dist\SHA256SUMS.txt` with artifact sizes, x64 architecture, Authenticode status, and SHA-256 hashes. Pass `-KeepOneDir` to retain `dist\onedir` and PyInstaller work files.
+
+## Continuous Integration
+
+`.github/workflows/windows-x64-ci.yml` runs on every pull request and push to `main` using a GitHub-hosted Windows 2025 x64 runner. It audits both hash-locked dependency graphs, runs the full source gate, produces an unsigned installer and portable executable, verifies their release manifest, generates a CycloneDX runtime SBOM, and uploads short-lived CI artifacts clearly labeled as unsigned. GitHub Actions are pinned to full commit SHAs and checked by `scripts/check_workflow_pins.py`.
+
+Unsigned CI artifacts are for testing only. A distributable release must be built with `-PfxPath`, must report `signed: true` in `release-manifest.json`, and must have `Valid` Authenticode status for every executable in the manifest.
 
 ## Smoke Tests
 
@@ -94,6 +100,7 @@ python -m playwright install chromium
 python -m compileall zadoo_vnc scripts
 python scripts/smoke_test.py
 python scripts/check_template_js.py
+python scripts/check_workflow_pins.py
 python scripts/smoke_test.py --live http://localhost:6173
 python scripts/terminal_e2e_test.py --code YOUR_CODE
 ```

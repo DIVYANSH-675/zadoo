@@ -23,6 +23,7 @@ $CloudflaredSha256 = "03e322598e84d77406fa55b93f59e8e54636c5d8501d9dce36697fcf08
 $PythonVersion = "3.11.9"
 $NodeVersion = "24.18.0"
 $InnoSetupVersion = "7.0.2"
+$InnoSetupInstallerSha256 = "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
 $InnoSetupCompilerSha256 = "0ff6140d641f84b64204a2c4d52207c6fc437c9f4db8779c83083d84f7e3d70d"
 $WindowsSdkVersion = "10.0.26100.7705"
 $WindowsSdkBinVersion = "10.0.26100.0"
@@ -126,11 +127,34 @@ function Resolve-SignTool {
 
 function Install-ToolsIfRequested {
     if (-not $InstallMissingTools) { return }
-    Write-Step "Installing missing packaging tools with winget"
+    Write-Step "Installing the pinned Inno Setup compiler"
+    $toolCache = Join-Path $Root "build\tools\inno-$InnoSetupVersion-x64"
+    New-Item -ItemType Directory -Force -Path $toolCache | Out-Null
+    $installer = Join-Path $toolCache "innosetup-$InnoSetupVersion-x64.exe"
+    if (-not (Test-Path -LiteralPath $installer)) {
+        $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-$InnoSetupVersion-x64.exe"
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $installer
+    }
+    Assert-X64PE $installer "Inno Setup installer"
+    Assert-Sha256 $installer $InnoSetupInstallerSha256 "Inno Setup $InnoSetupVersion x64 installer"
+    $installerSignature = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($installerSignature.Status -ne "Valid") {
+        throw "Inno Setup installer signature check failed for $installer ($($installerSignature.Status))."
+    }
+    $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7"
+    & $installer "/VERYSILENT" "/SUPPRESSMSGBOXES" "/NORESTART" "/CURRENTUSER" "/DIR=$installRoot" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup $InnoSetupVersion installer failed with exit code $LASTEXITCODE." }
+    if (-not (Test-Path -LiteralPath (Join-Path $installRoot "ISCC.exe"))) {
+        throw "Inno Setup $InnoSetupVersion installer completed without creating $installRoot\ISCC.exe"
+    }
+
+    if ($NoSelfSign -or $SignToolPath) { return }
+    $expectedSignTool = "$env:ProgramFiles(x86)\Windows Kits\10\bin\$WindowsSdkBinVersion\x64\signtool.exe"
+    if (Test-Path -LiteralPath $expectedSignTool) { return }
+    Write-Step "Installing the pinned Windows SDK signing tools"
     $winget = Find-Exe @("winget.exe")
-    if (-not $winget) { throw "winget.exe not found; install Inno Setup and the Windows SDK manually." }
-    & $winget install --id JRSoftware.InnoSetup.7 -e --version $InnoSetupVersion --source winget --architecture x64 --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw "winget failed to install Inno Setup $InnoSetupVersion (exit $LASTEXITCODE)." }
+    if (-not $winget) { throw "winget.exe not found; install Windows SDK $WindowsSdkVersion or pass -SignToolPath." }
     & $winget install --id Microsoft.WindowsSDK.10.0 -e --version $WindowsSdkVersion --source winget --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) { throw "winget failed to install Windows SDK $WindowsSdkVersion (exit $LASTEXITCODE)." }
 }
@@ -234,6 +258,50 @@ function Invoke-Sign([string]$PathToSign) {
     }
 }
 
+function Write-ReleaseMetadata([string]$Version) {
+    $distRoot = Join-Path $Root "dist"
+    $candidatePaths = @(
+        (Join-Path $distRoot "portable\Zadoo-x64.exe"),
+        (Join-Path $distRoot "installer\Zadoo-$Version-x64-Setup.exe")
+    )
+    if ($KeepOneDir -or ($SkipPortable -and $SkipInstaller)) {
+        $candidatePaths += Join-Path $distRoot "onedir\x64\Zadoo\Zadoo.exe"
+    }
+    $artifacts = @()
+    $checksumLines = @()
+    foreach ($path in $candidatePaths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        Assert-X64PE $path "Release artifact"
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $relative = $path.Substring($distRoot.Length).TrimStart("\", "/").Replace("\", "/")
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if (-not $NoSelfSign -and $signature.Status -ne "Valid") {
+            throw "Release artifact signature check failed for $path ($($signature.Status))."
+        }
+        $artifacts += [ordered]@{
+            file = $relative
+            bytes = [long](Get-Item -LiteralPath $path).Length
+            sha256 = $hash
+            architecture = "x64"
+            authenticode_status = [string]$signature.Status
+        }
+        $checksumLines += "$hash  $relative"
+    }
+    if (-not $artifacts) { throw "No release artifacts were produced under $distRoot" }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $manifest = [ordered]@{
+        schema_version = 1
+        application = "Zadoo"
+        version = $Version
+        architecture = "x64"
+        signed = -not [bool]$NoSelfSign
+        generated_at_utc = [DateTime]::UtcNow.ToString("o")
+        artifacts = $artifacts
+    } | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText((Join-Path $distRoot "release-manifest.json"), $manifest + [Environment]::NewLine, $utf8)
+    [System.IO.File]::WriteAllLines((Join-Path $distRoot "SHA256SUMS.txt"), [string[]]$checksumLines, $utf8)
+}
+
 function Ensure-Venv([string]$PythonExe) {
     $venv = Join-Path $Root ".build_envs\py311-x64"
     $venvPython = Join-Path $venv "Scripts\python.exe"
@@ -280,6 +348,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
     if ($LASTEXITCODE -ne 0) { throw "Template JavaScript check failed" }
+    & $PythonExe scripts\check_workflow_pins.py
+    if ($LASTEXITCODE -ne 0) { throw "GitHub workflow pin check failed" }
 }
 
 function Build-Zadoo {
@@ -293,6 +363,9 @@ function Build-Zadoo {
 
     $workRoot = Join-Path $Root "build\pyinstaller\x64"
     $distRoot = Join-Path $Root "dist"
+    if (Test-Path -LiteralPath $distRoot) {
+        Remove-Item -LiteralPath $distRoot -Recurse -Force
+    }
     $commonArgs = @(
         "--noconfirm",
         "--clean",
@@ -386,6 +459,7 @@ function Build-Zadoo {
             }
         }
     }
+    Write-ReleaseMetadata $Version
 }
 
 Install-ToolsIfRequested

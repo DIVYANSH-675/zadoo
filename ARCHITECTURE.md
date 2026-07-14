@@ -75,7 +75,7 @@ The build downloads cloudflared 2026.6.0 from its versioned release, verifies it
 
 ## Build and verification
 
-`scripts/build_windows.ps1` requires Python 3.11.9 and Node.js 24.18.0 x64. It creates one x64 build environment, installs pinned build dependencies, validates imports, runs source checks, builds the installer and optional portable executable, and signs artifacts. Every invocation must select a PFX or explicitly request unsigned output with `-NoSelfSign`; the build never creates or trusts certificates.
+`scripts/build_windows.ps1` requires Python 3.11.9 and Node.js 24.18.0 x64. It creates one x64 build environment, installs hash-locked dependencies, validates imports, runs source checks, verifies downloaded build tools, builds the installer and optional portable executable, signs artifacts, and emits a SHA-256 release manifest. Every invocation must select a PFX or explicitly request unsigned output with `-NoSelfSign`; the build never creates or trusts certificates. GitHub CI repeats the unsigned build, dependency audits, manifest verification, and CycloneDX SBOM generation on Windows 2025 x64.
 
 The standard verification set is:
 
@@ -84,6 +84,7 @@ python -m compileall -q zadoo_vnc scripts
 python -m ruff check .
 python scripts\smoke_test.py
 python scripts\check_template_js.py
+python scripts\check_workflow_pins.py
 ```
 
 ## Supported configuration overrides

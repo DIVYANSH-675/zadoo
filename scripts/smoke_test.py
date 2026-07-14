@@ -165,6 +165,7 @@ def assert_imports() -> None:
     for lock_name, required_packages in {
         "requirements-runtime.lock": ("pillow==12.3.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
         "requirements-build.lock": ("pip==26.1.2", "setuptools==83.0.0", "pyinstaller==6.21.0"),
+        "ci_requirements.lock": ("pip==26.1.2", "pip-audit==2.10.1"),
     }.items():
         lock_text = (ROOT / lock_name).read_text(encoding="utf-8").lower()
         if "--hash=sha256:" not in lock_text:
@@ -175,6 +176,14 @@ def assert_imports() -> None:
     build_script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     if build_script.count("--require-hashes") < 2:
         fail("Windows build does not enforce both dependency lock files")
+    for required_build_marker in (
+        "InnoSetupInstallerSha256",
+        "release-manifest.json",
+        "SHA256SUMS.txt",
+        "Write-ReleaseMetadata",
+    ):
+        if required_build_marker not in build_script:
+            fail(f"Windows build is missing release safeguard {required_build_marker}")
     documented_env = {
         "EMAIL_TO",
         "HIDE_CONSOLE",
