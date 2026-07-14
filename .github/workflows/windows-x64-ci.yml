@@ -75,7 +75,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $manifest = Get-Content -Raw dist\release-manifest.json | ConvertFrom-Json
-          if ($manifest.version -ne "1.0.0") { throw "Release manifest version mismatch: $($manifest.version)" }
+          $expectedVersion = (& python -c "from zadoo_vnc import __version__; print(__version__)").Trim()
+          if ($manifest.version -ne $expectedVersion) { throw "Release manifest version mismatch: expected $expectedVersion, got $($manifest.version)" }
           if ($manifest.architecture -ne "x64") { throw "Release manifest architecture mismatch: $($manifest.architecture)" }
           if ($manifest.signed -ne $false) { throw "CI artifacts must be explicitly unsigned." }
           foreach ($artifact in $manifest.artifacts) {

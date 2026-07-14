@@ -11,6 +11,8 @@ __pycache__/
 build/
 dist/
 .build_envs/
+.lock-tools/
+.venv/
 *.egg-info/
 *.pfx
 *.p12

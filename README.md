@@ -2,6 +2,9 @@
 
 Zadoo is a Windows x64 remote screen, input, clipboard, media, terminal, alert, and Cloudflare tunnel runtime.
 
+See `OPERATIONS.md` for exact source setup, health checks, signed release verification, rollback,
+and the production checklist. See `CONTRIBUTING.md` for validation and dependency-lock maintenance.
+
 ## Setup
 
 Use Python 3.11.9 on Windows.

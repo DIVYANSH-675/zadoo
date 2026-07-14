@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zadoo-vnc"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Windows-focused web VNC runtime with screen capture, input, clipboard, and Cloudflare tunnel support."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -40,6 +40,9 @@ packages = ["zadoo_vnc"]
 
 [tool.setuptools.package-data]
 zadoo_vnc = ["templates/*.html", "static/vendor/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "zadoo_vnc.__version__"}
 
 [tool.ruff]
 target-version = "py311"

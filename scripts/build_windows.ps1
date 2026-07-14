@@ -356,7 +356,7 @@ function Build-Zadoo {
     Write-Step "Building Zadoo x64"
     if (-not (Test-Path -LiteralPath $IconPath)) { throw "Icon not found: $IconPath" }
     $python = Get-Python
-    $Version = (& $python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])" | Select-Object -First 1).Trim()
+    $Version = (& $python -c "from zadoo_vnc import __version__; print(__version__)" | Select-Object -First 1).Trim()
     $venvPython = Ensure-Venv $python
     Invoke-SourceChecks $venvPython
     $cloudflared = Ensure-Cloudflared

@@ -19,6 +19,8 @@ from typing import Any
 
 import win32crypt
 
+from . import __version__
+
 
 def _clean_http_origin(value: Any, field: str) -> str:
     if not isinstance(value, str):
@@ -103,8 +105,8 @@ def settings_path() -> Path:
     return Path(override).expanduser().resolve()
 
 
-# Single source of truth for the agent version reported to the cloud.
-APP_VERSION = "1.0.0"
+# Compatibility name used by the SaaS client; the package owns the version.
+APP_VERSION = __version__
 
 
 def machine_id() -> str:

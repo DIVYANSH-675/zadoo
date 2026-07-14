@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -151,7 +152,7 @@ def assert_imports() -> None:
     from websockets.datastructures import Headers
 
     import zadoo_vnc.settings as settings_mod
-    from zadoo_vnc import camera_discovery, screen_capture
+    from zadoo_vnc import __version__, camera_discovery, screen_capture
     from zadoo_vnc.app import require_windows_x64
     from zadoo_vnc.assets import load_binary, load_static, load_template
     from zadoo_vnc.config import env_bool
@@ -161,6 +162,13 @@ def assert_imports() -> None:
     from zadoo_vnc.streaming import STREAM_LADDER
 
     require_windows_x64()
+    project_metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    if project_metadata["project"].get("dynamic") != ["version"]:
+        fail("pyproject.toml must declare the package version as dynamic")
+    if project_metadata["tool"]["setuptools"]["dynamic"].get("version") != {"attr": "zadoo_vnc.__version__"}:
+        fail("setuptools version metadata does not use zadoo_vnc.__version__")
+    if __version__ != settings_mod.APP_VERSION:
+        fail(f"cloud agent version {settings_mod.APP_VERSION!r} does not match package version {__version__!r}")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for lock_name, required_packages in {
         "requirements-runtime.lock": ("pillow==12.3.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
