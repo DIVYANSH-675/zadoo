@@ -2,6 +2,9 @@
 
 Zadoo is a Windows x64 remote screen, input, clipboard, media, terminal, alert, and Cloudflare tunnel runtime.
 
+See `OPERATIONS.md` for exact source setup, health checks, signed release verification, rollback,
+and the production checklist. See `CONTRIBUTING.md` for validation and dependency-lock maintenance.
+
 ## Setup
 
 Use Python 3.11.9 on Windows.
@@ -29,16 +32,21 @@ Running without arguments then starts the host runtime on fixed port `6173`. For
 Installed builds store user settings in:
 
 ```text
-%ProgramData%\Zadoo\config.json
+%LOCALAPPDATA%\Zadoo\config.json
 ```
 
-Settings include the DPAPI-encrypted access code, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
+The first upgraded run migrates a legacy `%ProgramData%\Zadoo\config.json` into the current
+Windows user's profile. Access codes and device tokens are re-encrypted with current-user DPAPI,
+and the settings tree receives an explicit protected ACL.
+
+Settings include the encrypted access code, recipient email, alert slots, the single permission matrix, SaaS activation state, startup state, taskbar behavior, and setup completion.
 
 - One access code is used for all sessions. It is limited to 10 characters and is visible only in the local Settings window.
 - Permissions control mouse, keyboard, clipboard pull, clipboard push, system audio, mic, camera, terminal, snapshots, advanced video controls, tunnel refresh, and remote alerts.
 - Alert A-D slots have no defaults. Blank slots are disabled.
 - Email notification requires `RESEND_API_KEY`, `RESEND_FROM`, and a recipient set through `Email To` or `EMAIL_TO`; status names any missing field.
 - The Settings window can start and stop the runtime, start device activation with the hosted SaaS, refresh entitlement, toggle autostart, and choose whether minimized Settings remains visible on the taskbar.
+- The Runtime tab can export a bounded, redacted diagnostics ZIP for local troubleshooting.
 
 `.env.example` documents source-development overrides only. User-facing configuration belongs in the native Zadoo Settings window.
 
@@ -74,17 +82,27 @@ The packaging entrypoint is:
 .\scripts\build_windows.ps1 -NoSelfSign
 ```
 
-The script creates an isolated build environment under `.build_envs\py311-x64`, installs pinned build dependencies, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
+The script creates an isolated build environment under `.build_envs\py311-x64`, installs the fully pinned runtime and build dependency graphs from `requirements-runtime.lock` and `requirements-build.lock` with SHA-256 enforcement, validates imports, downloads the pinned x64 `cloudflared.exe` and verifies its SHA-256 plus Authenticode signature, verifies the pinned Inno Setup installer and compiler version, SHA-256, architecture, and signatures, builds a PyInstaller one-folder app for the installer, builds a portable one-file EXE, signs the EXEs/installers, and compiles the Inno Setup installer. A build must explicitly supply either `-PfxPath` for release signing or `-NoSelfSign` for unsigned local artifacts; it never creates or trusts certificates.
 
 Required local tools:
 
 - Python 3.11.9 x64; pass `-PythonPath` when it cannot be resolved through the x64 `py` launcher or its standard install path.
 - Node.js 24.18.0 x64 for template JavaScript validation; pass `-NodePath` when it is not on `PATH`.
-- Inno Setup 7.0.1-beta x64 for installers.
+- Inno Setup 7.0.2 x64 for installers.
 - Windows SDK 10.0.26100.7705 `signtool.exe` and a PFX for release signing.
 - The repository `app_icon.ico` for the EXE and installer icon.
 
-Final artifacts are written under `dist\portable` and `dist\installer`. Pass `-KeepOneDir` to retain `dist\onedir` and PyInstaller work files.
+Final artifacts are written under `dist\portable` and `dist\installer`. Each fresh build removes stale `dist` output and writes `dist\release-manifest.json` plus `dist\SHA256SUMS.txt` with artifact sizes, x64 architecture, Authenticode status, and SHA-256 hashes. Pass `-KeepOneDir` to retain `dist\onedir` and PyInstaller work files.
+
+## Continuous Integration
+
+`.github/workflows/windows-x64-ci.yml` runs on every pull request and push to `main` using a GitHub-hosted Windows 2025 x64 runner. It audits both hash-locked dependency graphs, runs the full source gate, produces an unsigned installer and portable executable, verifies their release manifest, generates a CycloneDX runtime SBOM, and uploads short-lived CI artifacts clearly labeled as unsigned. GitHub Actions are pinned to full commit SHAs and checked by `scripts/check_workflow_pins.py`.
+
+Unsigned CI artifacts are for testing only. The guarded manual
+`.github/workflows/windows-x64-release.yml` workflow accepts only a matching version tag and a
+protected release environment containing the signing PFX secrets. A distributable release must
+report `signed: true` in `release-manifest.json` and have `Valid` Authenticode status for every
+executable in the manifest.
 
 ## Smoke Tests
 
@@ -94,6 +112,7 @@ python -m playwright install chromium
 python -m compileall zadoo_vnc scripts
 python scripts/smoke_test.py
 python scripts/check_template_js.py
+python scripts/check_workflow_pins.py
 python scripts/smoke_test.py --live http://localhost:6173
 python scripts/terminal_e2e_test.py --code YOUR_CODE
 ```

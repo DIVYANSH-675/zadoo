@@ -65,9 +65,13 @@ Filename: "{cmd}"; Parameters: "/C schtasks /Delete /TN ""Zadoo"" /F"; Flags: ru
 function InitializeUninstall(): Boolean;
 begin
   Result := True;
-  if DirExists(ExpandConstant('{commonappdata}\Zadoo')) then
+  if DirExists(ExpandConstant('{localappdata}\Zadoo')) or
+     DirExists(ExpandConstant('{commonappdata}\Zadoo')) then
   begin
-    if MsgBox('Delete Zadoo settings and logs from ProgramData?', mbConfirmation, MB_YESNO) = IDYES then
+    if MsgBox('Delete this Windows user''s Zadoo settings and logs, including any legacy ProgramData copy?', mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      DelTree(ExpandConstant('{localappdata}\Zadoo'), True, True, True);
       DelTree(ExpandConstant('{commonappdata}\Zadoo'), True, True, True);
+    end;
   end;
 end;

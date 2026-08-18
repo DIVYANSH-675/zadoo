@@ -1,0 +1,96 @@
+name: Windows x64 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Verify and package Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11.9 x64
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.11.9
+          architecture: x64
+
+      - name: Set up Node.js 24.18.0 x64
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          architecture: x64
+
+      - name: Audit hash-locked dependencies
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $auditRoot = Join-Path $env:RUNNER_TEMP "zadoo-audit"
+          python -m venv $auditRoot
+          $auditPython = Join-Path $auditRoot "Scripts\python.exe"
+          & $auditPython -m pip install --no-cache-dir --require-hashes -r ci_requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked CI audit tools." }
+          foreach ($lock in @("requirements-runtime.lock", "requirements-build.lock")) {
+            & $auditPython -m pip_audit -r $lock --require-hashes --disable-pip --strict --progress-spinner off
+            if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed for $lock." }
+          }
+
+      - name: Run source gates and build unsigned CI artifacts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $python = (Get-Command python).Source
+          $node = (Get-Command node).Source
+          .\scripts\build_windows.ps1 -NoSelfSign -InstallMissingTools -PythonPath $python -NodePath $node
+
+      - name: Generate runtime SBOM
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $auditPython = Join-Path $env:RUNNER_TEMP "zadoo-audit\Scripts\python.exe"
+          & $auditPython -m pip_audit -r requirements-runtime.lock --require-hashes --disable-pip --strict --progress-spinner off --format cyclonedx-json --output dist\zadoo-runtime.sbom.cdx.json
+          if ($LASTEXITCODE -ne 0) { throw "Runtime SBOM generation failed." }
+
+      - name: Verify release metadata
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = Get-Content -Raw dist\release-manifest.json | ConvertFrom-Json
+          $expectedVersion = (& python -c "from zadoo_vnc import __version__; print(__version__)").Trim()
+          if ($manifest.version -ne $expectedVersion) { throw "Release manifest version mismatch: expected $expectedVersion, got $($manifest.version)" }
+          if ($manifest.architecture -ne "x64") { throw "Release manifest architecture mismatch: $($manifest.architecture)" }
+          if ($manifest.signed -ne $false) { throw "CI artifacts must be explicitly unsigned." }
+          foreach ($artifact in $manifest.artifacts) {
+            $path = Join-Path dist ($artifact.file -replace "/", "\")
+            if (-not (Test-Path -LiteralPath $path)) { throw "Manifest artifact missing: $path" }
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $artifact.sha256) { throw "Manifest hash mismatch for $path" }
+          }
+
+      - name: Upload unsigned Windows x64 artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zadoo-windows-x64-unsigned-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

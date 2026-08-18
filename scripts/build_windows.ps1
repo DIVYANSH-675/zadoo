@@ -22,7 +22,9 @@ $CloudflaredVersion = "2026.6.0"
 $CloudflaredSha256 = "03e322598e84d77406fa55b93f59e8e54636c5d8501d9dce36697fcf080ed8cc"
 $PythonVersion = "3.11.9"
 $NodeVersion = "24.18.0"
-$InnoSetupVersion = "7.0.1-beta"
+$InnoSetupVersion = "7.0.2"
+$InnoSetupInstallerSha256 = "5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1"
+$InnoSetupCompilerSha256 = "0ff6140d641f84b64204a2c4d52207c6fc437c9f4db8779c83083d84f7e3d70d"
 $WindowsSdkVersion = "10.0.26100.7705"
 $WindowsSdkBinVersion = "10.0.26100.0"
 
@@ -58,21 +60,53 @@ function Find-Exe([string[]]$Candidates) {
     return $null
 }
 
+function Assert-Sha256([string]$Path, [string]$Expected, [string]$Label) {
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $Expected.ToLowerInvariant()) {
+        throw "$Label SHA256 mismatch: expected $Expected, got $actual"
+    }
+}
+
+function Get-InnoInstalledVersion([string]$CompilerPath) {
+    $resolvedCompiler = [System.IO.Path]::GetFullPath($CompilerPath)
+    $registryPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    foreach ($entry in Get-ItemProperty -Path $registryPaths -ErrorAction SilentlyContinue) {
+        if ($entry.DisplayName -notlike "Inno Setup*" -or -not $entry.InstallLocation) { continue }
+        $installRoot = [System.IO.Path]::GetFullPath([string]$entry.InstallLocation).TrimEnd("\", "/")
+        if ($resolvedCompiler.StartsWith($installRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [string]$entry.DisplayVersion
+        }
+    }
+    throw "Unable to determine the installed Inno Setup version for $resolvedCompiler"
+}
+
 function Resolve-Inno {
     if ($InnoPath) {
         if (-not (Test-Path -LiteralPath $InnoPath)) { throw "Inno Setup compiler not found: $InnoPath" }
-        $resolved = (Resolve-Path $InnoPath).Path
-        Assert-X64PE $resolved "Inno Setup compiler"
-        return $resolved
+        $found = (Resolve-Path $InnoPath).Path
+    } else {
+        $candidates = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+            "ISCC.exe"
+        )
+        $found = Find-Exe $candidates
+        if (-not $found) { throw "Inno Setup 7 x64 ISCC.exe was not found. Install it or pass -InnoPath." }
     }
-    $candidates = @(
-        "ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
-    )
-    $found = Find-Exe $candidates
-    if (-not $found) { throw "Inno Setup 7 x64 ISCC.exe was not found. Install it or pass -InnoPath." }
     Assert-X64PE $found "Inno Setup compiler"
+    Assert-Sha256 $found $InnoSetupCompilerSha256 "Inno Setup $InnoSetupVersion x64 compiler"
+    $version = Get-InnoInstalledVersion $found
+    if ($version -ne $InnoSetupVersion) {
+        throw "Inno Setup $InnoSetupVersion x64 is required; resolved version $version at $found"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $found
+    if ($signature.Status -ne "Valid") {
+        throw "Inno Setup compiler signature check failed for $found ($($signature.Status))."
+    }
     return $found
 }
 
@@ -93,11 +127,38 @@ function Resolve-SignTool {
 
 function Install-ToolsIfRequested {
     if (-not $InstallMissingTools) { return }
-    Write-Step "Installing missing packaging tools with winget"
+    Write-Step "Installing the pinned Inno Setup compiler"
+    $toolCache = Join-Path $Root "build\tools\inno-$InnoSetupVersion-x64"
+    New-Item -ItemType Directory -Force -Path $toolCache | Out-Null
+    $installer = Join-Path $toolCache "innosetup-$InnoSetupVersion-x64.exe"
+    if (-not (Test-Path -LiteralPath $installer)) {
+        $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-$InnoSetupVersion-x64.exe"
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $installer
+    }
+    Assert-X64PE $installer "Inno Setup installer"
+    Assert-Sha256 $installer $InnoSetupInstallerSha256 "Inno Setup $InnoSetupVersion x64 installer"
+    $installerSignature = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($installerSignature.Status -ne "Valid") {
+        throw "Inno Setup installer signature check failed for $installer ($($installerSignature.Status))."
+    }
+    $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7"
+    & $installer "/VERYSILENT" "/SUPPRESSMSGBOXES" "/NORESTART" "/CURRENTUSER" "/DIR=$installRoot" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup $InnoSetupVersion installer failed with exit code $LASTEXITCODE." }
+    $installedCompiler = Join-Path $installRoot "ISCC.exe"
+    if (-not (Test-Path -LiteralPath $installedCompiler)) {
+        throw "Inno Setup $InnoSetupVersion installer completed without creating $installRoot\ISCC.exe"
+    }
+    # Bind the exact compiler we just authenticated instead of resolving a PATH
+    # shim later. GitHub's hosted image includes a Chocolatey x86 ISCC shim.
+    $script:InnoPath = $installedCompiler
+
+    if ($NoSelfSign -or $SignToolPath) { return }
+    $expectedSignTool = "$env:ProgramFiles(x86)\Windows Kits\10\bin\$WindowsSdkBinVersion\x64\signtool.exe"
+    if (Test-Path -LiteralPath $expectedSignTool) { return }
+    Write-Step "Installing the pinned Windows SDK signing tools"
     $winget = Find-Exe @("winget.exe")
-    if (-not $winget) { throw "winget.exe not found; install Inno Setup and the Windows SDK manually." }
-    & $winget install --id JRSoftware.InnoSetup.7 -e --version $InnoSetupVersion --source winget --architecture x64 --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw "winget failed to install Inno Setup $InnoSetupVersion (exit $LASTEXITCODE)." }
+    if (-not $winget) { throw "winget.exe not found; install Windows SDK $WindowsSdkVersion or pass -SignToolPath." }
     & $winget install --id Microsoft.WindowsSDK.10.0 -e --version $WindowsSdkVersion --source winget --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) { throw "winget failed to install Windows SDK $WindowsSdkVersion (exit $LASTEXITCODE)." }
 }
@@ -201,6 +262,50 @@ function Invoke-Sign([string]$PathToSign) {
     }
 }
 
+function Write-ReleaseMetadata([string]$Version) {
+    $distRoot = Join-Path $Root "dist"
+    $candidatePaths = @(
+        (Join-Path $distRoot "portable\Zadoo-x64.exe"),
+        (Join-Path $distRoot "installer\Zadoo-$Version-x64-Setup.exe")
+    )
+    if ($KeepOneDir -or ($SkipPortable -and $SkipInstaller)) {
+        $candidatePaths += Join-Path $distRoot "onedir\x64\Zadoo\Zadoo.exe"
+    }
+    $artifacts = @()
+    $checksumLines = @()
+    foreach ($path in $candidatePaths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        Assert-X64PE $path "Release artifact"
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $relative = $path.Substring($distRoot.Length).TrimStart("\", "/").Replace("\", "/")
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if (-not $NoSelfSign -and $signature.Status -ne "Valid") {
+            throw "Release artifact signature check failed for $path ($($signature.Status))."
+        }
+        $artifacts += [ordered]@{
+            file = $relative
+            bytes = [long](Get-Item -LiteralPath $path).Length
+            sha256 = $hash
+            architecture = "x64"
+            authenticode_status = [string]$signature.Status
+        }
+        $checksumLines += "$hash  $relative"
+    }
+    if (-not $artifacts) { throw "No release artifacts were produced under $distRoot" }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $manifest = [ordered]@{
+        schema_version = 1
+        application = "Zadoo"
+        version = $Version
+        architecture = "x64"
+        signed = -not [bool]$NoSelfSign
+        generated_at_utc = [DateTime]::UtcNow.ToString("o")
+        artifacts = $artifacts
+    } | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText((Join-Path $distRoot "release-manifest.json"), $manifest + [Environment]::NewLine, $utf8)
+    [System.IO.File]::WriteAllLines((Join-Path $distRoot "SHA256SUMS.txt"), [string[]]$checksumLines, $utf8)
+}
+
 function Ensure-Venv([string]$PythonExe) {
     $venv = Join-Path $Root ".build_envs\py311-x64"
     $venvPython = Join-Path $venv "Scripts\python.exe"
@@ -213,10 +318,19 @@ function Ensure-Venv([string]$PythonExe) {
     if ($venvRuntime -ne "${PythonVersion}:64") {
         throw "Build environment must use Python $PythonVersion x64; found $venvRuntime at $venvPython"
     }
-    & $venvPython -m pip install --no-cache-dir --upgrade "pip==26.1.2" "wheel==0.47.0" | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip/wheel" }
-    & $venvPython -m pip install --no-cache-dir $Root -r (Join-Path $Root "build_requirements.txt") | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Failed to install requirements" }
+    $buildLock = Join-Path $Root "requirements-build.lock"
+    $runtimeLock = Join-Path $Root "requirements-runtime.lock"
+    foreach ($lock in @($buildLock, $runtimeLock)) {
+        if (-not (Test-Path -LiteralPath $lock)) { throw "Dependency lock file not found: $lock" }
+    }
+    & $venvPython -m pip install --no-cache-dir --require-hashes -r $buildLock | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked build requirements" }
+    & $venvPython -m pip install --no-cache-dir --require-hashes -r $runtimeLock | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install hash-locked runtime requirements" }
+    & $venvPython -m pip install --no-cache-dir --no-deps --no-build-isolation $Root | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install the local Zadoo package" }
+    & $venvPython -m pip check | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Installed dependency set is inconsistent" }
     $sanityImports = "import websockets,mss,PIL,numpy,keyboard,av,sounddevice,soundcard,bettercam,imagecodecs,winpty; import win32api,win32clipboard,win32crypt"
     & $venvPython -c $sanityImports | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Dependency import check failed" }
@@ -238,19 +352,24 @@ function Invoke-SourceChecks([string]$PythonExe) {
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
     if ($LASTEXITCODE -ne 0) { throw "Template JavaScript check failed" }
+    & $PythonExe scripts\check_workflow_pins.py
+    if ($LASTEXITCODE -ne 0) { throw "GitHub workflow pin check failed" }
 }
 
 function Build-Zadoo {
     Write-Step "Building Zadoo x64"
     if (-not (Test-Path -LiteralPath $IconPath)) { throw "Icon not found: $IconPath" }
     $python = Get-Python
-    $Version = (& $python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])" | Select-Object -First 1).Trim()
+    $Version = (& $python -c "from zadoo_vnc import __version__; print(__version__)" | Select-Object -First 1).Trim()
     $venvPython = Ensure-Venv $python
     Invoke-SourceChecks $venvPython
     $cloudflared = Ensure-Cloudflared
 
     $workRoot = Join-Path $Root "build\pyinstaller\x64"
     $distRoot = Join-Path $Root "dist"
+    if (Test-Path -LiteralPath $distRoot) {
+        Remove-Item -LiteralPath $distRoot -Recurse -Force
+    }
     $commonArgs = @(
         "--noconfirm",
         "--clean",
@@ -344,6 +463,7 @@ function Build-Zadoo {
             }
         }
     }
+    Write-ReleaseMetadata $Version
 }
 
 Install-ToolsIfRequested

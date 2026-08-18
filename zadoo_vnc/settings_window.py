@@ -12,9 +12,13 @@ import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
 from contextlib import suppress
-from tkinter import BOTH, END, LEFT, RIGHT, StringVar, Tk, messagebox, ttk
+from pathlib import Path
+from tkinter import BOTH, END, LEFT, RIGHT, StringVar, Tk, filedialog, messagebox, ttk
+
+from websockets.sync.client import connect as websocket_connect
 
 from .config import APP_PORT, PROJECT_DIR, resource_path
 from .saas import ZadooCloudClient
@@ -97,8 +101,49 @@ def _get_local_json(path: str, payload: dict, timeout: float = 1.5) -> dict:
     return data
 
 
+def _local_rpc(action: str, payload: dict, timeout: float = 1.5) -> dict:
+    if not isinstance(action, str) or not action:
+        raise ValueError("Local RPC action is required")
+    if not isinstance(payload, dict):
+        raise TypeError("Local RPC payload must be an object")
+    request_id = uuid.uuid4().hex
+    request = json.dumps({"id": request_id, "action": action, "params": payload})
+    uri = f"ws://127.0.0.1:{APP_PORT}/rpc"
+    with websocket_connect(
+        uri,
+        origin=f"http://127.0.0.1:{APP_PORT}",
+        open_timeout=min(timeout, 5.0),
+        close_timeout=1.0,
+        max_size=1_000_000,
+        proxy=None,
+    ) as websocket:
+        websocket.send(request)
+        raw = websocket.recv(timeout=timeout)
+    if not isinstance(raw, str):
+        raise RuntimeError(f"Local RPC {action} returned a non-text response")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Local RPC {action} returned invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Local RPC {action} returned a non-object response")
+    if data.get("id") != request_id:
+        raise RuntimeError(f"Local RPC {action} returned a mismatched id")
+    if type(data.get("success")) is not bool:
+        raise RuntimeError(f"Local RPC {action} response is missing boolean success")
+    if not data["success"]:
+        error = data.get("error")
+        if not isinstance(error, str) or not error.strip():
+            raise RuntimeError(f"Local RPC {action} failure is missing error")
+        return {"success": False, "error": error}
+    result = data.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Local RPC {action} result must be an object")
+    return {"success": True, **result}
+
+
 def _notify_settings_reload(access_code: str) -> None:
-    result = _get_local_json("/api/settings/reload", {"admin_code": access_code}, timeout=1.2)
+    result = _local_rpc("settings.reload", {"admin_code": access_code}, timeout=1.2)
     if result["success"] is not True:
         raise RuntimeError(result["error"])
 
@@ -412,6 +457,15 @@ class ZadooSettingsWindow:
         self._check_button(card, "Start Zadoo when Windows starts", self.autostart_var).grid(row=0, column=0, sticky="w", pady=4)
         self._check_button(card, "Keep Settings visible on taskbar when minimized", self.show_taskbar_var).grid(row=1, column=0, sticky="w", pady=4)
         ttk.Button(card, text="Apply Startup", command=self.apply_startup).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        support = ttk.LabelFrame(body, text="Local support", style="Card.TLabelframe")
+        support.pack(fill="x", pady=(14, 0))
+        ttk.Label(
+            support,
+            text="Export bounded logs and system details with access codes, tokens, IDs, email, and public links redacted.",
+            style="Surface.TLabel",
+            wraplength=560,
+        ).pack(anchor="w")
+        ttk.Button(support, text="Export Diagnostics", command=self.export_diagnostics).pack(anchor="w", pady=(10, 0))
         self.runtime_state = ttk.Label(body, text="", style="Surface.TLabel")
         self.runtime_state.pack(anchor="w", pady=(14, 0))
 
@@ -793,8 +847,8 @@ class ZadooSettingsWindow:
             pub_url = ""
             error = ""
             try:
-                result = _get_local_json(
-                    "/api/runtime/refresh-tunnel",
+                result = _local_rpc(
+                    "runtime.refresh_tunnel",
                     {"admin_code": self._admin_code()},
                     timeout=30.0,
                 )
@@ -1104,7 +1158,7 @@ class ZadooSettingsWindow:
             runtime_running = _local_server_running()
             if runtime_running:
                 try:
-                    result = _get_local_json("/api/runtime/stop", {"admin_code": admin_code})
+                    result = _local_rpc("runtime.stop", {"admin_code": admin_code})
                     if not result["success"]:
                         errors.append(f"runtime stop: {result['error']}")
                 except Exception as exc:
@@ -1156,13 +1210,45 @@ class ZadooSettingsWindow:
         self.runtime_state.configure(text="Startup task installed" if startup_task_exists() else "Startup task not installed")
         self._startup_status_loaded = True
 
+    def export_diagnostics(self) -> None:
+        default_name = f"Zadoo-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        initial_dir = Path.home() / "Downloads"
+        target = filedialog.asksaveasfilename(
+            title="Export redacted Zadoo diagnostics",
+            initialdir=str(initial_dir if initial_dir.is_dir() else Path.home()),
+            initialfile=default_name,
+            defaultextension=".zip",
+            filetypes=(("ZIP archive", "*.zip"),),
+        )
+        if not target:
+            return
+        self._set_status("Exporting redacted diagnostics...")
+
+        def _export():
+            try:
+                from .diagnostics import build_diagnostic_bundle
+
+                runtime_status = None
+                if _local_server_running():
+                    runtime_status = _get_local_json("/api/runtime/status", {}, timeout=1.2)
+                path = build_diagnostic_bundle(
+                    Path(target), store=self.store, runtime_status=runtime_status
+                )
+                message = f"Diagnostics exported: {path}"
+            except Exception as exc:
+                message = f"Diagnostics export failed: {exc}"
+            with suppress(tk.TclError):
+                self.root.after(0, lambda: self._set_status(message))
+
+        threading.Thread(target=_export, daemon=True).start()
+
     def stop_zadoo(self) -> None:
         if not _local_server_running():
             self._set_status("Zadoo runtime is not running")
             return
         try:
             payload = {"admin_code": self.saved_access_code or self.access_code.get().strip()}
-            result = _get_local_json("/api/runtime/stop", payload)
+            result = _local_rpc("runtime.stop", payload)
             if not result["success"]:
                 raise RuntimeError(result["error"])
             if not isinstance(result.get("message"), str) or not result["message"].strip():
@@ -1204,7 +1290,7 @@ class ZadooSettingsWindow:
                 if entitlement["revoked"]:
                     raise RuntimeError(entitlement["reason"])
                 if _local_server_running():
-                    stopped = _get_local_json("/api/runtime/stop", {"admin_code": admin_code})
+                    stopped = _local_rpc("runtime.stop", {"admin_code": admin_code})
                     if not stopped["success"]:
                         raise RuntimeError(stopped["error"])
                     deadline = time.monotonic() + 5

@@ -6,14 +6,73 @@ import io
 import logging
 import sys
 import threading
+import time
 from datetime import datetime
+from pathlib import Path
 
-from .config import PROJECT_DIR
+from .config import PROJECT_DIR, env_int
 
 _LOG_FILE_HANDLE = None
 _ORIGINAL_STDOUT = None
 _ORIGINAL_STDERR = None
 _LOGGING_RESTORE_REGISTERED = False
+
+
+class _BoundedLogFile:
+    encoding = "utf-8"
+    errors = "strict"
+
+    def __init__(self, path: Path, max_bytes: int, backup_count: int):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+        self._file = self.path.open("a", encoding=self.encoding, buffering=1)
+
+    @property
+    def closed(self):
+        return self._file.closed
+
+    def _backup_path(self, number: int) -> Path:
+        return self.path.with_name(f"{self.path.name}.{number}")
+
+    def _rotate(self):
+        self._file.close()
+        self._backup_path(self.backup_count).unlink(missing_ok=True)
+        for number in range(self.backup_count - 1, 0, -1):
+            source = self._backup_path(number)
+            if source.exists():
+                source.replace(self._backup_path(number + 1))
+        if self.path.exists():
+            self.path.replace(self._backup_path(1))
+        self._file = self.path.open("a", encoding=self.encoding, buffering=1)
+
+    def write(self, text):
+        if not text:
+            return 0
+        encoded_size = len(text.encode(self.encoding, errors="replace"))
+        self._file.seek(0, 2)
+        if self._file.tell() and self._file.tell() + encoded_size > self.max_bytes:
+            self._rotate()
+        return self._file.write(text)
+
+    def flush(self):
+        self._file.flush()
+
+    def fileno(self):
+        return self._file.fileno()
+
+    def close(self):
+        self._file.close()
+
+
+def _prune_logs(log_dir: Path, retention_days: int):
+    cutoff = time.time() - retention_days * 86400
+    for path in log_dir.glob("zadoo_*.log*"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError as exc:
+            logging.warning("Failed to prune old log %s: %s", path, exc)
 
 
 def _restore_logging_streams():
@@ -30,12 +89,21 @@ def _restore_logging_streams():
 def _setup_logging_to_file():
     global _LOG_FILE_HANDLE, _ORIGINAL_STDOUT, _ORIGINAL_STDERR, _LOGGING_RESTORE_REGISTERED
     if getattr(sys, "frozen", False):
-        from .settings import settings_dir
+        from .settings import _secure_settings_path, settings_dir
 
-        log_dir = settings_dir() / "logs"
+        settings_root = settings_dir()
+        settings_root.mkdir(parents=True, exist_ok=True)
+        _secure_settings_path(settings_root, directory=True)
+        log_dir = settings_root / "logs"
     else:
         log_dir = PROJECT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        _secure_settings_path(log_dir, directory=True)
+    retention_days = env_int("ZADOO_LOG_RETENTION_DAYS", 14, minimum=1, maximum=365)
+    max_bytes = env_int("ZADOO_LOG_MAX_BYTES", 5 * 1024 * 1024, minimum=65536, maximum=1024 * 1024 * 1024)
+    backup_count = env_int("ZADOO_LOG_BACKUP_COUNT", 2, minimum=1, maximum=20)
+    _prune_logs(log_dir, retention_days)
     log_path = log_dir / f"zadoo_{datetime.now():%Y%m%d}.log"
 
     class _Tee(io.TextIOBase):
@@ -83,7 +151,7 @@ def _setup_logging_to_file():
         def __getattr__(self, name):
             return getattr(self._stream if self._stream is not None else self._file, name)
 
-    fh = log_path.open("a", encoding="utf-8", buffering=1)
+    fh = _BoundedLogFile(log_path, max_bytes, backup_count)
     if _ORIGINAL_STDOUT is None:
         _ORIGINAL_STDOUT = sys.stdout
     if _ORIGINAL_STDERR is None:

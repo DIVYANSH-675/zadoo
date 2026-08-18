@@ -243,6 +243,15 @@ class InputControlMixin:
     def _send_clipboard_image_result(self, websocket, payload):
         self._queue_ws_send(websocket, json.dumps(payload), "_send_clipboard_image_result")
 
+    @staticmethod
+    def _validate_clipboard_image_signature(mime, image_data):
+        if mime == "image/png":
+            valid = image_data.startswith(b"\x89PNG\r\n\x1a\n")
+        else:
+            valid = image_data.startswith(b"\xff\xd8\xff")
+        if not valid:
+            raise ValueError(f"image data does not match declared MIME type {mime}")
+
     def _handle_set_clipboard_image(self, event, websocket):
         request_id = event.get("request_id")
         try:
@@ -261,6 +270,7 @@ class InputControlMixin:
                 raise ValueError("empty image data")
             if len(image_data) > max_bytes:
                 raise ValueError("image clipboard payload exceeds size limit")
+            self._validate_clipboard_image_signature(mime, image_data)
 
             with Image.open(io.BytesIO(image_data)) as source:
                 if source.format not in {"PNG", "JPEG"}:

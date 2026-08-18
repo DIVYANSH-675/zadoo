@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -37,17 +38,76 @@ from .win32_input import (
     user32,
 )
 
+_CONPTY_ENV_LOCK = threading.Lock()
+
+
+def _powershell_environment():
+    """Keep Windows PowerShell from auto-loading launcher-specific PowerShell 7 modules."""
+    env = os.environ.copy()
+    module_paths = []
+    seen = set()
+    for raw_path in env.get("PSMODULEPATH", "").split(os.pathsep):
+        path = raw_path.strip()
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.normpath(path))
+        if f"{os.sep}windowspowershell{os.sep}" not in normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        module_paths.append(path)
+
+    standard_paths = (
+        Path(env.get("ProgramFiles", r"C:\Program Files")) / "WindowsPowerShell" / "Modules",
+        Path(env.get("SystemRoot", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "Modules",
+    )
+    for candidate in standard_paths:
+        path = str(candidate)
+        normalized = os.path.normcase(os.path.normpath(path))
+        if normalized not in seen:
+            seen.add(normalized)
+            module_paths.append(path)
+    env["PSMODULEPATH"] = os.pathsep.join(module_paths)
+    return env
+
+
+def _spawn_conpty_process(shell_cmd, shell_cwd, dimensions):
+    child_env = _powershell_environment()
+    # pywinpty 3.0.3's ConPTY backend currently inherits PSModulePath from the
+    # process even when an explicit environment mapping is provided. Serialize
+    # the short process-creation window, then restore the host environment.
+    with _CONPTY_ENV_LOCK:
+        original_module_path = os.environ.get("PSMODULEPATH")
+        try:
+            os.environ["PSMODULEPATH"] = child_env["PSMODULEPATH"]
+            return PtyProcess.spawn(
+                shell_cmd,
+                cwd=shell_cwd,
+                env=child_env,
+                dimensions=dimensions,
+                backend=Backend.ConPTY,
+            )
+        finally:
+            if original_module_path is None:
+                os.environ.pop("PSMODULEPATH", None)
+            else:
+                os.environ["PSMODULEPATH"] = original_module_path
+
 
 async def _spawn_conpty(shell_cmd, shell_cwd, dimensions):
     """Start ConPTY off the event loop and recover its transient OpenConsole startup race."""
     for attempt in range(2):
         try:
             return await asyncio.to_thread(
-                PtyProcess.spawn,
+                _spawn_conpty_process,
                 shell_cmd,
-                cwd=shell_cwd,
-                dimensions=dimensions,
-                backend=Backend.ConPTY,
+                shell_cwd,
+                dimensions,
             )
         except (KeyboardInterrupt, SystemExit):
             raise

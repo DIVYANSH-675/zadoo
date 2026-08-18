@@ -28,29 +28,42 @@
     </div>
     <script>
       const ok = document.getElementById('ok');
-      function csrfToken(){
-        const found = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith('zadoo_csrf='));
-        if (!found) throw new Error('CSRF cookie is missing');
-        const token = decodeURIComponent(found.split('=').slice(1).join('='));
-        if (!token) throw new Error('CSRF cookie is empty');
-        return token;
+      let rpcSequence = 0;
+      function callRpc(action, params, timeoutMs=10000){
+        return new Promise((resolve,reject)=>{
+          const id=`alerts-${Date.now()}-${++rpcSequence}`;
+          const proto=location.protocol==='https:'?'wss':'ws';
+          const socket=new WebSocket(`${proto}://${location.host}/rpc`);
+          let finished=false;
+          const finish=(error,result)=>{
+            if(finished)return;
+            finished=true;
+            clearTimeout(timer);
+            try{socket.close(1000,'RPC complete');}catch(_){}
+            if(error)reject(error);else resolve(result);
+          };
+          const timer=setTimeout(()=>finish(new Error(`RPC ${action} timed out`)),timeoutMs);
+          socket.onopen=()=>socket.send(JSON.stringify({id,action,params}));
+          socket.onmessage=event=>{
+            try{
+              const data=JSON.parse(event.data);
+              if(!data||typeof data!=='object'||Array.isArray(data))throw new Error(`RPC ${action} returned a non-object response`);
+              if(data.id!==id)throw new Error(`RPC ${action} returned a mismatched id`);
+              if(typeof data.success!=='boolean')throw new Error(`RPC ${action} response is missing boolean success`);
+              if(!data.success)throw new Error(typeof data.error==='string'&&data.error?data.error:`RPC ${action} failed`);
+              finish(null,data.result);
+            }catch(error){finish(error instanceof Error?error:new Error(String(error)));}
+          };
+          socket.onerror=()=>finish(new Error(`RPC ${action} WebSocket failed`));
+          socket.onclose=event=>{if(!finished)finish(new Error(`RPC ${action} closed before a response (${event.code})`));};
+        });
       }
       document.querySelectorAll('button[data-code]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
           const code = btn.getAttribute('data-code');
           try{
-            const res = await fetch('/api/alert?code='+encodeURIComponent(code), {
-              cache: 'no-store',
-              credentials: 'same-origin',
-              headers: { 'X-Zadoo-CSRF': csrfToken() }
-            });
-            const data = await res.json();
-            if (!data || typeof data !== 'object' || Array.isArray(data)) {
-              throw new Error(`Alert API returned a non-object response (HTTP ${res.status})`);
-            }
-            if (!res.ok || data.ok !== true) {
-              throw new Error(typeof data.error === 'string' && data.error ? data.error : `Alert failed (HTTP ${res.status})`);
-            }
+            const data = await callRpc('alert.trigger', {code});
+            if (!data || data.ok !== true) throw new Error('Alert RPC result is invalid');
             ok.textContent = ' Sent '+code;
           }catch(e){ ok.textContent = ' Failed: '+String(e instanceof Error ? e.message : e); }
           setTimeout(()=> ok.textContent='', 2000);
