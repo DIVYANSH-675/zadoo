@@ -838,10 +838,16 @@ def assert_imports() -> None:
 
         terminal_attempts = 0
         expected_proc = object()
+        terminal_spawn_kwargs = {}
+        original_module_path = os.environ.get("PSMODULEPATH")
+        injected_module_path = str(ROOT / "launcher" / "PowerShell" / "Modules")
+        preserved_module_path = str(ROOT / "Documents" / "WindowsPowerShell" / "Modules")
+        test_module_path = os.pathsep.join((injected_module_path, preserved_module_path))
 
         def transient_conpty(*_args, **_kwargs):
-            nonlocal terminal_attempts
+            nonlocal terminal_attempts, terminal_spawn_kwargs
             terminal_attempts += 1
+            terminal_spawn_kwargs = _kwargs
             if terminal_attempts == 1:
                 raise FakePanic("called Result::unwrap() on HRESULT(0x800700BB)")
             return expected_proc
@@ -849,12 +855,34 @@ def assert_imports() -> None:
         media = sys.modules["zadoo_vnc.media"]
         original_pty_process = media.PtyProcess
         media.PtyProcess = SimpleNamespace(spawn=transient_conpty)
+        os.environ["PSMODULEPATH"] = test_module_path
         try:
             spawned_proc = asyncio.run(media._spawn_conpty(["powershell.exe"], str(ROOT), (34, 120)))
+            restored_module_path = os.environ.get("PSMODULEPATH")
         finally:
             media.PtyProcess = original_pty_process
+            if original_module_path is None:
+                os.environ.pop("PSMODULEPATH", None)
+            else:
+                os.environ["PSMODULEPATH"] = original_module_path
         if spawned_proc is not expected_proc or terminal_attempts != 2:
             fail("ConPTY transient startup race did not retry exactly once")
+        terminal_env = terminal_spawn_kwargs.get("env", {})
+        terminal_module_paths = terminal_env.get("PSMODULEPATH", "").split(os.pathsep)
+        normalized_terminal_paths = [
+            os.path.normcase(os.path.normpath(path)) for path in terminal_module_paths if path
+        ]
+        if not normalized_terminal_paths or any(
+            f"{os.sep}windowspowershell{os.sep}" not in path
+            for path in normalized_terminal_paths
+        ):
+            fail("ConPTY inherited a non-Windows-PowerShell module path")
+        if os.path.normcase(os.path.normpath(injected_module_path)) in normalized_terminal_paths:
+            fail("ConPTY inherited a launcher-specific PowerShell 7 module path")
+        if os.path.normcase(os.path.normpath(preserved_module_path)) not in normalized_terminal_paths:
+            fail("ConPTY removed the user's Windows PowerShell module path")
+        if restored_module_path != test_module_path:
+            fail("ConPTY did not restore the host PowerShell module path after spawning")
 
         async def route_checks():
             class FakeConnection:
