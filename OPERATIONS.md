@@ -162,6 +162,65 @@ a release.
 If a configuration schema migration prevents rollback, restore through Zadoo Settings rather
 than editing encrypted JSON by hand.
 
+## Release-candidate verification runbook
+
+Run this final pass on a clean Windows 10 or 11 x64 machine or disposable VM. Use signed release
+artifacts and staging/test accounts; do not use the unsigned CI or local-development artifacts.
+
+### Fresh install and upgrade
+
+1. Copy the installer, `release-manifest.json`, `SHA256SUMS.txt`, and SBOM to the test machine.
+2. Run the manifest/hash/signature verification above, then start the installer and accept the
+   Windows elevation prompt:
+
+   ```powershell
+   $installer = Get-Item .\Zadoo-*-x64-Setup.exe
+   Start-Process -FilePath $installer.FullName -Verb RunAs -Wait
+   Get-AuthenticodeSignature 'C:\Program Files\Zadoo\Zadoo.exe' |
+       Format-List Status,SignerCertificate
+   Get-ScheduledTask -TaskName Zadoo | Format-List TaskName,State
+   ```
+
+3. Configure a staging device in Settings, start the runtime, run the health command above, and
+   stop it from Settings. Confirm the process exits and `Test-NetConnection 127.0.0.1 -Port 6173`
+   reports `TcpTestSucceeded=False` after shutdown.
+4. Install the previous signed release, configure it, and record the visible Settings values.
+   Run the candidate installer over that release. Confirm the same activation and permission
+   choices remain visible, the access code still authenticates, and the legacy ProgramData copy
+   remains available for rollback when a migration occurred.
+5. Uninstall the candidate. Confirm the scheduled task and Program Files directory are removed.
+   Exercise both answers to the uninstall data-retention prompt on separate disposable snapshots.
+
+### Public service and multi-viewer flow
+
+1. Use a staging Zadoo account and the payment provider's test mode to complete sign-in,
+   activation, checkout, webhook processing, entitlement refresh, and billing-history display.
+2. Start the installed host with tunneling enabled. The local health endpoint must show a public
+   URL and empty tunnel error fields. Open that URL over mobile data or another external network;
+   direct LAN access is intentionally denied by default.
+3. Authenticate two through five distinct browser sessions. Verify each can reconnect without
+   consuming a second slot, then confirm a sixth distinct session receives exactly
+   `Viewer limit reached (5)`. Close viewers and confirm their slots become available.
+4. In a staging-only outage window, make the hosted heartbeat endpoint unreachable. Verify the
+   5/10/20/30-second retries, recovery when connectivity returns before the configured grace
+   deadline, and fail-closed shutdown at the deadline with
+   `Cloud heartbeat failed for 120 seconds: ...` at the default setting.
+
+### Physical media and mobile flow
+
+1. Use a host with a real camera, microphone, speakers, and two displays if multi-monitor support
+   is required. Grant only the permissions under test and keep private material off screen.
+2. From a second device, verify screen video, mouse/keyboard input, text and image clipboard,
+   snapshot, terminal, camera video, selected-microphone audio, and system-audio loopback. Keep
+   each media stream open for at least 60 seconds, switch devices once, and confirm disconnecting
+   the final viewer stops the corresponding capture worker without log errors.
+3. On current iOS Safari and Android Chrome, exercise fit-width, fit, pan, pinch zoom, reset,
+   orientation changes, the on-screen controls, reconnect, and permission-denied error states.
+   Confirm remote pointer coordinates still match after every transform.
+4. Inspect the browser console/network panel and `%LOCALAPPDATA%\Zadoo\logs`; there must be no
+   unexpected external assets, unhandled exceptions, credential values, or orphaned workers.
+   Export diagnostics and independently inspect the ZIP for redaction before approval.
+
 ## Production checklist
 
 - [ ] Pull request checks pass on the exact release commit.
