@@ -548,113 +548,6 @@ class MediaMixin:
             return True
         return False
 
-    def _cloud_start_remote_session(self):
-        if not self.settings_store.get_device_token():
-            return None
-        from .saas import ZadooCloudClient
-
-        public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
-        result = ZadooCloudClient(self.settings_store).start_session(public_url)
-        if not result["success"] and result.get("status_code") == 402:
-            entitlement = ZadooCloudClient._required_entitlement(result, "Session start")
-            if (
-                not entitlement["revoked"]
-                and entitlement["includedMinutesRemaining"] == 0
-                and entitlement["walletMinutesRemaining"] == 0
-            ):
-                return {"success": True, "no_credits": True}
-        return result
-
-    def _cloud_end_remote_session(self, session_id):
-        if not session_id:
-            return
-        from .saas import ZadooCloudClient
-
-        result = ZadooCloudClient(self.settings_store).end_session(session_id)
-        if not result["success"]:
-            raise RuntimeError(f"Cloud session end failed: {result['error']}")
-
-    async def _cloud_remote_session_heartbeat(self, websocket, session_state, start_in_grace=False):
-        # Grace policy once the balance reaches 0 (heartbeat reports allowed=False):
-        #   minute 0..5  → full control kept; client shows "add credit" banner + payment panel
-        #   minute 5..10 → controls locked (screen-share only); payment panel keeps prompting
-        #   minute 10    → session ends
-        # start_in_grace=True means we connected with zero credits and run the grace
-        # policy from the start (no billing session until a top-up resumes us).
-        GRACE_LOCK_AFTER = 5
-        GRACE_END_AFTER = 10
-        try:
-            from .saas import ZadooCloudClient
-
-            client = ZadooCloudClient(self.settings_store)
-            grace_minutes = 0
-            in_grace = bool(start_in_grace)
-            if in_grace:
-                self._set_grace_lock(websocket, False)
-                await self._send_grace(websocket, 0, False)
-            while True:
-                await asyncio.sleep(60)
-                if not in_grace:
-                    result = await asyncio.to_thread(client.session_heartbeat, session_state["id"], 1)
-                    if not result["success"]:
-                        raise RuntimeError(f"Cloud session heartbeat failed: {result['error']}")
-                    entitlement = result["entitlement"]
-                    allowed = entitlement["allowed"]
-                    if allowed is False:
-                        # Balance just hit zero — begin the local grace window.
-                        in_grace = True
-                        grace_minutes = 1
-                        self._set_grace_lock(websocket, False)
-                        await self._send_grace(websocket, grace_minutes, False)
-                    continue
-                # In grace: the cloud has already ended the session record, so stop billing
-                # and instead watch the workspace entitlement for a top-up that resumes us.
-                ent = await asyncio.to_thread(client.entitlement)
-                if not ent["success"]:
-                    raise RuntimeError(f"Cloud entitlement refresh failed: {ent['error']}")
-                e = ent["entitlement"]
-                recharged = e["allowed"] and not e["revoked"]
-                if recharged:
-                    in_grace = False
-                    grace_minutes = 0
-                    self._set_grace_lock(websocket, False)
-                    cs = await asyncio.to_thread(self._cloud_start_remote_session)
-                    if cs is None:
-                        raise RuntimeError("Cloud session restart requires an activated device")
-                    if not cs["success"]:
-                        raise RuntimeError(f"Cloud session restart failed: {cs['error']}")
-                    if cs.get("no_credits") is True:
-                        raise RuntimeError("Cloud session restart was rejected for insufficient credits")
-                    session_state["id"] = cs["sessionId"]
-                    await self._send_grace(websocket, 0, False, recharged=True)
-                    continue
-                grace_minutes += 1
-                if grace_minutes >= GRACE_END_AFTER:
-                    self._set_grace_lock(websocket, False)
-                    with suppress(websockets.exceptions.ConnectionClosed):
-                        await websocket.send(json.dumps({"type": "error", "error": "Session ended — out of credits"}))
-                        await websocket.close(code=1008, reason="Out of credits")
-                    return
-                locked = grace_minutes >= GRACE_LOCK_AFTER
-                self._set_grace_lock(websocket, locked)
-                await self._send_grace(websocket, grace_minutes, locked)
-        except asyncio.CancelledError:
-            self._set_grace_lock(websocket, False)
-            raise
-        except Exception as exc:
-            self._set_grace_lock(websocket, False)
-            with suppress(websockets.exceptions.ConnectionClosed):
-                await websocket.send(json.dumps({"type": "error", "error": f"Cloud session heartbeat failed: {exc}"}))
-                await websocket.close(code=1011, reason="Cloud session heartbeat failed")
-
-    async def _send_grace(self, websocket, grace_minutes, controls_locked, recharged=False):
-        await websocket.send(json.dumps({
-            "type": "grace",
-            "graceMinutes": int(grace_minutes),
-            "controlsLocked": bool(controls_locked),
-            "recharged": bool(recharged),
-        }))
-
     async def mic_stream_handler(self, websocket: websockets.WebSocketServerProtocol, path=None):
         mic_log = logging.getLogger("mic")
         remote = getattr(websocket, 'remote_address', None)
@@ -748,29 +641,7 @@ class MediaMixin:
 
     async def video_stream_handler(self, websocket):
         print(f" New video client connected from {websocket.remote_address}")
-        cloud_session = {"id": None}
-        cloud_heartbeat_task = None
-        
         try:
-            cloud_start = await asyncio.to_thread(self._cloud_start_remote_session)
-            if cloud_start is not None and not cloud_start["success"]:
-                with suppress(websockets.exceptions.ConnectionClosed):
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "error": cloud_start["error"],
-                    }))
-                    await websocket.close(code=1008, reason="Entitlement blocked")
-                return
-            if cloud_start is not None and cloud_start.get("no_credits") is True:
-                cloud_heartbeat_task = asyncio.create_task(
-                    self._cloud_remote_session_heartbeat(websocket, cloud_session, start_in_grace=True)
-                )
-            elif cloud_start is not None:
-                cloud_session["id"] = cloud_start["sessionId"]
-                self._set_grace_lock(websocket, False)
-                cloud_heartbeat_task = asyncio.create_task(
-                    self._cloud_remote_session_heartbeat(websocket, cloud_session)
-                )
             self.video_clients.add(websocket)
             self.screen_capturer.set_streaming_active(True)
             self._apply_stream_profile("client_connected")
@@ -828,11 +699,7 @@ class MediaMixin:
                 await websocket.send(json.dumps({"type": "error", "error": f"Video stream failed: {e}"}))
                 await websocket.close(code=1011, reason="Video stream failed")
         finally:
-            if cloud_heartbeat_task and not cloud_heartbeat_task.done():
-                cloud_heartbeat_task.cancel()
-                await asyncio.gather(cloud_heartbeat_task, return_exceptions=True)
             self.video_clients.discard(websocket)
-            self._set_grace_lock(websocket, False)
             if not self.video_clients:
                 self.screen_capturer.set_streaming_active(False)
             task = self._video_send_tasks.pop(websocket, None)
@@ -840,8 +707,6 @@ class MediaMixin:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             print(f" Removed video client, {len(self.video_clients)} clients remaining")
-            if cloud_session["id"]:
-                await asyncio.to_thread(self._cloud_end_remote_session, cloud_session["id"])
 
     async def webcam_stream_handler(self, websocket):
         """Stream JPEG frames from the server's webcam (DirectShow on Windows) to the client."""

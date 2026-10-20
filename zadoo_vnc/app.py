@@ -66,22 +66,9 @@ def main():
     from .tunnel import CloudflareTunnelManager
 
     settings_store = get_settings_store()
-    signed_in = bool(settings_store.get_device_token())
-    if signed_in and not settings_store.configured():
+    if not settings_store.configured() and not os.getenv("ZADOO_ACCESS_CODE", "").strip():
         raise RuntimeError("Access code is not configured; set it in Zadoo Settings")
-    tunnel_disabled_by_env = env_bool("ZADOO_DISABLE_TUNNEL")
-    if not signed_in and not tunnel_disabled_by_env:
-        raise RuntimeError("Zadoo is not signed in; sign in from Zadoo Settings")
-    if signed_in and not tunnel_disabled_by_env:
-        from .saas import ZadooCloudClient
-
-        cloud_result = ZadooCloudClient(settings_store).entitlement()
-        if not cloud_result["success"]:
-            raise RuntimeError(f"Cloud entitlement check failed: {cloud_result['error']}")
-        entitlement = cloud_result["entitlement"]
-        if entitlement["revoked"]:
-            raise RuntimeError(f"Cloud entitlement check failed: {entitlement['reason']}")
-    use_tunnel = signed_in and not tunnel_disabled_by_env
+    use_tunnel = not env_bool("ZADOO_DISABLE_TUNNEL")
     tunnel_manager = None
     if use_tunnel:
         tunnel_manager = CloudflareTunnelManager(primary_port=APP_PORT)
@@ -110,15 +97,16 @@ def main():
     finally:
         capturer.stop()
         capturer.join(timeout=2)
-        if signed_in and vnc_server.ever_bound:
+        if vnc_server.ever_bound:
             try:
                 from .saas import ZadooCloudClient
 
-                offline = ZadooCloudClient(settings_store).go_offline()
-                if not offline["success"]:
-                    logging.error("Cloud offline notification failed: %s", offline["error"])
+                if settings_store.get_device_token():
+                    offline = ZadooCloudClient(settings_store).go_offline()
+                    if not offline["success"]:
+                        logging.warning("Optional offline notification failed: %s", offline["error"])
             except Exception as exc:
-                logging.error("Cloud offline notification failed: %s", exc, exc_info=True)
+                logging.warning("Optional offline notification failed: %s", exc)
         if vnc_server.tunnel_manager:
             vnc_server.tunnel_manager.cleanup()
         if capturer.is_alive():

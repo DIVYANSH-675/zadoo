@@ -55,7 +55,7 @@ def _clean_http_origin(value: Any, field: str) -> str:
 
 
 APP_NAME = "Zadoo"
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 ACCESS_CODE_MAX_LENGTH = 10
 DEFAULT_CLOUD_API_BASE = _clean_http_origin(
     os.getenv("ZADOO_CLOUD_API_BASE", "https://zadoo-web.vercel.app"),
@@ -201,73 +201,6 @@ def _empty_alerts() -> dict[str, dict[str, Any]]:
     }
 
 
-def _nonnegative_int_field(data: dict[str, Any], field: str, context: str) -> int:
-    value = data.get(field)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{context} {field} must be a non-negative integer")
-    return value
-
-
-def _clean_entitlement(value: Any, context: str, *, allow_empty: bool = False) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{context} must be an object")
-    if allow_empty and not value:
-        return {}
-    required = {
-        "allowed", "revoked", "reason", "planCode", "includedMinutesRemaining",
-        "walletMinutesRemaining", "concurrencyLimit", "activeSessions", "graceUntil",
-    }
-    unknown = sorted(set(value) - required - {"minutesRemaining"})
-    missing = sorted(required - set(value))
-    if unknown:
-        raise ValueError(f"{context} has unknown fields: {', '.join(unknown)}")
-    if missing:
-        raise ValueError(f"{context} is missing fields: {', '.join(missing)}")
-    for field in ("allowed", "revoked"):
-        if type(value[field]) is not bool:
-            raise ValueError(f"{context} {field} must be a boolean")
-    for field in (
-        "includedMinutesRemaining", "walletMinutesRemaining", "concurrencyLimit", "activeSessions",
-    ):
-        _nonnegative_int_field(value, field, context)
-    if "minutesRemaining" in value:
-        _nonnegative_int_field(value, "minutesRemaining", context)
-    for field in ("reason", "planCode", "graceUntil"):
-        if not isinstance(value[field], (str, type(None))):
-            raise ValueError(f"{context} {field} must be a string or null")
-    if value["revoked"] and not value["reason"]:
-        raise ValueError(f"{context} revoked=true requires reason")
-    return copy.deepcopy(value)
-
-
-def _clean_credits(value: Any, context: str, *, allow_empty: bool = False) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{context} must be an object")
-    if allow_empty and not value:
-        return {}
-    required = {
-        "includedMinutesRemaining", "walletMinutes", "totalMinutesRemaining",
-        "allowed", "reason", "planCode",
-    }
-    unknown = sorted(set(value) - required)
-    missing = sorted(required - set(value))
-    if unknown:
-        raise ValueError(f"{context} has unknown fields: {', '.join(unknown)}")
-    if missing:
-        raise ValueError(f"{context} is missing fields: {', '.join(missing)}")
-    included = _nonnegative_int_field(value, "includedMinutesRemaining", context)
-    wallet = _nonnegative_int_field(value, "walletMinutes", context)
-    total = _nonnegative_int_field(value, "totalMinutesRemaining", context)
-    if total != included + wallet:
-        raise ValueError(f"{context} totalMinutesRemaining does not equal included plus wallet")
-    if type(value["allowed"]) is not bool:
-        raise ValueError(f"{context} allowed must be a boolean")
-    for field in ("reason", "planCode"):
-        if not isinstance(value[field], (str, type(None))):
-            raise ValueError(f"{context} {field} must be a string or null")
-    return copy.deepcopy(value)
-
-
 def _clean_activation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("activation must be an object")
@@ -308,14 +241,11 @@ def _default_data() -> dict[str, Any]:
         "device_name": _machine_name(),
         "device_token": "",
         "activation": {},
-        "entitlement_cache": {},
         "autostart_enabled": True,
         "show_settings_in_taskbar": False,
         # User profile (fetched from cloud after sign-in)
         "user_name": "",
         "user_email": "",
-        # Credits cache (fetched from cloud)
-        "credits_cache": {},
     }
 
 
@@ -356,6 +286,13 @@ def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
     if data is not None:
         if not isinstance(data, dict):
             raise ValueError("Zadoo settings must be a JSON object")
+        data = dict(data)
+        if data.get("version") == 3:
+            # Retire usage caches while preserving the access code, permissions,
+            # alerts, optional device link, and encrypted secrets.
+            data.pop("entitlement_cache", None)
+            data.pop("credits_cache", None)
+            data["version"] = CONFIG_VERSION
         expected = set(base)
         unknown = sorted(set(data) - expected)
         missing = sorted(expected - set(data))
@@ -384,10 +321,6 @@ def normalize_settings(data: dict[str, Any] | None) -> dict[str, Any]:
     if base["setup_complete"] and not base["access_code"]:
         raise ValueError("configured settings require an access code")
     base["activation"] = _clean_activation(base["activation"])
-    base["entitlement_cache"] = _clean_entitlement(
-        base["entitlement_cache"], "entitlement_cache", allow_empty=True
-    )
-    base["credits_cache"] = _clean_credits(base["credits_cache"], "credits_cache", allow_empty=True)
     for key in ("created_at", "updated_at"):
         if (
             isinstance(base[key], bool)
@@ -568,7 +501,7 @@ class SettingsStore:
         def _clear(data):
             for key in ("device_token", "workspace_id", "device_id", "user_name", "user_email"):
                 data[key] = ""
-            for key in ("activation", "entitlement_cache", "credits_cache"):
+            for key in ("activation",):
                 data[key] = {}
         self.atomic_update(_clear)
 
@@ -610,7 +543,6 @@ class SettingsStore:
                 "device_name": data["device_name"],
                 "has_device_token": bool(_dpapi_decrypt(data["device_token"])),
                 "activation": data["activation"],
-                "entitlement_cache": data["entitlement_cache"],
                 "autostart_enabled": data["autostart_enabled"],
                 "show_settings_in_taskbar": data["show_settings_in_taskbar"],
             },

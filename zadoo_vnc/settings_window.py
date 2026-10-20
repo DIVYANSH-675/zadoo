@@ -195,7 +195,6 @@ class ZadooSettingsWindow:
         # updates automatically when Zadoo starts/stops — without blocking the UI).
         self._runtime_running = False
         self._runtime_url = ""
-        self._last_focus_refresh = 0.0
         self._startup_status_loaded = False
         self._autosave_after: str | None = None
         self._loading = False
@@ -204,11 +203,7 @@ class ZadooSettingsWindow:
         self.reload()
         self._wire_autosave()  # settings persist automatically (no Save button)
         self._poll_runtime_status()  # start the live public-link / running-state poll
-        self.root.after(60_000, self._poll_account_balance)
-        # Refresh balance the moment the window regains focus (e.g. back from paying).
-        self.root.bind("<FocusIn>", lambda _e: self._refresh_balance_now())
-        if self.store.get_device_token():
-            self._last_focus_refresh = time.time()
+        if self._dashboard_linked():
             self._fetch_latest_account_details_async(show_status=False)
 
     def _build_style(self) -> None:
@@ -293,17 +288,9 @@ class ZadooSettingsWindow:
         self._build_alert_tab()
         self._build_runtime_tab()
 
-        # Build welcome frame (but do not pack immediately)
-        self.signin_welcome_frame = ttk.Frame(outer, style="Root.TFrame")
-        card = ttk.Frame(self.signin_welcome_frame, style="Surface.TFrame", padding=30)
-        card.place(relx=0.5, rely=0.5, anchor="center")
-
-        ttk.Label(card, text="Welcome to Zadoo", style="Title.TLabel", font=("Segoe UI", 18, "bold")).pack(pady=(0, 10))
-        ttk.Label(card, text="Please sign in to activate and link this device.", style="Surface.TLabel", font=("Segoe UI", 10)).pack(pady=(0, 20))
-        ttk.Button(card, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").pack(pady=10)
-        
-        self.welcome_status_label = ttk.Label(card, text="", style="Surface.TLabel", font=("Segoe UI", 9), foreground=ACCENT)
-        self.welcome_status_label.pack(pady=(10, 0))
+        # Device linking is optional and never hides the local settings.
+        self.welcome_status_label = ttk.Label(self.tab_account, text="", style="Muted.TLabel")
+        self.welcome_status_label.pack(anchor="w", padx=16, pady=(0, 8))
 
         # Build footer (but do not pack immediately)
         self.footer = ttk.Frame(outer, style="Root.TFrame")
@@ -375,7 +362,7 @@ class ZadooSettingsWindow:
 
     def _build_account_tab(self) -> None:
         self.tab_account = ttk.Frame(self.tabs, style="Surface.TFrame")
-        self.tabs.add(self.tab_account, text="Account")
+        self.tabs.add(self.tab_account, text="Dashboard (optional)")
         body = self._tab_body(self.tab_account)
 
         # ── Profile card ──────────────────────────────────────────────
@@ -411,7 +398,7 @@ class ZadooSettingsWindow:
 
         # ── Sign-in Container ─────────────────────────────────────────
         self.signin_frame = ttk.Frame(body, style="Surface.TFrame")
-        ttk.Label(self.signin_frame, text="Sign in to your Zadoo account to start using this device.",
+        ttk.Label(self.signin_frame, text="Optional: link this device to your dashboard.",
                   style="Surface.TLabel", font=("Segoe UI", 10, "bold"), foreground=ACCENT).pack(anchor="w", pady=(5, 10))
 
         code_row = ttk.Frame(self.signin_frame, style="Surface.TFrame")
@@ -425,28 +412,9 @@ class ZadooSettingsWindow:
         ttk.Button(btn_row, text="Sign in to Zadoo", command=self.start_activation, style="Primary.TButton").pack(side=LEFT, padx=(8, 0))
         ttk.Button(btn_row, text="Check sign-in", command=self.poll_activation).pack(side=LEFT, padx=(8, 0))
 
-        # ── Credits ───────────────────────────────────────────────────
-        self.credits_card = ttk.LabelFrame(body, text="Credits", style="Card.TLabelframe")
-        # Icon-only refresh (loads latest balance) floated at the top-right so it does NOT
-        # push the credit lines down / disturb the layout.
-        ttk.Button(self.credits_card, text="⟳", width=3, command=self._refresh_credits).place(relx=1.0, x=-4, y=2, anchor="ne")
-        self.credits_included_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
-        self.credits_included_label.pack(anchor="w")
-        self.credits_wallet_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel")
-        self.credits_wallet_label.pack(anchor="w")
-        self.credits_total_label = ttk.Label(self.credits_card, text="", style="Surface.TLabel",
-                                             font=("Segoe UI", 9, "bold"))
-        self.credits_total_label.pack(anchor="w", pady=(2, 6))
-        self.billing_state = ttk.Label(self.credits_card, text="", style="Muted.TLabel",
-                                       font=("Segoe UI", 8))
-        self.billing_state.pack(anchor="w")
-
-        credits_btns = ttk.Frame(self.credits_card, style="Surface.TFrame")
-        credits_btns.pack(anchor="w", pady=(8, 0))
-        ttk.Button(credits_btns, text="+ Add Credit", command=self._add_balance,
-                   style="Primary.TButton").pack(side=LEFT)
-        ttk.Button(credits_btns, text="View Plans →", command=self._open_pricing).pack(side=LEFT, padx=(8, 0))
-        ttk.Button(credits_btns, text="Copy Sign-in Code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(btn_row, text="Copy code", command=self.copy_activation_code).pack(side=LEFT, padx=(8, 0))
+        ttk.Label(body, text="Zadoo is free. Linking a dashboard account is optional.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(12, 0))
 
     def _build_runtime_tab(self) -> None:
         self.tab_runtime = ttk.Frame(self.tabs, style="Surface.TFrame")
@@ -526,17 +494,12 @@ class ZadooSettingsWindow:
         try:
             self.data = self.store.load(reload=True)
             self.saved_access_code = self.store.get_access_code()
-            is_signed_in = bool(self.store.get_device_token())
             self._load_account_values()
-            if is_signed_in:
-                self._load_access_values()
-                self._load_permission_values()
-                self._load_alert_values()
-                self._load_runtime_values()
-            if is_signed_in:
-                self.state_label.configure(text="Configured" if self._setup_complete() else "Ready")
-            else:
-                self.state_label.configure(text="")
+            self._load_access_values()
+            self._load_permission_values()
+            self._load_alert_values()
+            self._load_runtime_values()
+            self.state_label.configure(text="Free · Configured" if self._setup_complete() else "Free · Set an access code")
         finally:
             self._loading = False
 
@@ -555,69 +518,28 @@ class ZadooSettingsWindow:
             missing.append("Email To")
         self.email_state.configure(text=f"Missing: {', '.join(missing)}" if missing else "Email configured")
 
+    def _dashboard_linked(self) -> bool:
+        try:
+            return bool(self.store.get_device_token())
+        except Exception as exc:
+            logging.warning("Optional dashboard credentials unavailable: %s", exc)
+            return False
+
     def _load_account_values(self) -> None:
-        # Check signed in state
-        is_signed_in = bool(self.store.get_device_token())
+        is_signed_in = self._dashboard_linked()
 
-        # Adjust window controls, tabs, and footer visibility dynamically based on sign in status
-        if is_signed_in:
-            self.signin_welcome_frame.pack_forget()
-            # Pack the footer FIRST at the bottom so Start/Stop stay visible on any screen
-            # even when the tab area is squeezed; the tabs then fill the space above it.
-            self.footer.pack(side="bottom", fill="x")
-            self.tabs.pack(fill=BOTH, expand=True, pady=(10, 8))
-
-            # Insert tabs only if not already present (guard against duplicate insert errors)
-            existing_tabs = list(self.tabs.tabs())
-            ordered = [
-                (self.tab_access, "Access"),
-                (self.tab_account, "Account"),
-                (self.tab_permissions, "Permissions"),
-                (self.tab_alerts, "Alerts"),
-                (self.tab_runtime, "Runtime"),
-            ]
-            for idx, (tab_widget, label) in enumerate(ordered):
-                tab_id = str(tab_widget)
-                if tab_id not in existing_tabs:
-                    self.tabs.insert(idx, tab_widget, text=label)
-
-            _s = self._ui_scale
-            self.root.minsize(int(480 * _s), int(360 * _s))
-            if self.root.winfo_width() < int(660 * _s):
-                self._fit_geometry(780, 560)
-        else:
-            self.tabs.pack_forget()
-            self.footer.pack_forget()
-            self.signin_welcome_frame.pack(fill=BOTH, expand=True, pady=(10, 8))
-
-            _s = self._ui_scale
-            self.root.minsize(int(420 * _s), int(320 * _s))
-            if self.root.winfo_width() > int(560 * _s):
-                self._fit_geometry(520, 380)
-
-            # Check if there is an active activation process running
-            activation = self.data["activation"]
-            code = str(activation.get("code") or "")
-            if code:
-                self.welcome_status_label.configure(text="Waiting for browser sign-in approval...")
-                if not self._activation_poll_after and self._activation_poll_deadline == 0.0:
-                    self._activation_poll_deadline = time.time() + 900
-                    self._schedule_activation_poll()
-            else:
-                self.welcome_status_label.configure(text="")
-
-        # Show/Hide account tab components dynamically
+        self.footer.pack(side="bottom", fill="x")
+        self.tabs.pack(fill=BOTH, expand=True, pady=(10, 8))
+        self.root.minsize(int(480 * self._ui_scale), int(360 * self._ui_scale))
+        if self.root.winfo_width() < int(660 * self._ui_scale):
+            self._fit_geometry(780, 560)
         self.profile_card.pack_forget()
         self.device_name_frame.pack_forget()
         self.signin_frame.pack_forget()
-        self.credits_card.pack_forget()
-
+        self.device_name_frame.pack(fill="x", pady=(0, 10))
         if is_signed_in:
             self.profile_card.pack(fill="x", pady=(0, 10))
-            self.device_name_frame.pack(fill="x", pady=(0, 10))
-            self.credits_card.pack(fill="x", pady=(4, 0))
         else:
-            self.device_name_frame.pack(fill="x", pady=(0, 10))
             self.signin_frame.pack(fill="x", pady=(0, 10))
 
         # Profile card details
@@ -662,31 +584,6 @@ class ZadooSettingsWindow:
         else:
             self.public_url_label.configure(text="Zadoo not running", foreground=MUTED)
 
-        credits = self.data["credits_cache"]
-        entitlement = self.data["entitlement_cache"]
-        included = credits["includedMinutesRemaining"] if credits else 0
-        wallet = credits["walletMinutes"] if credits else 0
-        total = credits["totalMinutesRemaining"] if credits else 0
-        plan = credits["planCode"] if credits else None
-
-        if credits:
-            self.credits_included_label.configure(text=f"Included: {included} min")
-            self.credits_wallet_label.configure(text=f"Wallet: {wallet} min")
-            self.credits_total_label.configure(text=f"Total remaining: {total} min{(' · ' + plan) if plan else ''}")
-        else:
-            self.credits_included_label.configure(text="Credits not loaded")
-            self.credits_wallet_label.configure(text="")
-            self.credits_total_label.configure(text="")
-
-        if entitlement:
-            allowed = entitlement["allowed"]
-            reason = entitlement["reason"]
-            self.billing_state.configure(
-                text=f"{'✓ Active' if allowed else '✗ Blocked'}{': ' + reason if reason else ''}",
-                foreground=(ACCENT if allowed else DANGER)
-            )
-        else:
-            self.billing_state.configure(text="", foreground=MUTED)
 
     def _admin_code(self) -> str:
         return self.saved_access_code or self.access_code.get().strip()
@@ -742,36 +639,6 @@ class ZadooSettingsWindow:
         with suppress(tk.TclError):
             self.root.after(4000, self._poll_runtime_status)
 
-    def _poll_account_balance(self) -> None:
-        """Background-poll the cloud so the Credits card updates on its own (e.g. after a
-        top-up) without the user having to click Refresh."""
-        if self.store.get_device_token():
-            self._refresh_account_in_background()
-        with suppress(tk.TclError):
-            self.root.after(60_000, self._poll_account_balance)
-
-    def _refresh_account_in_background(self) -> None:
-        def _check():
-            for error in self._cloud_fetch_errors(
-                (("credits", self.cloud.fetch_credits), ("entitlement", self.cloud.entitlement))
-            ):
-                logging.error("Cloud refresh failed: %s", error)
-            with suppress(tk.TclError):
-                self.root.after(0, self.reload)
-
-        threading.Thread(target=_check, daemon=True).start()
-
-    def _refresh_balance_now(self) -> None:
-        """Immediate one-shot balance refresh (used when the window regains focus, e.g.
-        returning from the billing page after paying)."""
-        if not self.store.get_device_token():
-            return
-        now = time.time()
-        if now - self._last_focus_refresh < 3.0:
-            return  # debounce: FocusIn can fire repeatedly
-        self._last_focus_refresh = now
-        self._refresh_account_in_background()
-
     def _begin_public_url_autopoll(self, attempts: int = 8) -> None:
         """After Start, poll the runtime until the public link appears — or until the
         runtime tells us the tunnel is disabled (then show WHY instead of hanging)."""
@@ -822,7 +689,7 @@ class ZadooSettingsWindow:
                     self.public_url_label.configure(text=tunnel_error, foreground=DANGER)
                     self._set_status(tunnel_error)
                 elif running and not tunnel_enabled:
-                    # Runtime is up but the tunnel is off (billing/sign-in/etc) — stop hanging.
+                    # Runtime is up but the tunnel is disabled — stop hanging.
                     self.public_url_label.configure(text=block_reason, foreground=DANGER)
                     self._set_status(block_reason + "  Fix it, then click Start again.")
                 elif attempts <= 1 and tunnel_error:
@@ -873,15 +740,12 @@ class ZadooSettingsWindow:
             self.root.after(0, _update)
         threading.Thread(target=_do_refresh, daemon=True).start()
 
-    def _refresh_credits(self) -> None:
-        self._fetch_latest_account_details_async(show_status=True)
-
     def _fetch_latest_account_details_async(self, show_status: bool = False) -> None:
         if show_status:
             self._set_status("Refreshing account info...")
         def _do_fetch():
             errors = self._cloud_fetch_errors(
-                (("profile", self.cloud.fetch_profile), ("credits", self.cloud.fetch_credits))
+                (("profile", self.cloud.fetch_profile),)
             )
             def _done():
                 try:
@@ -904,16 +768,6 @@ class ZadooSettingsWindow:
             except Exception as exc:
                 errors.append(f"{label}: {exc}")
         return errors
-
-    def _open_pricing(self) -> None:
-        base = self.data["cloud_api_base"].rstrip("/")
-        webbrowser.open(f"{base}/pricing")
-
-    def _add_balance(self) -> None:
-        base = self.data["cloud_api_base"].rstrip("/")
-        webbrowser.open(f"{base}/dashboard/billing")
-
-
 
     def _load_runtime_values(self) -> None:
         self.autostart_var.set(self.data["autostart_enabled"])
@@ -987,9 +841,6 @@ class ZadooSettingsWindow:
 
     def _autosave(self) -> None:
         self._autosave_after = None
-        # Nothing to persist until the device is signed in (the welcome screen has no form).
-        if not self.store.get_device_token():
-            return
         try:
             payload = self._collect_payload()
         except Exception as exc:
@@ -1096,17 +947,8 @@ class ZadooSettingsWindow:
             except Exception as exc:
                 result = {"success": False, "error": str(exc)}
             if result["success"] and result["status"] == "claimed":
-                try:
-                    def _wipe(data):
-                        data["entitlement_cache"] = {}
-                        data["credits_cache"] = {}
-                    self.store.atomic_update(_wipe)
-                except Exception as exc:
-                    errors.append(f"local account reset: {exc}")
                 for label, fetch in (
                     ("profile", self.cloud.fetch_profile),
-                    ("credits", self.cloud.fetch_credits),
-                    ("entitlement", self.cloud.entitlement),
                 ):
                     try:
                         fetched = fetch()
@@ -1134,53 +976,33 @@ class ZadooSettingsWindow:
         threading.Thread(target=_poll, daemon=True).start()
 
     def sign_out(self) -> None:
-        """Stop Zadoo immediately, mark the device offline, and clear all account data."""
+        """Unlink the optional dashboard account without interrupting remote access."""
         if self._signout_active:
             return
-        if not messagebox.askyesno(
-            "Sign Out",
-            "Are you sure you want to sign out?\n\nThis will stop Zadoo and unlink this device from your Zadoo account.",
-            icon="warning",
-        ):
-            return
         self._signout_active = True
-        self._set_status("Signing out...")
-        admin_code = self._admin_code()
+        self._set_status("Unlinking dashboard account...")
 
-        def _sign_out():
-            errors = []
+        def _unlink():
+            error = ""
             try:
                 result = self.cloud.go_offline()
                 if not result["success"]:
-                    errors.append(f"cloud offline: {result['error']}")
+                    logging.warning("Optional offline sync failed: %s", result["error"])
             except Exception as exc:
-                errors.append(f"cloud offline: {exc}")
-            runtime_running = _local_server_running()
-            if runtime_running:
-                try:
-                    result = _local_rpc("runtime.stop", {"admin_code": admin_code})
-                    if not result["success"]:
-                        errors.append(f"runtime stop: {result['error']}")
-                except Exception as exc:
-                    errors.append(f"runtime stop: {exc}")
-                deadline = time.monotonic() + 5
-                while _local_server_running() and time.monotonic() < deadline:
-                    time.sleep(0.25)
-                if _local_server_running():
-                    errors.append("runtime stop: port 6173 remained active after 5 seconds")
+                logging.warning("Optional offline sync failed: %s", exc)
             try:
                 self.store.clear_account()
             except Exception as exc:
-                errors.append(f"local account clear: {exc}")
+                error = str(exc)
 
             def _done():
                 self._signout_active = False
                 self.reload()
-                self._set_status("; ".join(errors) if errors else "Signed out — Zadoo stopped")
+                self._set_status(error or "Dashboard account unlinked. Local access is still available.")
 
             self.root.after(0, _done)
 
-        threading.Thread(target=_sign_out, daemon=True).start()
+        threading.Thread(target=_unlink, daemon=True).start()
 
     def copy_activation_code(self) -> None:
         code = self.activation_code.get().strip()
@@ -1260,9 +1082,6 @@ class ZadooSettingsWindow:
     def start_zadoo(self) -> None:
         if self._start_request_active:
             return
-        if not self.store.get_device_token():
-            self._set_status("Sign in to Zadoo first")
-            return
         code = self.access_code.get().strip()
         if not code:
             self._set_status("Access code is required")
@@ -1277,18 +1096,12 @@ class ZadooSettingsWindow:
             return
         admin_code = self._admin_code()
         self._start_request_active = True
-        self._set_status("Checking cloud entitlement...")
+        self._set_status("Starting Zadoo...")
 
         def _check_and_stop():
             error = ""
             restarted = False
             try:
-                result = self.cloud.entitlement()
-                if not result["success"]:
-                    raise RuntimeError(f"Cloud entitlement check failed: {result['error']}")
-                entitlement = result["entitlement"]
-                if entitlement["revoked"]:
-                    raise RuntimeError(entitlement["reason"])
                 if _local_server_running():
                     stopped = _local_rpc("runtime.stop", {"admin_code": admin_code})
                     if not stopped["success"]:

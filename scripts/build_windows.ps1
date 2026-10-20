@@ -348,6 +348,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Vulture check failed" }
     & $PythonExe scripts\smoke_test.py
     if ($LASTEXITCODE -ne 0) { throw "Smoke test failed" }
+    & $PythonExe scripts\free_mode_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Free-mode integration test failed" }
     $node = Resolve-Node
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
