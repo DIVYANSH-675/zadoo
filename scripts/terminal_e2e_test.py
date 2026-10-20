@@ -114,31 +114,20 @@ def _run_matrix(label, page, screen, token):
 
 
 def _authenticate_in_browser(page, base: str, code: str):
-    credit_requests = []
-    page.on("request", lambda request: credit_requests.append(request.url) if "/api/local/credits" in request.url else None)
+    retired_requests = []
+    page.on("request", lambda request: retired_requests.append(request.url)
+            if any(value in request.url for value in ("/api/local/credits", "/topup-", "razorpay")) else None)
     page.goto(f"{base}/", wait_until="domcontentloaded", timeout=15000)
-    page.wait_for_timeout(1200)
-    preauth_count = len(credit_requests)
-    if preauth_count:
-        raise AssertionError(f"credits were requested before authentication: {credit_requests}")
     page.locator("#auth-code").fill(code)
-    with page.expect_response(lambda response: "/api/local/credits" in response.url, timeout=10000) as credit_response:
-        page.keyboard.press("Enter")
+    page.keyboard.press("Enter")
     page.wait_for_function("window.__zadooAuthenticated === true", timeout=10000)
-    credit_status = credit_response.value.status
-    credit_payload = credit_response.value.json()
-    expected_offline = credit_payload == {
-        "success": False,
-        "offline": True,
-        "error": "Device not signed in",
-    }
-    valid_online = credit_payload.get("success") is True and isinstance(credit_payload.get("credits"), dict)
-    ok = preauth_count == 0 and credit_status == 200 and (valid_online or expected_offline)
-    print(
-        f"CREDIT_POLLING: {'PASS' if ok else 'FAIL'} preauth={preauth_count} "
-        f"postauth_status={credit_status} expected_offline={expected_offline}"
-    )
-    return ok
+    page.wait_for_timeout(1200)
+    if retired_requests:
+        raise AssertionError(f"free viewer requested a retired service: {retired_requests}")
+    if page.locator("#paymentPanel, #creditTimer, #controlsLockedOverlay").count():
+        raise AssertionError("free viewer still contains payment or usage-lock UI")
+    print("FREE_ACCESS: PASS no payment UI or metering requests")
+    return True
 
 
 def _verify_local_ui_assets(page):
@@ -150,8 +139,6 @@ def _verify_local_ui_assets(page):
     page.wait_for_function("typeof window.CodeMirror === 'function'", timeout=10000)
     page.wait_for_function("window.__codeMirror && document.querySelector('#codemirror-stylesheet')", timeout=10000)
     editor_version = page.evaluate("window.CodeMirror.version")
-    page.locator("#ppAmountLabel").wait_for(state="visible", timeout=10000)
-    page.wait_for_function("!document.querySelector('#ppAmountLabel').textContent.includes('Loading')", timeout=10000)
     image_button = page.locator("#btn-clipboard-image")
     image_input = page.locator("#clipboard-image-input")
     ok = (

@@ -1,4 +1,4 @@
-"""Small HTTP client for the hosted Zadoo SaaS APIs."""
+"""Small HTTP client for the optional Zadoo device registry."""
 from __future__ import annotations
 
 import json
@@ -11,8 +11,6 @@ from typing import Any
 from .settings import (
     APP_VERSION,
     SettingsStore,
-    _clean_credits,
-    _clean_entitlement,
     get_settings_store,
     machine_id,
 )
@@ -40,22 +38,6 @@ class ZadooCloudClient:
         if not isinstance(value, dict):
             raise RuntimeError(f"{context} response is missing {field}")
         return value
-
-    @classmethod
-    def _required_entitlement(cls, payload: dict[str, Any], context: str) -> dict[str, Any]:
-        entitlement = cls._required_object(payload, "entitlement", context)
-        try:
-            return _clean_entitlement(entitlement, f"{context} entitlement")
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-
-    @classmethod
-    def _required_credits(cls, payload: dict[str, Any], context: str) -> dict[str, Any]:
-        credits = cls._required_object(payload, "credits", context)
-        try:
-            return _clean_credits(credits, f"{context} credits")
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
 
     @staticmethod
     def _response_object(raw: bytes, path: str, status: int) -> dict[str, Any]:
@@ -197,23 +179,10 @@ class ZadooCloudClient:
             })
         return result
 
-    def entitlement(self) -> dict[str, Any]:
-        if not (token := self.store.get_device_token()):
-            return {"success": False, "error": "Device is not activated"}
-        result = self._request("GET", "/api/agent/entitlement", token=token)
-        if result["success"]:
-            ent = self._required_entitlement(result, "Entitlement")
-            self.store.atomic_update(lambda data: data.__setitem__("entitlement_cache", ent))
-        return result
-
     def heartbeat(self, public_url: str | None = None) -> dict[str, Any]:
         if not (token := self.store.get_device_token()):
             return {"success": False, "error": "Device is not activated"}
-        result = self._request("POST", "/api/agent/heartbeat", {"publicUrl": public_url or "", "version": APP_VERSION}, token=token)
-        if result["success"]:
-            ent = self._required_entitlement(result, "Heartbeat")
-            self.store.atomic_update(lambda data: data.__setitem__("entitlement_cache", ent))
-        return result
+        return self._request("POST", "/api/agent/heartbeat", {"publicUrl": public_url or "", "version": APP_VERSION}, token=token)
 
     def go_offline(self) -> dict[str, Any]:
         """Tell the cloud this device is stopping so the dashboard shows it Offline
@@ -221,36 +190,6 @@ class ZadooCloudClient:
         if not (token := self.store.get_device_token()):
             return {"success": False, "error": "Device is not activated"}
         return self._request("POST", "/api/agent/heartbeat", {"offline": True}, token=token, timeout=3.0)
-
-    def start_session(self, public_url: str | None = None) -> dict[str, Any]:
-        if not (token := self.store.get_device_token()):
-            return {"success": False, "error": "Device is not activated"}
-        result = self._request("POST", "/api/agent/session/start", {"publicUrl": public_url or ""}, token=token)
-        if result["success"]:
-            self._required_string(result, "sessionId", "Session start")
-            entitlement = self._required_entitlement(result, "Session start")
-            self.store.atomic_update(lambda data: data.__setitem__("entitlement_cache", entitlement))
-        return result
-
-    def session_heartbeat(self, session_id: str, minutes: int = 1) -> dict[str, Any]:
-        if not (token := self.store.get_device_token()):
-            return {"success": False, "error": "Device is not activated"}
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise ValueError("session_id is required")
-        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
-            raise ValueError("minutes must be a positive integer")
-        result = self._request("POST", "/api/agent/session/heartbeat", {"sessionId": session_id, "minutes": minutes}, token=token)
-        if result["success"]:
-            entitlement = self._required_entitlement(result, "Session heartbeat")
-            self.store.atomic_update(lambda data: data.__setitem__("entitlement_cache", entitlement))
-        return result
-
-    def end_session(self, session_id: str) -> dict[str, Any]:
-        if not (token := self.store.get_device_token()):
-            return {"success": False, "error": "Device is not activated"}
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise ValueError("session_id is required")
-        return self._request("POST", "/api/agent/session/end", {"sessionId": session_id}, token=token)
 
     def fetch_profile(self) -> dict[str, Any]:
         """Fetch the user profile from cloud and cache it locally."""
@@ -262,15 +201,5 @@ class ZadooCloudClient:
             name = self._required_string(profile, "name", "Profile")
             email = self._required_string(profile, "email", "Profile")
             self.store.atomic_update(lambda data: data.update(user_name=name, user_email=email))
-        return result
-
-    def fetch_credits(self) -> dict[str, Any]:
-        """Fetch current credits balance from cloud and cache locally."""
-        if not (token := self.store.get_device_token()):
-            return {"success": False, "error": "Device not signed in"}
-        result = self._request("GET", "/api/agent/credits", token=token)
-        if result["success"]:
-            credits = self._required_credits(result, "Credits")
-            self.store.atomic_update(lambda data: data.__setitem__("credits_cache", credits))
         return result
 

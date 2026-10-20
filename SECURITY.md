@@ -26,8 +26,8 @@ may have been exposed while reproducing the issue.
   administration actions additionally require a loopback connection and the local access code.
 - Viewer authentication is rate limited, permissions are enforced per authenticated session,
   and at most five simultaneous viewer sessions are admitted by default.
-- Hosted-service heartbeat failures retry with bounded backoff for up to 120 seconds, then the
-  runtime fails closed.
+- Remote access requires the host's access code and permissions. Optional dashboard sync does
+  not gate free access; tunnel-process failures still receive bounded failure handling.
 - **Export Diagnostics** bounds included log tails and redacts access codes, tokens, IDs, email,
   cookies, bearer values, DPAPI blobs, and public tunnel URLs.
 - Public releases must be x64, hash-verified, SBOM-backed, and Authenticode signed. The manual

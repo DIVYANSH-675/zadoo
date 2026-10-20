@@ -89,8 +89,8 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._auth_window_seconds = env_int("ZADOO_AUTH_WINDOW_SECONDS", 60, 1, 3600)
         self._auth_max_failures = env_int("ZADOO_AUTH_MAX_FAILURES", 5, 1, 100)
         self._auth_lockout_seconds = env_int("ZADOO_AUTH_LOCKOUT_SECONDS", 300, 1, 86400)
-        self._cloud_heartbeat_grace_seconds = env_int(
-            "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS", 120, 60, 120
+        self._tunnel_failure_grace_seconds = env_int(
+            "ZADOO_TUNNEL_FAILURE_GRACE_SECONDS", 120, 60, 120
         )
         self._max_viewers = env_int("ZADOO_MAX_VIEWERS", 5, 1, 5)
         self._clipboard_image_max_bytes = env_int(
@@ -109,10 +109,9 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self._video_skipped_sends = 0
         self._server = None
         self.ever_bound = False
-        self._cloud_heartbeat_stop = threading.Event()
-        self._cloud_heartbeat_thread = None
+        self._status_monitor_stop = threading.Event()
+        self._status_monitor_thread = None
         self._fatal_error = None
-        self._grace_locks_by_session = {}
         self._viewer_connections_by_session = {}
         self._hotkey_lock = threading.RLock()
         self._keyboard_cleanup_registered = False
@@ -155,7 +154,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.ever_bound = True
 
         async def cleanup(tasks=()):
-            self._cloud_heartbeat_stop.set()
+            self._status_monitor_stop.set()
             self.stop_host_hotkeys()
             primary_server.close()
             for task in tasks:
@@ -170,12 +169,12 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             if background_sends:
                 await asyncio.gather(*background_sends, return_exceptions=True)
             self._background_send_tasks.clear()
-            heartbeat_thread = self._cloud_heartbeat_thread
+            heartbeat_thread = self._status_monitor_thread
             if heartbeat_thread is not None and heartbeat_thread.is_alive():
                 await asyncio.to_thread(heartbeat_thread.join, 9)
                 if heartbeat_thread.is_alive():
-                    raise RuntimeError("Cloud heartbeat thread did not stop within 9 seconds")
-            self._cloud_heartbeat_thread = None
+                    raise RuntimeError("Status monitor did not stop within 9 seconds")
+            self._status_monitor_thread = None
             self._server = None
 
         try:
@@ -200,7 +199,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
                 if not self.tunnel_manager:
                     self.tunnel_manager = CloudflareTunnelManager(self.port)
                 await asyncio.to_thread(self.tunnel_manager.start_primary_tunnel)
-            self._start_cloud_heartbeat()
+            self._start_status_monitor()
         except Exception:
             await cleanup()
             raise
@@ -238,83 +237,71 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
             task.result()
         raise RuntimeError("A required media broadcast task stopped unexpectedly")
 
-    def _start_cloud_heartbeat(self):
-        if not self.settings_store.get_device_token():
+    def _start_status_monitor(self):
+        try:
+            linked = bool(self.settings_store.get_device_token())
+        except Exception as exc:
+            logging.warning("Optional device dashboard credentials unavailable: %s", exc)
+            linked = False
+        if not self.enable_tunnel and not linked:
             return
-        self._cloud_heartbeat_stop.clear()
-        stop_event = self._cloud_heartbeat_stop
+        self._status_monitor_stop.clear()
+        stop_event = self._status_monitor_stop
 
         def _loop():
-            try:
-                from .saas import ZadooCloudClient
+            from .saas import ZadooCloudClient
 
-                client = ZadooCloudClient(self.settings_store)
-                seen_url = not self.enable_tunnel
-                failure_started = None
-                consecutive_failures = 0
+            client = ZadooCloudClient(self.settings_store)
+            failure_started = None
+            consecutive_failures = 0
+            try:
                 while not stop_event.is_set():
-                    try:
-                        process = self.tunnel_manager.primary_tunnel_process if self.tunnel_manager else None
-                        if process is not None and process.poll() is not None:
-                            raise RuntimeError(f"cloudflared exited with code {process.returncode}")
-                        public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
-                        result = client.heartbeat(public_url)
-                        if not result["success"]:
-                            raise RuntimeError(f"Cloud heartbeat failed: {result['error']}")
-                    except Exception as exc:
-                        now = time.monotonic()
-                        try:
-                            failure_started, consecutive_failures, retry_delay, elapsed = (
-                                self._heartbeat_retry_policy(
-                                    failure_started,
-                                    consecutive_failures,
-                                    now,
-                                    exc,
-                                )
-                            )
-                        except RuntimeError as final_error:
-                            raise final_error from exc
-                        logging.warning(
-                            "Cloud heartbeat failed; retrying in %.1f seconds (%.1f/%ss): %s",
-                            retry_delay,
-                            elapsed,
-                            self._cloud_heartbeat_grace_seconds,
-                            exc,
+                    process = self.tunnel_manager.primary_tunnel_process if self.tunnel_manager else None
+                    if process is not None and process.poll() is not None:
+                        error = f"cloudflared exited with code {process.returncode}"
+                        failure_started, consecutive_failures, delay, elapsed = self._tunnel_retry_policy(
+                            failure_started, consecutive_failures, time.monotonic(), error
                         )
-                        if stop_event.wait(retry_delay):
+                        logging.warning("Tunnel unavailable; retrying in %.1fs (%.1fs): %s", delay, elapsed, error)
+                        if stop_event.wait(delay):
                             break
                         continue
                     failure_started = None
                     consecutive_failures = 0
-                    if public_url:
-                        seen_url = True
-                    # Heartbeat quickly until the tunnel URL first appears (so the website
-                    # link syncs within seconds of startup), then settle to once a minute.
-                    if stop_event.wait(60 if seen_url else 5):
+                    # The registry is optional. Its availability never gates a free session.
+                    try:
+                        if self.settings_store.get_device_token():
+                            public_url = self.tunnel_manager.get_current_url() if self.tunnel_manager else None
+                            result = client.heartbeat(public_url)
+                            if not result["success"]:
+                                raise RuntimeError(result["error"])
+                    except Exception as exc:
+                        logging.warning("Optional device dashboard sync failed: %s", exc)
+                    if stop_event.wait(60):
                         break
             except Exception as exc:
-                logging.exception("Required cloud heartbeat stopped")
+                logging.exception("Tunnel monitor stopped")
                 self._fatal_error = RuntimeError(str(exc))
                 if self.loop and self.stop_event:
                     self.loop.call_soon_threadsafe(self.stop_event.set)
 
-        self._cloud_heartbeat_thread = threading.Thread(target=_loop, daemon=True)
-        self._cloud_heartbeat_thread.start()
+        self._status_monitor_thread = threading.Thread(target=_loop, daemon=True)
+        self._status_monitor_thread.start()
 
-    def _heartbeat_retry_policy(self, failure_started, consecutive_failures, now, error):
+    def _tunnel_retry_policy(self, failure_started, consecutive_failures, now, error):
         if failure_started is None:
             failure_started = now
         consecutive_failures += 1
         elapsed = now - failure_started
-        if elapsed >= self._cloud_heartbeat_grace_seconds:
+        if elapsed >= self._tunnel_failure_grace_seconds:
             raise RuntimeError(
-                "Cloud heartbeat failed for "
-                f"{self._cloud_heartbeat_grace_seconds} seconds: {error}"
+                "Cloudflare tunnel unavailable for "
+                f"{self._tunnel_failure_grace_seconds} seconds: {error}"
             )
         retry_delay = min(
             30,
             5 * (2 ** min(consecutive_failures - 1, 3)),
-            self._cloud_heartbeat_grace_seconds - elapsed,
+            self._tunnel_failure_grace_seconds - elapsed,
         )
         return failure_started, consecutive_failures, retry_delay, elapsed
 

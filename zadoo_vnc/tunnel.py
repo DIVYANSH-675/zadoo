@@ -61,15 +61,24 @@ class CloudflareTunnelManager:
         if cache and cache[0] == self.cloudflared_path and cache[1] == mtime:
             return
         quoted_path = self.cloudflared_path.replace("'", "''")
-        command = f"(Get-AuthenticodeSignature -LiteralPath '{quoted_path}').Status"
+        # Python can inherit PowerShell 7's PSModulePath. Load the matching Windows
+        # PowerShell security module explicitly instead of autoloading that copy.
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            "Import-Module (Join-Path $PSHOME "
+            "'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1'); "
+            f"(Get-AuthenticodeSignature -LiteralPath '{quoted_path}').Status"
+        )
         result = subprocess.run(
             [
                 windows_system_executable("WindowsPowerShell", "v1.0", "powershell.exe"),
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
                 command,
             ],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,

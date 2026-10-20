@@ -10,9 +10,7 @@ import math
 import os
 import secrets
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 import mss
 import numpy as np
@@ -33,7 +31,6 @@ from .assets import (
 )
 from .camera_discovery import enumerate_camera_devices
 from .dpi import get_primary_screen_size
-from .saas import ZadooCloudClient
 from .settings import (
     ACCESS_CODE_MAX_LENGTH,
     ALERT_CODES,
@@ -90,10 +87,6 @@ class RoutesMixin:
         "/api/list-mics": "mic",
         "/host-controls": "remote_alerts",
         "/api/alert": "remote_alerts",
-        "/api/local/credits": "billing",
-        "/api/local/payment-market": "billing",
-        "/api/local/topup-order": "billing",
-        "/api/local/topup-verify": "billing",
     }
     STATIC_ASSETS = {
         "/static/vendor/codemirror-5.65.21.min.css": (
@@ -112,30 +105,6 @@ class RoutesMixin:
             "vendor/xterm-5.3.0-fit-0.8.0.min.js",
             "text/javascript; charset=utf-8",
         ),
-    }
-    PAYMENT_MARKETS = {
-        "INDIA": {
-            "market": "INDIA",
-            "currency": "INR",
-            "symbol": "₹",
-            "minimum": 200,
-            "maximum": 10_000,
-            "slider_maximum": 5_000,
-            "default": 500,
-            "step": 50,
-            "minor_per_minute": 100,
-        },
-        "GLOBAL": {
-            "market": "GLOBAL",
-            "currency": "USD",
-            "symbol": "$",
-            "minimum": 3,
-            "maximum": 100,
-            "slider_maximum": 50,
-            "default": 5,
-            "step": 1,
-            "minor_per_minute": 3,
-        },
     }
     CSRF_HTTP_FEATURES = {
         "advanced_video",
@@ -413,26 +382,9 @@ class RoutesMixin:
         return self._feature_allowed_for_headers(request_headers, feature)
 
     def _is_ws_action_authorized(self, websocket, action):
-        # During the post-zero grace lock (≈ -5 to -10 min), only screen-view actions are
-        # allowed — mouse / keyboard / clipboard / everything else is disabled.
-        request_headers = self._headers_for_websocket(websocket)
-        session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
-        if self._grace_locks_by_session.get(session_token) and str(action) not in self.VIEW_ACTIONS:
-            return False
-        return self._is_ws_action_authorized_for_headers(request_headers, action)
-
-    def _set_grace_lock(self, websocket, locked):
-        token = self._cookie_value(self._headers_for_websocket(websocket), self.AUTH_COOKIE_NAME)
-        if not token:
-            raise RuntimeError("Authenticated session cookie is missing")
-        if locked:
-            self._grace_locks_by_session.setdefault(token, set()).add(websocket)
-            return
-        locks = self._grace_locks_by_session.get(token)
-        if locks:
-            locks.discard(websocket)
-            if not locks:
-                del self._grace_locks_by_session[token]
+        return self._is_ws_action_authorized_for_headers(
+            self._headers_for_websocket(websocket), action
+        )
 
     async def _send_ws_forbidden(self, websocket, action):
         try:
@@ -453,7 +405,7 @@ class RoutesMixin:
         if session is None:
             return False
         permissions = session["permissions"]
-        if feature in {"billing", "view"}:
+        if feature == "view":
             return True
         return permissions.get(feature) is True
 
@@ -467,9 +419,6 @@ class RoutesMixin:
 
     def _rpc_feature_allowed(self, websocket, feature):
         request_headers = self._headers_for_websocket(websocket)
-        session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
-        if self._grace_locks_by_session.get(session_token) and feature != "billing":
-            return False
         return self._feature_allowed_for_headers(request_headers, feature)
 
     def _cookie_value(self, request_headers, name):
@@ -518,7 +467,6 @@ class RoutesMixin:
         ]
         for token in expired:
             del sessions[token]
-            self._grace_locks_by_session.pop(token, None)
 
     def _session_for_headers(self, request_headers):
         token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
@@ -529,7 +477,6 @@ class RoutesMixin:
             return None
         if session["expires_at"] <= time.time():
             del self.auth_sessions[token]
-            self._grace_locks_by_session.pop(token, None)
             return None
         return session
 
@@ -598,7 +545,6 @@ class RoutesMixin:
         while len(sessions) > self.AUTH_MAX_SESSIONS:
             evicted = next(iter(sessions))
             del sessions[evicted]
-            self._grace_locks_by_session.pop(evicted, None)
         # Mark cookies Secure when served over the HTTPS tunnel (but NOT for plain
         # http://localhost, where a Secure cookie would be rejected by the browser).
         xfproto = str(self._header_get(request_headers, "X-Forwarded-Proto", "") or "").lower()
@@ -726,68 +672,6 @@ class RoutesMixin:
         self._apply_stream_profile("quality_changed")
         return value
 
-    async def _proxy_cloud_result(self, method: str, cloud_path: str, request_headers=None, request_body=None):
-        try:
-            if method not in {"GET", "POST"}:
-                raise ValueError(f"Unsupported cloud proxy method: {method}")
-            if method == "GET" and request_body is not None:
-                raise ValueError("Cloud GET body must be omitted")
-            store = self.settings_store
-            token = store.get_device_token()
-            if not token:
-                return http.HTTPStatus.UNAUTHORIZED, {"success": False, "error": "Device not signed in"}
-            if method == "POST" and not isinstance(request_body, (bytes, bytearray)):
-                raise TypeError("Cloud POST body must be bytes")
-            url = store.load()["cloud_api_base"] + cloud_path
-            headers_out = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            }
-            body = bytes(request_body) if request_body is not None else None
-            if body is not None:
-                headers_out["Content-Type"] = "application/json"
-            for hdr in (
-                "CF-Connecting-IP",
-                "X-Forwarded-For",
-                "CF-IPCountry",
-                "X-Country-Code",
-                "X-Vercel-IP-Country",
-            ):
-                val = self._header_get(request_headers, hdr, None) if request_headers else None
-                if val:
-                    headers_out[hdr] = str(val)
-
-            def _do_request():
-                request = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers=headers_out,
-                    method=method,
-                )
-                try:
-                    with urllib.request.urlopen(request, timeout=10 if body is not None else 8) as response:
-                        status = int(response.getcode())
-                        return status, ZadooCloudClient._read_response_body(response, cloud_path, status), False
-                except urllib.error.HTTPError as exc:
-                    status = int(exc.code)
-                    return status, ZadooCloudClient._read_response_body(exc, cloud_path, status), True
-
-            status, raw, http_error = await asyncio.to_thread(_do_request)
-            data = ZadooCloudClient._response_object(raw, cloud_path, status)
-            data = ZadooCloudClient._validated_result(data, cloud_path, status, http_error=http_error)
-            http_status = http.HTTPStatus(status) if status in http.HTTPStatus._value2member_map_ else http.HTTPStatus.BAD_GATEWAY
-            return http_status, data
-        except Exception as exc:
-            return http.HTTPStatus.BAD_GATEWAY, {"success": False, "error": str(exc)}
-
-    async def _proxy_cloud(self, method: str, cloud_path: str, request_headers=None, request_body=None):
-        status, data = await self._proxy_cloud_result(method, cloud_path, request_headers, request_body)
-        return self._json_response(data, status)
-
-    @staticmethod
-    def _rpc_error(error: str) -> RuntimeError:
-        return RuntimeError(str(error or "RPC action failed"))
-
     def _validate_rpc_request(self, raw_message):
         if not isinstance(raw_message, str):
             raise ValueError("RPC request must be UTF-8 JSON text")
@@ -828,7 +712,6 @@ class RoutesMixin:
             raise ValueError(f"RPC params must contain exactly: {', '.join(sorted(expected))}")
 
     async def _rpc_action(self, websocket, action, params):
-        request_headers = self._headers_for_websocket(websocket)
         if action == "settings.reload":
             self._require_rpc_admin(websocket, params)
             self._load_alert_presets_from_settings()
@@ -854,52 +737,6 @@ class RoutesMixin:
             title, message = self.alert_presets[code]
             self._broadcast_controller_alert(title, message)
             return {"ok": True}, False
-        if action == "billing.topup_order":
-            self._require_rpc_params(params, {"amount_minor"})
-            if not self._rpc_feature_allowed(websocket, "billing"):
-                raise PermissionError("Forbidden")
-            amount = params["amount_minor"]
-            if isinstance(amount, bool) or not isinstance(amount, int):
-                raise ValueError("amount_minor must be an integer")
-            if amount <= 0:
-                raise ValueError("amount_minor must be positive")
-            _, data = await self._proxy_cloud_result(
-                "POST",
-                "/api/agent/wallet/topup-order",
-                request_headers,
-                json.dumps({"amountMinor": amount}).encode("utf-8"),
-            )
-            if not data["success"]:
-                raise self._rpc_error(data["error"])
-            return data, False
-        if action == "billing.topup_verify":
-            fields = {"payment_id", "razorpay_payment_id", "razorpay_order_id", "razorpay_signature"}
-            self._require_rpc_params(params, fields)
-            if not self._rpc_feature_allowed(websocket, "billing"):
-                raise PermissionError("Forbidden")
-            body = {
-                "paymentId": params["payment_id"],
-                "razorpay_payment_id": params["razorpay_payment_id"],
-                "razorpay_order_id": params["razorpay_order_id"],
-                "razorpay_signature": params["razorpay_signature"],
-            }
-            missing = [key for key, value in body.items() if not isinstance(value, str) or not value.strip()]
-            if missing:
-                raise ValueError(f"Missing payment fields: {', '.join(missing)}")
-            _, data = await self._proxy_cloud_result(
-                "POST",
-                "/api/agent/wallet/topup-verify",
-                request_headers,
-                json.dumps(body).encode("utf-8"),
-            )
-            if not data["success"]:
-                raise self._rpc_error(data["error"])
-            refreshed = await asyncio.to_thread(ZadooCloudClient(self.settings_store).entitlement)
-            if not refreshed["success"]:
-                raise RuntimeError(f"Payment verified but entitlement refresh failed: {refreshed['error']}")
-            session_token = self._cookie_value(request_headers, self.AUTH_COOKIE_NAME)
-            self._grace_locks_by_session.pop(session_token, None)
-            return data, False
         raise ValueError(f"Unsupported RPC action: {action}")
 
     async def rpc_handler(self, websocket):
@@ -918,17 +755,6 @@ class RoutesMixin:
             if stop_after_response:
                 self.stop()
                 return
-
-    def _payment_market_payload(self, request_headers):
-        country = next(
-            (
-                str(value).strip().upper()
-                for name in ("CF-IPCountry", "X-Country-Code", "X-Vercel-IP-Country")
-                if (value := self._header_get(request_headers, name, ""))
-            ),
-            "",
-        )
-        return self.PAYMENT_MARKETS["INDIA" if country == "IN" else "GLOBAL"]
 
     async def process_request(self, connection, request):
         """Process a websockets 15 HTTP request."""
@@ -1039,22 +865,6 @@ class RoutesMixin:
                 "host_controls.html", strip=True, request_headers=request_headers
             )
         if route_path == "/api/alert":
-            return self._json_response(
-                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
-                http.HTTPStatus.METHOD_NOT_ALLOWED,
-            )
-        if route_path == "/api/local/credits":
-            if not self.settings_store.get_device_token():
-                return self._json_response({"success": False, "offline": True, "error": "Device not signed in"})
-            return await self._proxy_cloud("GET", "/api/agent/credits", request_headers)
-        if route_path == "/api/local/payment-market":
-            return self._json_response({"success": True, **self._payment_market_payload(request_headers)})
-        if route_path == "/api/local/topup-order":
-            return self._json_response(
-                {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
-                http.HTTPStatus.METHOD_NOT_ALLOWED,
-            )
-        if route_path == "/api/local/topup-verify":
             return self._json_response(
                 {"success": False, "error": "State-changing action requires authenticated WebSocket RPC"},
                 http.HTTPStatus.METHOD_NOT_ALLOWED,
@@ -1179,9 +989,6 @@ class RoutesMixin:
 
         current_port = self.tunnel_manager.primary_port
         print(f" New tunnel URL: {url}")
-        synced = await asyncio.to_thread(ZadooCloudClient(self.settings_store).heartbeat, url)
-        if not synced["success"]:
-            raise RuntimeError(f"Tunnel refreshed but cloud URL sync failed: {synced['error']}")
         return {
             "success": True,
             "url": url,

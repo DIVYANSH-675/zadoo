@@ -146,7 +146,7 @@ def assert_imports() -> None:
             "ZADOO_AUTH_LOCKOUT_SECONDS",
             "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
             "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
-            "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS",
+            "ZADOO_TUNNEL_FAILURE_GRACE_SECONDS",
             "ZADOO_MAX_VIEWERS",
             "ZADOO_STREAM_START_PROFILE",
         )
@@ -159,7 +159,7 @@ def assert_imports() -> None:
     os.environ["ZADOO_AUTH_LOCKOUT_SECONDS"] = "120"
     os.environ["ZADOO_CLIPBOARD_IMAGE_MAX_BYTES"] = "8"
     os.environ["ZADOO_CLIPBOARD_TEXT_MAX_BYTES"] = "8"
-    os.environ["ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS"] = "120"
+    os.environ["ZADOO_TUNNEL_FAILURE_GRACE_SECONDS"] = "120"
     os.environ["ZADOO_MAX_VIEWERS"] = "5"
     os.environ["ZADOO_STREAM_START_PROFILE"] = "half-120-q54"
     for key in (
@@ -191,8 +191,8 @@ def assert_imports() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for lock_name, required_packages in {
         "requirements-runtime.lock": ("pillow==12.3.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
-        "requirements-build.lock": ("pip==26.1.2", "setuptools==83.0.0", "pyinstaller==6.21.0"),
-        "ci_requirements.lock": ("pip==26.1.2", "pip-audit==2.10.1"),
+        "requirements-build.lock": ("pip==26.2.1", "setuptools==83.0.0", "pyinstaller==6.21.0"),
+        "ci_requirements.lock": ("pip==26.2.1", "pip-audit==2.10.1"),
     }.items():
         lock_text = (ROOT / lock_name).read_text(encoding="utf-8").lower()
         if "--hash=sha256:" not in lock_text:
@@ -233,7 +233,7 @@ def assert_imports() -> None:
         "ZADOO_AUTH_WINDOW_SECONDS",
         "ZADOO_CLIPBOARD_IMAGE_MAX_BYTES",
         "ZADOO_CLIPBOARD_TEXT_MAX_BYTES",
-        "ZADOO_CLOUD_HEARTBEAT_GRACE_SECONDS",
+        "ZADOO_TUNNEL_FAILURE_GRACE_SECONDS",
         "ZADOO_CLOUD_API_BASE",
         "ZADOO_CLOUDFLARED_PATH",
         "ZADOO_CLOUDFLARED_PROTOCOL",
@@ -487,62 +487,21 @@ def assert_imports() -> None:
     else:
         fail("incomplete settings did not fail")
 
-    malformed_settings = settings_mod.normalize_settings(None)
-    malformed_settings["entitlement_cache"] = {"allowed": True}
-    try:
-        settings_mod.normalize_settings(malformed_settings)
-    except ValueError as exc:
-        expected = (
-            "entitlement_cache is missing fields: activeSessions, concurrencyLimit, graceUntil, "
-            "includedMinutesRemaining, planCode, reason, revoked, walletMinutesRemaining"
-        )
-        if str(exc) != expected:
-            fail(f"malformed entitlement cache returned the wrong error: {exc}")
-    else:
-        fail("malformed entitlement cache did not fail")
-
-    malformed_settings = settings_mod.normalize_settings(None)
-    malformed_settings["credits_cache"] = {
-        "includedMinutesRemaining": 5,
-        "walletMinutes": 7,
-        "totalMinutesRemaining": 13,
-        "allowed": True,
-        "reason": None,
-        "planCode": None,
-    }
-    try:
-        settings_mod.normalize_settings(malformed_settings)
-    except ValueError as exc:
-        if str(exc) != "credits_cache totalMinutesRemaining does not equal included plus wallet":
-            fail(f"malformed credits cache returned the wrong error: {exc}")
-    else:
-        fail("malformed credits cache did not fail")
-
+    legacy_settings = isolated_store.load(reload=True)
+    legacy_settings["version"] = 3
+    legacy_settings["entitlement_cache"] = {"allowed": False}
+    legacy_settings["credits_cache"] = {"totalMinutesRemaining": 0}
+    migrated = settings_mod.normalize_settings(legacy_settings)
+    if migrated["version"] != settings_mod.CONFIG_VERSION:
+        fail("free upgrade did not update the settings version")
+    if "entitlement_cache" in migrated or "credits_cache" in migrated:
+        fail("free upgrade retained metering state")
+    for field in ("access_code", "permissions", "alerts", "device_token"):
+        if migrated[field] != legacy_settings[field]:
+            fail(f"free upgrade changed existing {field}")
+    isolated_store.save(migrated)
     isolated_store.save(settings_mod.normalize_settings(None))
-
-    class FakeCloudStore:
-        def __init__(self):
-            self.data = {"entitlement_cache": {"sentinel": True}}
-            self.update_count = 0
-
-        @staticmethod
-        def get_device_token():
-            return "smoke-token"
-
-        def atomic_update(self, update):
-            self.update_count += 1
-            update(self.data)
-
-    fake_cloud_store = FakeCloudStore()
-    cloud = ZadooCloudClient(fake_cloud_store)
-    cloud._request = lambda *_args, **_kwargs: {
-        "success": False,
-        "entitlement": {"allowed": True, "revoked": False},
-    }
-    cloud.start_session()
-    cloud.session_heartbeat("smoke-session")
-    if fake_cloud_store.update_count or fake_cloud_store.data["entitlement_cache"] != {"sentinel": True}:
-        fail("failed cloud session response overwrote the entitlement cache")
+    cloud = ZadooCloudClient(isolated_store)
     invalid_utf8 = cloud._response_object(b"\xff", "/smoke", 502)
     if invalid_utf8.get("error", "").split(":", 1)[0] != "Cloud API returned invalid UTF-8 for /smoke (HTTP 502)":
         fail(f"cloud invalid UTF-8 returned the wrong error: {invalid_utf8}")
@@ -566,62 +525,6 @@ def assert_imports() -> None:
     )
     if expired != {"success": False, "status": "expired", "error": "Activation code expired"}:
         fail(f"expired activation returned the wrong error: {expired}")
-    try:
-        cloud._required_credits({
-            "credits": {
-                "includedMinutesRemaining": 5,
-                "walletMinutes": 7,
-                "totalMinutesRemaining": 13,
-                "allowed": True,
-                "reason": None,
-                "planCode": None,
-            }
-        }, "Credits")
-    except RuntimeError as exc:
-        if str(exc) != "Credits credits totalMinutesRemaining does not equal included plus wallet":
-            fail(f"invalid credits total returned the wrong error: {exc}")
-    else:
-        fail("invalid credits total did not fail")
-
-    session_server = VNCServer(6173)
-    session_server.settings_store = SimpleNamespace(get_device_token=lambda: "smoke-token")
-    import zadoo_vnc.saas as saas_mod
-
-    original_start_session = saas_mod.ZadooCloudClient.start_session
-    entitlement = {
-        "allowed": False,
-        "revoked": False,
-        "reason": "No active plan or wallet balance",
-        "planCode": None,
-        "includedMinutesRemaining": 0,
-        "walletMinutesRemaining": 0,
-        "concurrencyLimit": 1,
-        "activeSessions": 0,
-        "graceUntil": None,
-    }
-    try:
-        saas_mod.ZadooCloudClient.start_session = lambda _client, _url: {
-            "success": False,
-            "status_code": 402,
-            "error": entitlement["reason"],
-            "entitlement": entitlement,
-        }
-        if session_server._cloud_start_remote_session() != {"success": True, "no_credits": True}:
-            fail("zero-credit session response did not enter grace")
-
-        entitlement = dict(
-            entitlement,
-            reason="Concurrency limit reached",
-            planCode="PAYG",
-            walletMinutesRemaining=10,
-            activeSessions=1,
-        )
-        blocked = session_server._cloud_start_remote_session()
-        if blocked["success"] is not False or blocked["error"] != "Concurrency limit reached":
-            fail(f"concurrency block was incorrectly converted to grace: {blocked}")
-    finally:
-        saas_mod.ZadooCloudClient.start_session = original_start_session
-
     loads = [profile.target_fps / (profile.scale_div ** 2) for profile in STREAM_LADDER]
     if any(current < following for current, following in pairwise(loads)):
         fail(f"adaptive stream ladder is not monotonic: {loads}")
@@ -1005,13 +908,12 @@ def assert_imports() -> None:
                 "remoteView.mode",
                 "canvas.addEventListener('pointerdown'",
                 "touchDistance(points)",
-                'callRpc("billing.topup_order"',
-                'callRpc("billing.topup_verify"',
             ):
                 if mobile_marker not in index_template:
                     fail(f"mobile/RPC frontend is missing {mobile_marker}")
-            if "/api/local/topup-order" in index_template or "/api/local/topup-verify" in index_template:
-                fail("frontend still calls legacy state-changing payment HTTP routes")
+            for retired_marker in ("Razorpay", "paymentPanel", "startCreditPolling", "creditTimer"):
+                if retired_marker in index_template:
+                    fail(f"free viewer retained retired UI: {retired_marker}")
             host_controls_template = load_template("host_controls.html")
             if "alert.trigger" not in host_controls_template or "/api/alert" in host_controls_template:
                 fail("host controls did not migrate alerts to authenticated WebSocket RPC")
@@ -1053,14 +955,13 @@ def assert_imports() -> None:
             if server._websocket_max_size < minimum_image_frame:
                 fail("websocket frame limit cannot carry the configured clipboard image limit")
             headers["Cookie"] = cookie
-            offline_credits = await request(server, "/api/local/credits", headers)
-            offline_payload = json.loads(offline_credits.body.decode("utf-8"))
-            if offline_credits.status_code != 200 or offline_payload != {
-                "success": False,
-                "offline": True,
-                "error": "Device not signed in",
-            }:
-                fail(f"offline credits returned unexpected response: {offline_credits.status_code} {offline_payload}")
+            for retired_path in (
+                "/api/local/credits", "/api/local/payment-market",
+                "/api/local/topup-order", "/api/local/topup-verify",
+            ):
+                retired_response = await request(server, retired_path, headers)
+                if retired_response.status_code != 404:
+                    fail(f"retired local API {retired_path} is still available")
             for path, expected_error in {
                 "/snapshot?fmt=png&fmt=jpeg": "Duplicate snapshot parameters: fmt",
                 "/snapshot?unknown=1": "Unsupported snapshot parameters: unknown",
@@ -1139,24 +1040,12 @@ def assert_imports() -> None:
                 "/api/settings/reload",
                 "/api/runtime/stop",
                 "/api/runtime/refresh-tunnel",
-                "/api/local/topup-order",
-                "/api/local/topup-verify",
                 "/api/alert?code=A",
             ):
                 legacy_response = await request(server, legacy_mutation, csrf_headers)
                 legacy_payload = json.loads(legacy_response.body.decode("utf-8"))
                 if legacy_response.status_code != 405 or legacy_payload.get("error") != rpc_required_error:
                     fail(f"legacy mutation {legacy_mutation} did not fail with the exact RPC error")
-            global_market = await request(server, "/api/local/payment-market", headers)
-            global_payload = json.loads(global_market.body.decode("utf-8"))
-            if global_payload["market"] != "GLOBAL" or global_payload["currency"] != "USD":
-                fail(f"default payment market was not global USD: {global_payload}")
-            india_headers = headers.copy()
-            india_headers["CF-IPCountry"] = "IN"
-            india_market = await request(server, "/api/local/payment-market", india_headers)
-            india_payload = json.loads(india_market.body.decode("utf-8"))
-            if india_payload["market"] != "INDIA" or india_payload["currency"] != "INR":
-                fail(f"India payment market was not INR: {india_payload}")
             removed_clipboard_response = await request(server, "/api/set-clipboard-image", csrf_headers)
             if removed_clipboard_response.status_code != 404:
                 fail(
@@ -1297,42 +1186,22 @@ def assert_imports() -> None:
             if server._viewer_connections_by_session:
                 fail("viewer slots were not released after all sockets closed")
 
-            started, failures, delay, elapsed = server._heartbeat_retry_policy(
+            started, failures, delay, elapsed = server._tunnel_retry_policy(
                 None, 0, 100.0, "offline"
             )
             if (started, failures, delay, elapsed) != (100.0, 1, 5, 0.0):
                 fail("heartbeat retry policy did not start with a five-second backoff")
-            _, _, delay, elapsed = server._heartbeat_retry_policy(
+            _, _, delay, elapsed = server._tunnel_retry_policy(
                 started, failures, 219.0, "offline"
             )
             if delay != 1.0 or elapsed != 119.0:
                 fail("heartbeat retry policy did not clamp its final retry to the fail-closed deadline")
             try:
-                server._heartbeat_retry_policy(started, failures, 220.0, "offline")
+                server._tunnel_retry_policy(started, failures, 220.0, "offline")
                 fail("heartbeat retry policy did not fail closed after 120 seconds")
             except RuntimeError as exc:
-                if str(exc) != "Cloud heartbeat failed for 120 seconds: offline":
+                if str(exc) != "Cloudflare tunnel unavailable for 120 seconds: offline":
                     fail(f"heartbeat fail-closed policy returned the wrong exact error: {exc}")
-
-            second_auth_response = await request(server, "/api/auth", auth_request_headers)
-            second_headers = Headers()
-            second_headers["Host"] = "localhost:6173"
-            second_headers["Cookie"] = cookie_header_from_set_cookie(second_auth_response.headers)
-            locked_ws = FakeWebSocket(headers, [])
-            locked_ws_peer = FakeWebSocket(headers, [])
-            unlocked_ws = FakeWebSocket(second_headers, [])
-            server._set_grace_lock(locked_ws, True)
-            server._set_grace_lock(locked_ws_peer, True)
-            if server._is_ws_action_authorized(locked_ws, "click"):
-                fail("grace lock did not block its authenticated session")
-            if not server._is_ws_action_authorized(locked_ws, "get_stream_status"):
-                fail("grace lock blocked a view-only action")
-            if not server._is_ws_action_authorized(unlocked_ws, "click"):
-                fail("one viewer's grace lock blocked another authenticated session")
-            server._set_grace_lock(locked_ws, False)
-            if server._is_ws_action_authorized(locked_ws_peer, "click"):
-                fail("unlocking one video connection cleared a peer grace lock")
-            server._set_grace_lock(locked_ws_peer, False)
 
             recorded_actions = []
             original_process_event = server.process_event
