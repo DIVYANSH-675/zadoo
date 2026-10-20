@@ -18,7 +18,7 @@ dependencies = [
   "python-dotenv==1.2.2",
   "pygrabber==0.2; platform_system == 'Windows'",
   "av==16.1.0",
-  "sounddevice==0.5.2",
+  "sounddevice==0.5.5",
   "soundcard==0.4.6",
   "resend==2.30.0",
   "bettercam==1.0.0",
