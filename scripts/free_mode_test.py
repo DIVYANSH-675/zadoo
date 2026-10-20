@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +87,35 @@ def main():
         if server._status_monitor_thread.is_alive() or server._fatal_error is not None:
             raise AssertionError("Optional dashboard outage blocked free remote access")
         print("OPTIONAL_DASHBOARD_OUTAGE: PASS host remains available")
+
+        from zadoo_vnc.tunnel import CloudflareTunnelManager
+
+        binary = Path(folder) / "test-cloudflared.exe"
+        binary.touch()
+        manager = CloudflareTunnelManager.__new__(CloudflareTunnelManager)
+        manager.cloudflared_path = str(binary)
+        manager._signature_cache = None
+        valid = SimpleNamespace(returncode=0, stdout="Valid", stderr="")
+        with patch("zadoo_vnc.tunnel.subprocess.run", return_value=valid) as signature:
+            manager._verify_cloudflared_signature()
+            manager._verify_cloudflared_signature()
+            if signature.call_count != 1:
+                raise AssertionError("Signature verification was not cached within the session")
+            command = signature.call_args.args[0]
+            if "-NonInteractive" not in command or "Join-Path $PSHOME" not in command[-1]:
+                raise AssertionError("Signature check may autoload an incompatible PowerShell module")
+        changed = binary.stat().st_mtime_ns + 1_000_000_000
+        os.utime(binary, ns=(changed, changed))
+        unsigned = SimpleNamespace(returncode=0, stdout="NotSigned", stderr="")
+        with patch("zadoo_vnc.tunnel.subprocess.run", return_value=unsigned):
+            try:
+                manager._verify_cloudflared_signature()
+            except RuntimeError as exc:
+                if str(exc) != "cloudflared signature check failed: NotSigned":
+                    raise
+            else:
+                raise AssertionError("A changed or unsigned tunnel binary was accepted")
+        print("TUNNEL_SIGNATURE: PASS native module, cache invalidation and unsigned rejection")
 
 
 if __name__ == "__main__":
