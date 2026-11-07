@@ -12,6 +12,17 @@ import numpy as np
 from imagecodecs import JPEG8
 from imagecodecs._jpeg8 import jpeg8_encode
 
+from .delta_frames import DeltaFrameEncoder
+
+
+class _OwnedFrameProcessor:
+    """Copy while the DXGI surface is mapped, never after BetterCam unmaps it."""
+    def __init__(self, processor):
+        self.processor = processor
+
+    def process(self, *args):
+        return self.processor.process(*args).copy()
+
 
 class ScreenCapturer(threading.Thread):
     def __init__(self, fps=0, quality=85):
@@ -27,8 +38,12 @@ class ScreenCapturer(threading.Thread):
         self.active_capture_method = "unknown"
         self.capture_stats = {
             'frame_count': 0,
+            'encoded_count': 0,
             'last_fps_time': time.time(),
             'current_fps': 0,
+            'produced_fps': 0,
+            'produced_kbps': 0.0,
+            'encoded_bytes': 0,
             'sequence': 0,
             'last_frame_ts': 0.0,
             'last_capture_ms': 0.0,
@@ -45,6 +60,25 @@ class ScreenCapturer(threading.Thread):
         self._capture_source_region_applied = False
         self._streaming_event = threading.Event()
         self._streaming_event.set()
+        self._delta_enabled = False
+        self._delta_encoder = DeltaFrameEncoder()
+        self._keyframe_requested = threading.Event()
+        self.quality_locked_by_user = False
+        self._last_jpeg_subsampling = '420'
+
+    def set_delta_streaming(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError("Delta streaming state must be a boolean")
+        with self.frame_lock:
+            changed = enabled != self._delta_enabled
+            self._delta_enabled = enabled
+        if changed:
+            self.request_keyframe()
+
+    def request_keyframe(self):
+        self._keyframe_requested.set()
+        # A new viewer / resync must also work on a completely static desktop.
+        self._initial_frame_pending = True
 
     def set_frame_event(self, loop, event):
         self._frame_event_loop = loop
@@ -56,12 +90,24 @@ class ScreenCapturer(threading.Thread):
         if active:
             if not self._streaming_event.is_set():
                 self._initial_frame_pending = True
+                with self.frame_lock:
+                    self.capture_stats['current_fps'] = 0.0
+                    self.capture_stats['produced_fps'] = 0.0
+                    self.capture_stats['frame_count'] = 0
+                    self.capture_stats['encoded_count'] = 0
+                    self.capture_stats['encoded_bytes'] = 0
+                    self.capture_stats['produced_kbps'] = 0.0
+                    self.capture_stats['last_fps_time'] = time.time()
             self._streaming_event.set()
         else:
             self._streaming_event.clear()
             with self.frame_lock:
                 self.capture_stats['current_fps'] = 0.0
+                self.capture_stats['produced_fps'] = 0.0
                 self.capture_stats['frame_count'] = 0
+                self.capture_stats['encoded_count'] = 0
+                self.capture_stats['encoded_bytes'] = 0
+                self.capture_stats['produced_kbps'] = 0.0
                 self.capture_stats['last_fps_time'] = time.time()
 
     def _notify_frame_ready(self):
@@ -88,34 +134,46 @@ class ScreenCapturer(threading.Thread):
             if not self._streaming_event.wait(timeout=0.25):
                 next_deadline = time.perf_counter()
                 continue
+            if not self.is_running:
+                break
             try:
                 capture_start = time.perf_counter()
                 frame = self._grab_screen_bettercam()
                 source_region_applied = self._capture_source_region_applied
                 capture_ms = (time.perf_counter() - capture_start) * 1000.0
                 current_time = time.time()
+                if (frame is None and self._delta_enabled and self._delta_encoder.detail_refresh_pending
+                        and current_time - self.capture_stats['last_frame_ts'] > 0.25):
+                    self.request_keyframe()
                 with self.frame_lock:
                     self.capture_stats['last_capture_ms'] = capture_ms
                     self.capture_stats['frame_count'] += 1
                     time_diff = current_time - self.capture_stats['last_fps_time']
                     if time_diff >= 1.0:
                         self.capture_stats['current_fps'] = self.capture_stats['frame_count'] / time_diff
+                        self.capture_stats['produced_fps'] = self.capture_stats['encoded_count'] / time_diff
+                        self.capture_stats['produced_kbps'] = self.capture_stats['encoded_bytes'] * 8 / 1000 / time_diff
                         self.capture_stats['frame_count'] = 0
+                        self.capture_stats['encoded_count'] = 0
+                        self.capture_stats['encoded_bytes'] = 0
                         self.capture_stats['last_fps_time'] = current_time
                 if isinstance(frame, np.ndarray) and not source_region_applied:
                     frame = self._apply_perf_region(frame)
                 if frame is not None:
                     encode_start = time.perf_counter()
-                    jpeg_bytes = self._encode_frame(frame)
+                    jpeg_bytes = self._encode_stream_frame(frame)
                     encode_ms = (time.perf_counter() - encode_start) * 1000.0
-                    if not isinstance(jpeg_bytes, bytes) or not jpeg_bytes:
-                        raise RuntimeError("JPEG encoder returned an empty or non-bytes frame")
-                    with self.frame_lock:
-                        self.latest_frame_jpeg = jpeg_bytes
-                        self.capture_stats['sequence'] += 1
-                        self.capture_stats['last_frame_ts'] = current_time
-                        self.capture_stats['last_encode_ms'] = encode_ms
-                    self._notify_frame_ready()
+                    if jpeg_bytes is not None:
+                        if not isinstance(jpeg_bytes, bytes) or not jpeg_bytes:
+                            raise RuntimeError("JPEG encoder returned an empty or non-bytes frame")
+                        with self.frame_lock:
+                            self.latest_frame_jpeg = jpeg_bytes
+                            self.capture_stats['sequence'] += 1
+                            self.capture_stats['encoded_count'] += 1
+                            self.capture_stats['encoded_bytes'] += len(jpeg_bytes)
+                            self.capture_stats['last_frame_ts'] = current_time
+                            self.capture_stats['last_encode_ms'] = encode_ms
+                        self._notify_frame_ready()
                                 
             except Exception as exc:
                 self.last_error = f"Screen capture failed: {exc}"
@@ -143,6 +201,7 @@ class ScreenCapturer(threading.Thread):
             # Keep DirectX's native BGRA layout. libjpeg-turbo converts it directly,
             # avoiding BetterCam's OpenCV conversion and an extra full-frame copy.
             self.bettercam_camera = bettercam.create(device_idx=0, output_idx=0, output_color="BGRA")
+            self.bettercam_camera._processor = _OwnedFrameProcessor(self.bettercam_camera._processor)
         if self._initial_frame_pending:
             self._initial_frame_pending = False
             self._capture_source_region_applied = False
@@ -185,6 +244,21 @@ class ScreenCapturer(threading.Thread):
         cam._stagesurf.height = 0
 
     def _encode_frame(self, frame):
+        return self._encode_pixels(self._prepare_frame(frame))
+
+    def _encode_stream_frame(self, frame):
+        arr = self._prepare_frame(frame)
+        if self._delta_enabled:
+            force = self._keyframe_requested.is_set()
+            self._keyframe_requested.clear()
+            return self._delta_encoder.encode(arr, self._encode_pixels,
+                (self.quality, self.perf_region, self.perf_scale_div, self.perf_grayscale, str(self._custom_rect_norm)),
+                force_keyframe=force, take_ownership=True,
+                encode_motion_jpeg=self._encode_motion_pixels if self.quality >= 80 and not self.quality_locked_by_user else None)
+        self._delta_encoder.reset()
+        return self._encode_pixels(arr)
+
+    def _prepare_frame(self, frame):
         if not isinstance(frame, np.ndarray):
             raise TypeError(f"Unsupported frame type for JPEG encoding: {type(frame).__name__}")
         if frame.ndim != 3 or frame.shape[2] not in {3, 4}:
@@ -199,16 +273,26 @@ class ScreenCapturer(threading.Thread):
                 arr = (0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]).astype(np.uint8)
         if not arr.flags.c_contiguous:
             arr = np.ascontiguousarray(arr)
+        return arr
+
+    def _encode_motion_pixels(self, arr):
+        return self._encode_pixels(arr, subsampling='420')
+
+    def _encode_pixels(self, arr, subsampling=None):
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
         if arr.ndim == 2:
             colorspace = outcolorspace = JPEG8.CS.GRAYSCALE
         else:
             colorspace = JPEG8.CS.EXT_BGRA if arr.shape[2] == 4 else JPEG8.CS.RGB
             outcolorspace = JPEG8.CS.YCbCr
+        self._last_jpeg_subsampling = subsampling or ("444" if self.quality >= 80 else "420")
         return jpeg8_encode(
             arr,
             level=self.quality,
             colorspace=colorspace,
             outcolorspace=outcolorspace,
+            subsampling=self._last_jpeg_subsampling,
         )
 
     def get_capture_stats(self):
@@ -224,6 +308,8 @@ class ScreenCapturer(threading.Thread):
         )
         return {
             'current_fps': stats['current_fps'],
+            'produced_fps': stats['produced_fps'],
+            'produced_kbps': stats['produced_kbps'],
             'active_method': active_method,
             'sequence': stats['sequence'],
             'last_frame_ts': stats['last_frame_ts'],
@@ -236,6 +322,13 @@ class ScreenCapturer(threading.Thread):
             'perf_region': self.perf_region,
             'perf_scale_div': self.perf_scale_div,
             'perf_grayscale': self.perf_grayscale,
+            'video_format': 'jpeg-patch-v1' if self._delta_enabled else 'jpeg',
+            'full_frames': self._delta_encoder.full_frames,
+            'patch_frames': self._delta_encoder.patch_frames,
+            'unchanged_frames': self._delta_encoder.unchanged_frames,
+            'last_update_pixels': self._delta_encoder.last_update_pixels,
+            'jpeg_subsampling': self._last_jpeg_subsampling,
+            'detail_refresh_pending': self._delta_encoder.detail_refresh_pending,
             'error': self.last_error,
             'is_working': is_working
         }

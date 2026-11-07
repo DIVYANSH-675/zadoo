@@ -24,8 +24,12 @@ STREAM_LADDER = (
     StreamProfile("full-240-q52", "Max FPS", 240, 52, 1),
     StreamProfile("full-120-q65", "Fast", 120, 65, 1),
     StreamProfile("full-120-q56", "Fast", 120, 56, 1),
+    StreamProfile("full-60-q85", "Clear", 60, 85, 1),
+    StreamProfile("full-60-q75", "Clear", 60, 75, 1),
     StreamProfile("half-240-q54", "Fast", 240, 54, 2),
     StreamProfile("half-120-q54", "Fast", 120, 54, 2),
+    StreamProfile("full-30-q85", "Clear", 30, 85, 1),
+    StreamProfile("full-30-q75", "Clear", 30, 75, 1),
     StreamProfile("half-60-q60", "Balanced", 60, 60, 2),
     StreamProfile("half-60-q52", "Balanced", 60, 52, 2),
     StreamProfile("half-30-q54", "Balanced", 30, 54, 2),
@@ -42,11 +46,12 @@ class AdaptiveStreamController:
     def __init__(self):
         self.enabled = True
 
-        # Start conservative for an UNKNOWN link (safe at ~2 Mbps) and let the controller upshift
-        # toward high FPS on fast/local links. Starting near the top of the ladder floods a slow
-        # link for several seconds before it can converge down.
-        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "half-60-q52")).strip().lower()
+        # Start with readable full-resolution text, not a permanently blurred desktop.
+        # The existing bounded sends and immediate network-backlog downshift still
+        # protect unknown/slow links; host/browser changes require sustained evidence.
+        start_name = str(os.getenv("ZADOO_STREAM_START_PROFILE", "full-60-q85")).strip().lower()
         self.profile_index = self._index_for_name(start_name)
+        self._start_profile_index = self.profile_index
         self.last_change_at = 0.0
         self.last_eval_at = 0.0
         self.good_intervals = 0
@@ -62,6 +67,12 @@ class AdaptiveStreamController:
         self.fps_cap_reason = ""
         self.downshift_reason = "startup"
         self._last_applied_signature = None
+        self._host_cost_ms = None
+        self._capture_cost_ms = None
+        self._encode_cost_ms = None
+        self._soft_overload_intervals = 0
+        self._active_since = None
+        self._quality_locked_by_user = False
         # Optional hard bandwidth target in kbps (e.g. 2000 for a 2 Mbps link). 0 = disabled, in
         # which case adaptation reacts to latency/backlog only. When set, the controller also
         # downshifts proactively whenever the estimated egress (frame_bytes x fps) exceeds it.
@@ -73,6 +84,20 @@ class AdaptiveStreamController:
                 return index
         choices = ", ".join(profile.name for profile in STREAM_LADDER)
         raise ValueError(f"Invalid ZADOO_STREAM_START_PROFILE={name!r}; expected one of {choices}")
+
+    def begin_session(self, skipped_total=0):
+        """Restart the configured automatic profile without stale viewer telemetry."""
+        self.profile_index = self._start_profile_index
+        self._active_since = None
+        self._host_cost_ms = None
+        self._capture_cost_ms = None
+        self._encode_cost_ms = None
+        self._soft_overload_intervals = 0
+        self.good_intervals = 0
+        self.last_eval_at = 0.0
+        self.last_skipped_total = skipped_total
+        self.last_client_stats = {}
+        self.last_client_at = 0.0
 
     @property
     def profile(self) -> StreamProfile:
@@ -87,6 +112,7 @@ class AdaptiveStreamController:
         server.current_fps = target_fps
         capturer = server.screen_capturer
         quality_locked = server._quality_locked_by_user
+        self._quality_locked_by_user = quality_locked
         if quality_locked:
             quality = server.current_quality
         else:
@@ -113,6 +139,7 @@ class AdaptiveStreamController:
         if capturer is not None:
             capturer.fps = target_fps
             capturer.quality = quality
+            capturer.quality_locked_by_user = quality_locked
             capturer.configure_performance(bool(manual) or scale_div > 1, region, scale_div, grayscale, rect_norm)
         signature = (profile.name, target_fps, quality, scale_div, grayscale, region, quality_locked)
         if signature != self._last_applied_signature:
@@ -180,13 +207,25 @@ class AdaptiveStreamController:
             "capture_ms": float(capture_stats["last_capture_ms"]),
             "encode_ms": float(capture_stats["last_encode_ms"]),
             "capture_fps": float(capture_stats["current_fps"]),
+            "produced_fps": float(capture_stats.get("produced_fps", capture_stats["current_fps"])),
             "target_fps": int(capture_stats["target_fps"]),
             "quality": int(capture_stats["quality"]),
             "scale_div": int(capture_stats["perf_scale_div"]),
         }
+        if not video_clients:
+            self._active_since = None
+            self._host_cost_ms = None
+            self._capture_cost_ms = None
+            self._encode_cost_ms = None
+            self._soft_overload_intervals = 0
+            self.good_intervals = 0
+            return False
         if not self.enabled or now - self.last_eval_at < 1.0:
             return False
         self.last_eval_at = now
+        if self._active_since is None:
+            self._active_since = now
+        warming_up = now - self._active_since < 2.0
 
         profile = self.profile
         target_fps = max(1, int(profile.target_fps))
@@ -199,25 +238,57 @@ class AdaptiveStreamController:
         capture_ms = self.last_server_stats["capture_ms"]
         encode_ms = self.last_server_stats["encode_ms"]
         capture_fps = self.last_server_stats["capture_fps"]
+        produced_fps = min(target_fps, self.last_server_stats["produced_fps"])
         quality = int(self.last_server_stats["quality"])
-        full_resolution_locked = quality >= 85
+        full_resolution_locked = self._quality_locked_by_user and quality >= 85
+        host_cost_ms = capture_ms + encode_ms
+        # Camera/MSS initialization and the first browser decode are cold-start
+        # costs, not sustained per-frame costs. Do not seed the EMA with them.
+        if not warming_up:
+            if self._host_cost_ms is None:
+                self._capture_cost_ms = capture_ms
+                self._encode_cost_ms = encode_ms
+            else:
+                self._capture_cost_ms += 0.2 * (capture_ms - self._capture_cost_ms)
+                self._encode_cost_ms += 0.2 * (encode_ms - self._encode_cost_ms)
+            self._host_cost_ms = self._capture_cost_ms + self._encode_cost_ms
+        self.last_server_stats["host_cost_ewma_ms"] = self._host_cost_ms
 
         # Estimated egress for the current send rate (kbps). Used only when a target is configured.
         frame_bytes = int(self.last_server_stats["frame_bytes"])
-        est_send_kbps = (frame_bytes * max(1, int(self.effective_target_fps)) * 8.0) / 1000.0
+        est_send_kbps = float(capture_stats.get("produced_kbps",
+            (frame_bytes * max(1, int(self.effective_target_fps)) * 8.0) / 1000.0))
+        self.last_server_stats["produced_kbps"] = est_send_kbps
         bitrate_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 1.1
         bitrate_far_over = self._target_kbps > 0 and est_send_kbps > self._target_kbps * 2.0
 
         network_backlog = max_write_buffer > 128_000 or skipped_delta > max(2, video_clients * 3)
         stale_frames = frame_age_ms > 220 or inflight_sends > video_clients
-        browser_slow = bool(client) and (
+        browser_slow = not warming_up and bool(client) and (
             decode_draw_ms > max(12.0, budget_ms * 1.2)
             or dropped_blobs > 2
-            or (display_fps > 0 and display_fps < target_fps * 0.55)
+            # DXGI emits only changed frames. A quiet desktop (or a source that
+            # produces 40 FPS at a 60 FPS polling target) is not a slow browser.
+            or (produced_fps > 0 and display_fps > 0 and display_fps < produced_fps * 0.55)
             or rtt_ms > 350
         )
-        host_slow = capture_ms + encode_ms > max(10.0, budget_ms * 1.35)
-        overloaded = network_backlog or stale_frames or browser_slow or host_slow or bitrate_over
+        host_budget_ms = max(10.0, budget_ms * 1.35)
+        # A decaying EMA must not count the same isolated stall as repeated
+        # overload after the actual per-frame cost has already recovered.
+        host_slow = (
+            host_cost_ms > host_budget_ms
+            and self._host_cost_ms is not None
+            and self._host_cost_ms > host_budget_ms
+        )
+        # A manual full-resolution lock must still cap genuinely unsustainable FPS
+        # promptly. For adaptive quality, don't lose clarity after one scheduling spike.
+        if full_resolution_locked:
+            host_slow = host_cost_ms > host_budget_ms
+        soft_overload = browser_slow or host_slow
+        self._soft_overload_intervals = self._soft_overload_intervals + 1 if soft_overload else 0
+        overloaded = network_backlog or stale_frames or bitrate_over or (
+            soft_overload and (full_resolution_locked or self._soft_overload_intervals >= 2)
+        )
         cap_reason = ""
         desired_cap = int(profile.target_fps)
         if host_slow:
@@ -263,7 +334,15 @@ class AdaptiveStreamController:
             downshift_guard = 0.6 if severe else 1.5
             if self.profile_index < len(STREAM_LADDER) - 1 and now - self.last_change_at >= downshift_guard:
                 step = 2 if (severe and self.profile_index < len(STREAM_LADDER) - 2) else 1
-                self.profile_index = min(len(STREAM_LADDER) - 1, self.profile_index + step)
+                next_index = min(len(STREAM_LADDER) - 1, self.profile_index + step)
+                # A resolution downshift must not raise capture work when the
+                # host/link is already overloaded (for example, 60 -> 240 FPS).
+                while next_index < len(STREAM_LADDER) - 1 and (
+                    STREAM_LADDER[next_index].target_fps > target_fps
+                    or STREAM_LADDER[next_index].quality > profile.quality
+                ):
+                    next_index += 1
+                self.profile_index = next_index
                 self.last_change_at = now
                 reasons = []
                 if network_backlog:
@@ -297,10 +376,10 @@ class AdaptiveStreamController:
 
         client_ok = not client or (
             display_fps <= 0
-            or display_fps >= target_fps * 0.8
+            or display_fps >= produced_fps * 0.8
         )
         host_ok = capture_fps <= 0 or capture_fps >= target_fps * 0.8
-        if client_ok and host_ok:
+        if client_ok and host_ok and not soft_overload and not warming_up:
             self.good_intervals += 1
         else:
             self.good_intervals = 0
@@ -319,8 +398,39 @@ class AdaptiveStreamController:
             return True
 
         bitrate_ok = self._target_kbps <= 0 or est_send_kbps < self._target_kbps * 0.8
-        if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0 and bitrate_ok:
-            self.profile_index -= 1
+        next_index = max(0, self.profile_index - 1)
+        # Recover text detail at the same frame rate before chasing faster tiers.
+        # In particular, do not require a 30/60 Hz source to achieve 120/240 FPS
+        # merely to return from a scaled profile to full resolution.
+        for candidate_index in range(self.profile_index - 1, -1, -1):
+            candidate = STREAM_LADDER[candidate_index]
+            clearer = candidate.scale_div < profile.scale_div or (
+                candidate.scale_div == profile.scale_div and candidate.quality > profile.quality
+            )
+            if clearer and candidate.target_fps <= target_fps:
+                next_index = candidate_index
+                break
+        while next_index > 0 and STREAM_LADDER[next_index].scale_div > profile.scale_div:
+            next_index -= 1
+        next_profile = STREAM_LADDER[next_index]
+        next_budget_ms = 1000.0 / next_profile.target_fps
+        # Probe upward only with real source activity and enough measured headroom.
+        # Otherwise a 60 Hz/quiet source repeatedly jumps to an impossible FPS tier.
+        scale_ratio = (profile.scale_div / next_profile.scale_div) ** 2
+        next_cost_ms = (self._capture_cost_ms or capture_ms) + (self._encode_cost_ms or encode_ms) * scale_ratio
+        clarity_upgrade = next_profile.target_fps <= target_fps
+        activity_ok = produced_fps > 0 if clarity_upgrade else produced_fps >= target_fps * 0.8
+        cost_headroom = 1.2 if clarity_upgrade else 0.8
+        upshift_headroom = (
+            activity_ok
+            and next_cost_ms <= next_budget_ms * cost_headroom
+            and decode_draw_ms <= next_budget_ms * cost_headroom
+        )
+        if self._target_kbps > 0:
+            projected_kbps = est_send_kbps * scale_ratio * next_profile.target_fps / max(1, self.effective_target_fps)
+            bitrate_ok = bitrate_ok and projected_kbps < self._target_kbps * 0.8
+        if self.good_intervals >= 6 and self.profile_index > 0 and now - self.last_change_at >= 8.0 and bitrate_ok and upshift_headroom:
+            self.profile_index = next_index
             self.good_intervals = 0
             self.last_change_at = now
             self.last_reason = "stable_headroom"

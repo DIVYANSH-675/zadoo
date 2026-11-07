@@ -41,6 +41,7 @@ class VNCServer(RoutesMixin, MediaMixin, InputControlMixin):
         self.adaptive_stream = AdaptiveStreamController()
         self.current_fps = self.adaptive_stream.profile.target_fps
         self.video_clients: set[websockets.WebSocketServerProtocol] = set()
+        self._delta_video_clients = set()
         self._media_clients_lock = threading.Lock()
         self.audio_clients: dict[websockets.WebSocketServerProtocol, queue.Queue] = {}
         self.mic_clients: dict[websockets.WebSocketServerProtocol, queue.Queue] = {}

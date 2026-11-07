@@ -350,10 +350,18 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Smoke test failed" }
     & $PythonExe scripts\free_mode_test.py
     if ($LASTEXITCODE -ne 0) { throw "Free-mode integration test failed" }
+    & $PythonExe scripts\frame_dispatch_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Frame-dispatch regression test failed" }
+    & $PythonExe scripts\stream_policy_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Stream policy regression test failed" }
+    & $PythonExe scripts\delta_frames_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Incremental-frame regression test failed" }
     $node = Resolve-Node
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
     if ($LASTEXITCODE -ne 0) { throw "Template JavaScript check failed" }
+    & $node scripts\input_controls_test.mjs
+    if ($LASTEXITCODE -ne 0) { throw "Input controls regression test failed" }
     & $PythonExe scripts\check_workflow_pins.py
     if ($LASTEXITCODE -ne 0) { throw "GitHub workflow pin check failed" }
 }
@@ -435,6 +443,12 @@ function Build-Zadoo {
         $installerOut = Join-Path $distRoot "installer"
         New-Item -ItemType Directory -Force -Path $installerOut | Out-Null
         $tempInstallerOut = Join-Path ([System.IO.Path]::GetTempPath()) ("zadoo-installer-x64-" + [guid]::NewGuid().ToString("N"))
+        $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        $tempInstallerOut = [System.IO.Path]::GetFullPath($tempInstallerOut)
+        if (-not $tempInstallerOut.StartsWith($tempRoot + [System.IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path -Leaf $tempInstallerOut) -notmatch '^zadoo-installer-x64-[0-9a-f]{32}$') {
+            throw "Installer staging path is outside the intended temporary build directory"
+        }
         New-Item -ItemType Directory -Force -Path $tempInstallerOut | Out-Null
         try {
             & $iscc "/DSourceDir=$oneDirDist\Zadoo" "/DOutputDir=$tempInstallerOut" "/DAppIcon=$IconPath" "/DAppVersion=$Version" (Join-Path $Root "installer\zadoo.iss")

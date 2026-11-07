@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -69,6 +71,38 @@ def main():
             print("OFFLINE_UNLINK: PASS optional account can be unlinked during an outage")
         finally:
             window.root.destroy()
+
+        # A delayed status response must never call Tk after its loop has stopped.
+        main_thread = threading.get_ident()
+        callbacks = []
+        def schedule(_delay, callback):
+            if threading.get_ident() != main_thread:
+                raise AssertionError("Runtime status worker called Tk outside the main thread")
+            callbacks.append(callback)
+
+        delayed = ZadooSettingsWindow.__new__(ZadooSettingsWindow)
+        delayed.root = SimpleNamespace(after=schedule)
+        delayed._runtime_status_result = None
+        release = threading.Event()
+        def delayed_status(*_args, **_kwargs):
+            if not release.wait(2):
+                raise TimeoutError("Status-poll test did not release its worker")
+            return {"success":True,"running":False,"public_url":None}
+
+        with patch("zadoo_vnc.settings_window._get_local_json", delayed_status):
+            delayed._poll_runtime_status()
+            release.set()
+            deadline = time.monotonic() + 2
+            while delayed._runtime_status_result is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        if delayed._runtime_status_result != (False, "", "") or len(callbacks) != 1:
+            raise AssertionError("Delayed runtime status was not handed off without a worker Tk call")
+        applied = []
+        delayed._apply_runtime_status = lambda *value: applied.append(value)
+        callbacks[0]()
+        if applied != [(False, "", "")]:
+            raise AssertionError("Main-thread status completion did not apply its result")
+        print("SETTINGS_STATUS_SHUTDOWN: PASS delayed worker never calls Tk")
 
         from zadoo_vnc.saas import ZadooCloudClient
         from zadoo_vnc.server import VNCServer

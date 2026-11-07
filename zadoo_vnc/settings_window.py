@@ -195,6 +195,7 @@ class ZadooSettingsWindow:
         # updates automatically when Zadoo starts/stops — without blocking the UI).
         self._runtime_running = False
         self._runtime_url = ""
+        self._runtime_status_result = None
         self._startup_status_loaded = False
         self._autosave_after: str | None = None
         self._loading = False
@@ -620,9 +621,19 @@ class ZadooSettingsWindow:
             except Exception as exc:
                 error = str(exc)
                 logging.error("Runtime status failed: %s", error)
-            with suppress(tk.TclError):
-                self.root.after(0, lambda: self._apply_runtime_status(running, url, error))
+            # Do not call Tk from the worker: the settings main loop may already
+            # have stopped by the time this network request completes.
+            self._runtime_status_result = (running, url, error)
         threading.Thread(target=_check, daemon=True).start()
+        self.root.after(50, self._finish_runtime_status)
+
+    def _finish_runtime_status(self) -> None:
+        result = self._runtime_status_result
+        if result is None:
+            self.root.after(50, self._finish_runtime_status)
+            return
+        self._runtime_status_result = None
+        self._apply_runtime_status(*result)
 
     def _apply_runtime_status(self, running: bool, url: str, error: str) -> None:
         self._runtime_running = running

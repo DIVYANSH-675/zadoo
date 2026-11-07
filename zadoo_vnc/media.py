@@ -24,6 +24,7 @@ from winpty import Backend, PtyProcess
 
 from .camera_discovery import camera_open_target
 from .config import windows_system_executable
+from .delta_frames import FRAME_MAGICS
 from .win32_input import (
     CURSOR_SHOWING,
     CURSORINFO,
@@ -119,6 +120,21 @@ async def _spawn_conpty(shell_cmd, shell_cwd, dimensions):
                 continue
             raise RuntimeError(f"ConPTY startup failed: {detail}") from exc
     raise AssertionError("ConPTY retry loop returned without a result")
+
+
+async def _resize_conpty(proc, rows, cols):
+    """Use PtyProcess's public row/column API without blocking screen delivery."""
+    await asyncio.to_thread(proc.setwinsize, rows, cols)
+
+
+def _video_format_from_path(path):
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query, keep_blank_values=True)
+    if set(params) - {'format'} or len(params.get('format', ['jpeg'])) != 1:
+        raise ValueError("Video query must contain at most one format parameter")
+    value = params.get('format', ['jpeg'])[0]
+    if value not in {'jpeg', 'jpeg-patch-v1'}:
+        raise ValueError("Video format must be jpeg or jpeg-patch-v1")
+    return value
 
 
 class MediaMixin:
@@ -641,8 +657,15 @@ class MediaMixin:
 
     async def video_stream_handler(self, websocket):
         print(f" New video client connected from {websocket.remote_address}")
+        last_keyframe_request = -1.0
         try:
+            initial_format = _video_format_from_path(websocket.request.path)
+            if not self.video_clients:
+                self.adaptive_stream.begin_session(self._video_skipped_sends)
             self.video_clients.add(websocket)
+            if initial_format == 'jpeg-patch-v1':
+                self._delta_video_clients.add(websocket)
+            self._sync_video_format()
             self.screen_capturer.set_streaming_active(True)
             self._apply_stream_profile("client_connected")
             await self._send_stream_status(websocket)
@@ -659,9 +682,29 @@ class MediaMixin:
                         await self._send_ws_forbidden(websocket, action)
                         continue
                      
-                    if action == 'set_quality':
+                    if action == 'set_video_format':
+                        value = event.get('value')
+                        if not isinstance(value, str) or value not in {'jpeg', 'jpeg-patch-v1'}:
+                            raise ValueError("Video format must be jpeg or jpeg-patch-v1")
+                        if (value == 'jpeg-patch-v1') != (websocket in self._delta_video_clients):
+                            if value == 'jpeg-patch-v1':
+                                self._delta_video_clients.add(websocket)
+                            else:
+                                self._delta_video_clients.discard(websocket)
+                            self._sync_video_format()
+                            self.screen_capturer.request_keyframe()
+                    elif action == 'request_keyframe':
+                        now = time.monotonic()
+                        if now - last_keyframe_request >= 0.25:
+                            self.screen_capturer.request_keyframe()
+                            last_keyframe_request = now
+                    elif action == 'set_quality':
                         value = self._apply_quality(event['value'])
                         print(f" Quality set to: {value}%")
+                        await self._broadcast_stream_status()
+                    elif action == 'set_quality_auto':
+                        self._restore_auto_quality()
+                        await self._broadcast_stream_status()
                     elif action == 'client_stream_stats':
                         self.adaptive_stream.record_client_stats(event)
                     elif action == 'stream_ping':
@@ -700,6 +743,8 @@ class MediaMixin:
                 await websocket.close(code=1011, reason="Video stream failed")
         finally:
             self.video_clients.discard(websocket)
+            self._delta_video_clients.discard(websocket)
+            self._sync_video_format()
             if not self.video_clients:
                 self.screen_capturer.set_streaming_active(False)
             task = self._video_send_tasks.pop(websocket, None)
@@ -707,6 +752,10 @@ class MediaMixin:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             print(f" Removed video client, {len(self.video_clients)} clients remaining")
+
+    def _sync_video_format(self):
+        self._delta_video_clients.intersection_update(self.video_clients)
+        self.screen_capturer.set_delta_streaming(bool(self.video_clients) and self.video_clients <= self._delta_video_clients)
 
     async def webcam_stream_handler(self, websocket):
         """Stream JPEG frames from the server's webcam (DirectShow on Windows) to the client."""
@@ -851,7 +900,7 @@ class MediaMixin:
                 resize = _resize_from_message(msg)
                 if resize:
                     cols, rows = resize
-                    proc.set_size(rows, cols)
+                    await _resize_conpty(proc, rows, cols)
                     return
 
                 await asyncio.to_thread(proc.write, data)
@@ -902,8 +951,18 @@ class MediaMixin:
                 task = send_tasks.pop(ws, None)
                 if task and not task.done():
                     task.cancel()
+            if disconnected_clients:
+                self._sync_video_format()
 
         while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(self.frame_ready_event.wait(), timeout=1.0)
+                self.frame_ready_event.clear()
+            except TimeoutError:
+                pass
+
+            # Sends can complete while awaiting the next captured frame. Reap them
+            # here so a completed task cannot look like slow-client backpressure.
             disconnected = set()
             for ws, task in list(send_tasks.items()):
                 if not task.done():
@@ -918,12 +977,6 @@ class MediaMixin:
                     disconnected.add(ws)
             cleanup_disconnected(disconnected)
 
-            try:
-                await asyncio.wait_for(self.frame_ready_event.wait(), timeout=1.0)
-                self.frame_ready_event.clear()
-            except TimeoutError:
-                pass
-
             sequence, frame = self.screen_capturer.get_latest_frame_packet()
             if frame is None or sequence == last_sequence:
                 if not self.screen_capturer.is_running and self.screen_capturer.last_error:
@@ -933,6 +986,11 @@ class MediaMixin:
                 raise RuntimeError("Screen capturer produced an empty JPEG frame")
             last_sequence = sequence
             if not self.video_clients:
+                continue
+            if frame[:4] in FRAME_MAGICS and not self.video_clients <= self._delta_video_clients:
+                # A legacy viewer joined while the capture thread was finishing
+                # a negotiated delta. Never leak framed packets to JPEG clients.
+                self.screen_capturer.request_keyframe()
                 continue
 
             max_write_buffer = 0

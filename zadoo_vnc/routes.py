@@ -60,10 +60,12 @@ class RoutesMixin:
         "get_public_url",
         "get_stream_status",
         "stream_ping",
+        "set_video_format",
+        "request_keyframe",
     }
     MOUSE_ACTIONS = {"click", "drag", "move", "scroll"}
     KEYBOARD_ACTIONS = {"key", "type_text"}
-    ADVANCED_ACTIONS = {"set_performance", "set_quality"}
+    ADVANCED_ACTIONS = {"set_performance", "set_quality", "set_quality_auto"}
     ROUTE_FEATURES = {
         "/": "public",
         "/api/auth": "public",
@@ -671,6 +673,10 @@ class RoutesMixin:
             self.screen_capturer.quality = value
         self._apply_stream_profile("quality_changed")
         return value
+
+    def _restore_auto_quality(self):
+        self._quality_locked_by_user = False
+        self._apply_stream_profile("quality_auto")
 
     def _validate_rpc_request(self, raw_message):
         if not isinstance(raw_message, str):
