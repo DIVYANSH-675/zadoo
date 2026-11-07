@@ -24,6 +24,20 @@ Logs are under `%LOCALAPPDATA%\Zadoo\logs` and are bounded/rotated. **Export Dia
 
 ## Signing and publishing
 
+Zadoo's original code is licensed under Apache-2.0; bundled dependencies retain their own licenses. The build embeds the project license and notice, sets `ProductName=Zadoo` and matching product/file versions, and rejects mismatched Windows metadata.
+
+The free SignPath Foundation application is being prepared, not approved. The current release workflow still requires a separately obtained trusted PFX; it is not connected to SignPath. Do not add a fake certificate, mark an unsigned manifest as signed, or enable the website download before verification.
+
+To complete the SignPath route:
+
+1. The owner completes [the official application](https://signpath.org/apply), provides truthful reputation evidence and contact details, and personally reviews the provider agreements. MFA is required on GitHub and SignPath.
+2. Wait for eligibility/certificate approval and configure the project's named author, reviewer and release-approver roles. Review dependency licensing and the application's network/privacy disclosures with the provider.
+3. Configure provider-approved artifact restrictions for only Zadoo-owned executables, enforcing the product name and the release version. Keep upstream executables and DLLs under their original publishers.
+4. Replace the PFX release step with the approved GitHub-hosted build/signing integration: sign the host and portable executables, package the signed host, then sign the installer. Configure required manual approval, scoped secrets and origin verification; do not store credentials in source or chat.
+5. Verify signatures, trusted timestamps, packaged contents and installation/upgrade/uninstallation on a clean Windows x64 system before publishing. The public website discovers a valid signed release and matching digest automatically.
+
+See the [SignPath requirements](https://signpath.org/terms) and [GitHub integration documentation](https://docs.signpath.io/trusted-build-systems/github). Provider approval is discretionary; applying does not guarantee free signing.
+
 Unsigned local test build:
 
 ```powershell

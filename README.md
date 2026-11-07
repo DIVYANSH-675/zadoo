@@ -2,6 +2,10 @@
 
 Zadoo is a free Windows 10/11 x64 remote-access host. View and control your computer from a browser using a local access code. Screen sharing, input, clipboard, snapshots, audio, camera, terminal, and alerts are included.
 
+## License
+
+Zadoo's original code is licensed under [Apache 2.0](LICENSE). Third-party components retain their own licenses; see [NOTICE](NOTICE) and the notices bundled with each build. Licensing does not imply that a Windows binary is signed. See the [code signing policy](https://zadoo-web.vercel.app/code-signing) for the current approval status.
+
 ## Run from source
 
 Use Python 3.11.9 x64:

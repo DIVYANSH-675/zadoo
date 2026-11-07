@@ -84,6 +84,11 @@ jobs:
             if (-not (Test-Path -LiteralPath $path)) { throw "Manifest artifact missing: $path" }
             $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actual -ne $artifact.sha256) { throw "Manifest hash mismatch for $path" }
+            $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $path).Path)
+            # Inno Setup pads the fixed-width version strings with spaces.
+            if (([string]$info.ProductName).TrimEnd(' ') -cne "Zadoo" -or ([string]$info.ProductVersion).TrimEnd(' ') -cne $expectedVersion -or ([string]$info.FileVersion).TrimEnd(' ') -cne $expectedVersion) {
+              throw "Windows product metadata mismatch for $path."
+            }
           }
 
       - name: Upload unsigned Windows x64 artifacts
