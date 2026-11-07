@@ -113,6 +113,21 @@ def _run_matrix(label, page, screen, token):
     return all(results)
 
 
+def _terminal_preflight(label, page, screen, token):
+    screen.click(force=True)
+    marker = f"READY_{token}_{label}"
+    if not _run_case(label, "ready_preflight", page, screen,
+                     [("type", f"echo {marker}"), ("press", "Enter")], marker):
+        raise AssertionError(f"{label} terminal was not ready; remaining keyboard cases were not run")
+    page.set_viewport_size({"width": 1180, "height": 820})
+    page.wait_for_timeout(500)
+    screen.click(force=True)
+    marker = f"RESIZED_{token}_{label}"
+    if not _run_case(label, "resize_preflight", page, screen,
+                     [("type", f"echo {marker}"), ("press", "Enter")], marker):
+        raise AssertionError(f"{label} terminal failed after resize; remaining keyboard cases were not run")
+
+
 def _authenticate_in_browser(page, base: str, code: str):
     retired_requests = []
     page.on("request", lambda request: retired_requests.append(request.url)
@@ -180,6 +195,7 @@ def main() -> int:
         direct.goto(f"{base}/terminal.html", wait_until="domcontentloaded", timeout=15000)
         direct.wait_for_selector(".xterm-helper-textarea", state="attached", timeout=10000)
         direct.locator(".xterm").click(force=True)
+        _terminal_preflight("DIRECT", direct, direct.locator(".xterm-screen"), token)
         ok_direct = _run_matrix("DIRECT", direct, direct.locator(".xterm-screen"), token)
 
         page = context.new_page()
@@ -194,6 +210,7 @@ def main() -> int:
         page.wait_for_timeout(2500)
         frame = page.frame_locator("#terminal-iframe")
         frame.locator(".xterm-helper-textarea").wait_for(state="attached", timeout=10000)
+        _terminal_preflight("PANEL", page, frame.locator(".xterm-screen"), token)
         ok_panel = _run_matrix("PANEL", page, frame.locator(".xterm-screen"), token)
 
         browser.close()

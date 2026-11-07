@@ -120,6 +120,7 @@ def main():
                             raise AssertionError(f"Camera did not return a JPEG: {frame!r}")
                         result["camera_jpeg_bytes"] = len(frame)
             subprocess.run([sys.executable, str(ROOT / "scripts/smoke_test.py"), "--live", BASE], cwd=ROOT, env=env, check=True)
+            subprocess.run([sys.executable, str(ROOT / "scripts/viewer_ui_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
             subprocess.run([sys.executable, str(ROOT / "scripts/terminal_e2e_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
             with connect(BASE.replace("http", "ws") + "/rpc", origin=BASE, open_timeout=10) as rpc:
                 rpc.send(json.dumps({"id": "free-e2e-stop", "action": "runtime.stop", "params": {"admin_code": CODE}}))

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2010,6 +2010,39 @@
             transition: filter 0.25s ease, transform 0.25s ease;
         }
     </style>
+    <style>
+        /* Preserve the dark cyan deck, animate only its composited position. */
+        .sidebar, .sidebar.open { width: min(336px, 100vw); }
+        .sidebar { transform: translateX(100%); visibility: hidden; transition: transform 180ms ease-out, visibility 0s linear 180ms; }
+        .sidebar.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
+        .sidebar .sidebar-content { opacity: 1; transform: none; transition: none; }
+        .sidebar-logo { max-height: 88px; }
+        .deck-heading { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; color: #f4f7f7; font-size: 13px; }
+        .deck-heading small { display: block; color: #97aaae; font-size: 10px; margin-top: 3px; font-weight: 400; }
+        .deck-close, .quality-auto { border: 1px solid #42626d; background: #15252c; color: #d2f8f7; border-radius: 7px; padding: 7px 10px; cursor: pointer; }
+        .deck-close { min-width: 40px; min-height: 40px; font-size: 22px; transition: background-color 160ms ease; }
+        .quality-auto[aria-pressed="true"] { background: #0b596e; border-color: #0ba1d9; color: white; }
+        .quality-help { font-size: 11px; line-height: 1.5; color: #97aaae; margin-top: 10px; }
+        .quality-deck .futuristic-range { margin-block: 8px; }
+        .capture-status-hidden { height: auto; opacity: 1; overflow: visible; display: flex; gap: 8px; padding: 3px 0; }
+        .deck-stream-profile { display: block; font-size: 11px; color: #97aaae; margin-top: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+        .sidebar button:focus-visible, .sidebar-trigger:focus-visible, #auth-code:focus-visible, .auth-submit:focus-visible { outline: 2px solid #00d4ff; outline-offset: 3px; }
+        .view-controls { backdrop-filter: none; background: #10191e; }
+        .sidebar-trigger { padding: 0; font: inherit; transition-property: transform, background-color, border-color, box-shadow; }
+        .sidebar-trigger[aria-expanded="true"] { visibility: hidden; }
+        .auth-actions { text-align: center; padding: 12px 16px; color: #f4f7f7; }
+        .auth-submit { padding: 11px 28px; border: 1px solid #28b5e7; border-radius: 8px; background: #0b637f; color: white; font: 600 15px 'Segoe UI', sans-serif; cursor: pointer; }
+        .auth-submit:disabled { opacity: .65; cursor: wait; }
+        .auth-hint { font-size: 12px; color: #b5c7cf; margin-top: 10px; }
+        #auth-error { color: #ffd4c7; font-size: 14px; line-height: 1.5; margin-top: 10px; overflow-wrap: anywhere; }
+        .splash-container { width: min(90%, 850px); }
+        .splash-art { position: relative; }
+        .blurred-background { background-image: none; background-color: #080d10; filter: none; transform: none; }
+        body:not(.splash-active) .blurred-background { display: none; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+        }
+    </style>
 </head>
 <body>
     <!-- Tabler Icons, MIT licensed: https://github.com/tabler/tabler-icons -->
@@ -2126,10 +2159,17 @@
     <div class="blurred-background"></div>
     <div id="splash-screen">
         <div class="splash-container">
+            <div class="splash-art">
             <img src="/splash.png?v=a8ff7f23c7aa" alt="Authentication">
             <form id="auth-form">
-                <input type="text" id="auth-code" placeholder="Enter Code" autocomplete="off" autofocus maxlength="10">
+                <input type="password" id="auth-code" aria-label="Access code" aria-describedby="auth-hint auth-error" placeholder="Enter Code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
             </form>
+            </div>
+            <div class="auth-actions">
+                <button class="auth-submit" id="auth-submit" type="submit" form="auth-form">Connect</button>
+                <p class="auth-hint" id="auth-hint">Enter the access code from the host's Settings. All features are free.</p>
+                <p id="auth-error" role="alert" hidden></p>
+            </div>
         </div>
     </div>
     <div id="controller-alert-stack" class="controller-alert-stack" aria-live="assertive" aria-atomic="false"></div>
@@ -2251,7 +2291,7 @@
         <!-- Video Area -->
         <div class="video-area">
             <div id="mouse-overlay"></div>
-            <canvas id="screen"></canvas>
+            <canvas id="screen" tabindex="0" aria-label="Remote desktop"></canvas>
             <div id="snapshot-selection-box"></div>
             <!-- Hidden status element for JavaScript -->
             <div id="status" style="display: none;">Connecting...</div>
@@ -2268,37 +2308,31 @@
         </div>
         
         <!-- Floating Sidebar Trigger -->
-        <div class="sidebar-trigger" id="sidebar-trigger" title="Open Controls">
+        <button type="button" class="sidebar-trigger" id="sidebar-trigger" title="Open Controls" aria-label="Open controls" aria-controls="sidebar" aria-expanded="false">
             <div class="trigger-icon"></div>
-        </div>
+        </button>
         
         <!-- Collapsible Sidebar -->
-        <div class="sidebar" id="sidebar">
+        <div class="sidebar" id="sidebar" aria-label="Remote controls" inert>
             <!-- Sidebar Content -->
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
                     <img class="sidebar-logo" src="/brand-header.png?v=b0e399b76691" alt="Zadoo Remote Control Panel"/>
+                    <div class="deck-heading"><strong>Remote controls<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
                     <div class="sidebar-section deck-card quality-deck">
                         <div class="section-title">Video Quality</div>
                         <div class="quality-head">
-                            <span class="quality-label">Visual detail</span>
+                            <label class="quality-label" for="quality-slider">Visual detail</label>
+                            <button type="button" id="quality-auto" class="quality-auto" aria-pressed="true" onclick="restoreAutoQuality()">Auto</button>
                             <span class="quality-badge"><span id="quality-value">85</span>%</span>
                         </div>
                         <input type="range" class="futuristic-range deck-range" id="quality-slider" style="--val:85%;"
                                min="10" max="100" value="85" oninput="updateQuality(this.value)" onchange="updateQuality(this.value, true)">
-                    </div>
-
-                    <div class="sidebar-section deck-card capture-deck">
-                        <div class="section-title">Screen Capture</div>
-                        <div class="capture-status capture-status-hidden" id="capture-status" aria-live="polite">
-                            <div class="status-indicator" id="status-indicator">*</div>
-                            <span class="status-text" id="status-text">Ready</span>
-                            <button class="verify-btn" onclick="requestCaptureStats()" title="Check screen capture">Check</button>
-                        </div>
+                        <p class="quality-help" id="quality-help">Adapts clarity and speed to your connection.</p>
                     </div>
 
                     <div class="sidebar-section deck-card">
@@ -2322,15 +2356,15 @@
                             </button>
                             <button class="sidebar-btn deck-action" onclick="takeSnapshot(event)" title="Snapshot">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-camera"></use></svg>
-                                <span class="btn-label">Snap</span>
+                                <span class="btn-label">Snapshot</span>
                             </button>
                             <button class="sidebar-btn deck-action" onclick="toggleFullscreen()" title="Fullscreen">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-arrows-maximize"></use></svg>
-                                <span class="btn-label">Wide</span>
+                                <span class="btn-label">Fullscreen</span>
                             </button>
                             <button class="sidebar-btn deck-action" id="btn-terminal" onclick="toggleTerminal()" title="Terminal">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-terminal-2"></use></svg>
-                                <span class="btn-label">Shell</span>
+                                <span class="btn-label">Terminal</span>
                             </button>
                             <button class="sidebar-btn deck-action" onclick="toggleNotepad()" title="VibePad">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-notebook"></use></svg>
@@ -2364,15 +2398,21 @@
 
                     <div class="sidebar-section deck-card">
                         <div class="section-title">Live Status</div>
+                        <div class="capture-status capture-status-hidden" id="capture-status" aria-live="polite">
+                            <div class="status-indicator" id="status-indicator">*</div>
+                            <span class="status-text" id="status-text">Ready</span>
+                            <button class="verify-btn" onclick="requestCaptureStats()" title="Check screen capture">Check</button>
+                        </div>
                         <div class="status-grid">
                             <div class="info-item"><span class="info-label">Connection</span><span class="info-value" id="server-status">Connecting</span></div>
+                            <div class="info-item"><span class="info-label">Display FPS</span><span class="info-value" id="sidebar-fps">0</span></div>
                             <div class="info-item"><span class="info-label">Uptime</span><span class="info-value" id="server-uptime">00:00:00</span></div>
                             <div class="info-item"><span class="info-label">Audio</span><span class="info-value" id="audio-status">Idle</span></div>
                             <div class="info-item"><span class="info-label">Mic</span><span class="info-value" id="mic-status">Idle</span></div>
                             <div class="info-item"><span class="info-label">Email</span><span class="info-value" id="email-status">Pending</span></div>
                         </div>
-                        <span id="sidebar-fps" class="deck-hidden">0</span>
-                        <span id="stream-profile" class="deck-hidden">Fast</span>
+                        <span id="stream-profile" class="deck-stream-profile">Waiting for stream</span>
+                        <p class="quality-help">Still screens send fewer frames to save resources.</p>
                     </div>
 
                     <div class="sidebar-section deck-card">
@@ -2822,9 +2862,18 @@
     const LIVE_TYPING_SPECIAL_KEYS = new Set(['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown']);
 
     // Sidebar toggle functionality
-    function toggleSidebar() {
+    function toggleSidebar(force) {
         const sidebar = document.getElementById('sidebar');
-        sidebar.classList.toggle('open');
+        const open = typeof force === 'boolean' ? force : !sidebar.classList.contains('open');
+        sidebar.classList.toggle('open', open);
+        sidebar.inert = !open;
+        const trigger = document.getElementById('sidebar-trigger');
+        trigger.setAttribute('aria-expanded', String(open));
+        trigger.setAttribute('aria-label', open ? 'Close controls' : 'Open controls');
+        requestAnimationFrame(() => {
+            if (open && sidebar.classList.contains('open')) sidebar.querySelector('.deck-close').focus({ preventScroll: true });
+            else if (!open) trigger.focus({ preventScroll: true });
+        });
     }
 
     function openAdvancedPage() {
@@ -3840,7 +3889,41 @@
     }
 
     let videoDecodeBusy = false;
-    let pendingVideoBlob = null;
+    let pendingVideoFrames = [];
+    let pendingVideoBytes = 0;
+    let videoQueuePeakFrames = 0;
+    let videoQueuePeakBytes = 0;
+    let videoFrameSequence = 0;
+    let videoNeedsKeyframe = true;
+    let videoResyncEpoch = 0;
+    let videoConnectionEpoch = 0;
+    let videoLastKeyframeRequest = -Infinity;
+
+    function requestVideoKeyframe() {
+        videoNeedsKeyframe = true;
+        const socket = window.videoSocket;
+        const now = performance.now();
+        if (socket && socket.readyState === WebSocket.OPEN && now - videoLastKeyframeRequest >= 250) {
+            videoLastKeyframeRequest = now;
+            socket.send(JSON.stringify({action: 'request_keyframe'}));
+        }
+    }
+
+    async function unpackVideoFrame(blob) {
+        const header = new DataView(await blob.slice(0, 28).arrayBuffer());
+        if (header.byteLength >= 2 && header.getUint16(0) === 0xffd8) return {blob};
+        if (header.byteLength < 28) throw new Error('Video update header is truncated');
+        const magic = header.getUint32(0);
+        if (magic !== 0x5a444631 && magic !== 0x5a445031) throw new Error('Video update format is unsupported');
+        const frame = {blob: blob.slice(28, blob.size, 'image/jpeg'), full: magic === 0x5a444631,
+            sequence: header.getUint32(4), base: header.getUint32(8), width: header.getUint32(12),
+            height: header.getUint32(16), x: header.getUint32(20), y: header.getUint32(24)};
+        if (!frame.width || !frame.height || frame.width > 32768 || frame.height > 32768 ||
+            frame.x >= frame.width || frame.y >= frame.height || (frame.full && (frame.x || frame.y || frame.base))) {
+            throw new Error('Video update dimensions are invalid');
+        }
+        return frame;
+    }
 
     function smoothMetric(previous, value, weight = 0.2) {
         if (!Number.isFinite(value)) throw new TypeError('Stream metric must be finite');
@@ -3848,16 +3931,24 @@
         return previous * (1 - weight) + value * weight;
     }
 
-    function drawDecodedFrame(source) {
+    function drawDecodedFrame(source, frame) {
         const drawStart = performance.now();
         const width = source.width || source.naturalWidth;
         const height = source.height || source.naturalHeight;
-        if (width && height && (canvas.width !== width || canvas.height !== height)) {
-            canvas.width = width;
-            canvas.height = height;
-            scheduleRemoteView();
+        if (frame && frame.full === false) {
+            if (frame.x + width > canvas.width || frame.y + height > canvas.height) {
+                throw new Error('Video patch exceeds canvas bounds');
+            }
+            ctx.drawImage(source, frame.x, frame.y);
+        } else {
+            if (frame && frame.full === true && (width !== frame.width || height !== frame.height)) throw new Error('Video keyframe size does not match its header');
+            if (width && height && (canvas.width !== width || canvas.height !== height)) {
+                canvas.width = width;
+                canvas.height = height;
+                scheduleRemoteView();
+            }
+            ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
         }
-        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
         frameCount++;
         videoMetrics.displayedFrames++;
         videoMetrics.displayedSinceLast++;
@@ -3865,35 +3956,57 @@
     }
 
     async function renderVideoBlob(blob, recvAt = performance.now()) {
-        if (pendingVideoBlob) {
-            videoMetrics.droppedBlobs++;
-            videoMetrics.droppedSinceLast++;
+        // Small dependent patches can arrive in a network burst. Absorb a short
+        // burst without losing their base, but never build an unbounded queue.
+        if (pendingVideoFrames.length && (pendingVideoFrames.length >= 6 ||
+            pendingVideoBytes + blob.size > 512000 || recvAt - pendingVideoFrames[0].recvAt > 220)) {
+            videoMetrics.droppedBlobs += pendingVideoFrames.length;
+            videoMetrics.droppedSinceLast += pendingVideoFrames.length;
+            pendingVideoFrames = [];
+            pendingVideoBytes = 0;
+            videoResyncEpoch++;
+            requestVideoKeyframe();
         }
-        pendingVideoBlob = { blob, recvAt };
+        pendingVideoFrames.push({ blob, recvAt, connection: videoConnectionEpoch });
+        pendingVideoBytes += blob.size;
+        videoQueuePeakFrames = Math.max(videoQueuePeakFrames, pendingVideoFrames.length);
+        videoQueuePeakBytes = Math.max(videoQueuePeakBytes, pendingVideoBytes);
         videoMetrics.receivedFrames++;
         videoMetrics.receivedBytes += blob.size;
         if (videoDecodeBusy) return;
         videoDecodeBusy = true;
         try {
-            while (pendingVideoBlob) {
-                const packet = pendingVideoBlob;
-                pendingVideoBlob = null;
+            while (pendingVideoFrames.length) {
+                const packet = pendingVideoFrames.shift();
+                pendingVideoBytes -= packet.blob.size;
+                try {
+                const epoch = videoResyncEpoch;
                 videoMetrics.receiveDelayMs = smoothMetric(videoMetrics.receiveDelayMs, performance.now() - packet.recvAt);
                 const decodeStart = performance.now();
-                const bitmap = await createImageBitmap(packet.blob);
+                const frame = await unpackVideoFrame(packet.blob);
+                if (packet.connection !== videoConnectionEpoch) continue;
+                if (frame.full === false && (videoNeedsKeyframe || frame.base !== videoFrameSequence ||
+                    frame.width !== canvas.width || frame.height !== canvas.height)) {
+                    requestVideoKeyframe();
+                    continue;
+                }
+                const bitmap = await createImageBitmap(frame.blob);
                 videoMetrics.decodeMs = smoothMetric(videoMetrics.decodeMs, performance.now() - decodeStart);
-                videoMetrics.drawMs = smoothMetric(videoMetrics.drawMs, drawDecodedFrame(bitmap));
-                bitmap.close();
+                try {
+                    if (packet.connection !== videoConnectionEpoch) continue;
+                    videoMetrics.drawMs = smoothMetric(videoMetrics.drawMs, drawDecodedFrame(bitmap, frame));
+                    videoFrameSequence = frame.sequence || 0;
+                    if (epoch === videoResyncEpoch) videoNeedsKeyframe = false;
+                } finally {
+                    bitmap.close();
+                }
+                } catch (error) {
+                    requestVideoKeyframe();
+                    updateStatus(`Video frame render failed: ${error instanceof Error ? error.message : String(error)}`);
+                }
             }
-        } catch (error) {
-            updateStatus(`Video frame render failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
             videoDecodeBusy = false;
-            if (pendingVideoBlob) {
-                const packet = pendingVideoBlob;
-                pendingVideoBlob = null;
-                renderVideoBlob(packet.blob, packet.recvAt);
-            }
         }
     }
 
@@ -3903,6 +4016,20 @@
         }
         const el = document.getElementById('stream-profile');
         if (el) el.textContent = stream.status;
+        if (typeof stream.quality_locked === 'boolean') {
+            document.getElementById('quality-auto').setAttribute('aria-pressed', String(!stream.quality_locked));
+            document.getElementById('quality-help').textContent = stream.quality_locked
+                ? 'Manual quality. Choose Auto to adapt to your connection.'
+                : 'Adapts clarity and speed to your connection.';
+        }
+        if (stream.quality_locked === false && qualitySendTimer === null && Number.isFinite(stream.effective_quality)) {
+            const quality = stream.effective_quality;
+            pendingQualityValue = quality;
+            document.getElementById('quality-slider').value = quality;
+            document.getElementById('quality-slider').style.setProperty('--val', `${quality}%`);
+            document.getElementById('quality-value').textContent = quality;
+            document.getElementById('current-quality').textContent = quality;
+        }
     }
 
     function sendClientStreamStats() {
@@ -3985,16 +4112,26 @@
             window.videoSocket.readyState === WebSocket.OPEN ||
             window.videoSocket.readyState === WebSocket.CONNECTING
         )) return;
-        const videoSocket = new WebSocket(`${WSS_URL}/video`);
+        const videoSocket = new WebSocket(`${WSS_URL}/video?format=jpeg-patch-v1`);
+        videoConnectionEpoch++;
+        pendingVideoFrames = [];
+        pendingVideoBytes = 0;
+        videoQueuePeakFrames = 0;
+        videoQueuePeakBytes = 0;
+        videoFrameSequence = 0;
+        videoNeedsKeyframe = true;
+        videoResyncEpoch++;
         window.videoSocket = videoSocket;
         videoSocket.binaryType = 'blob';
         videoSocket.onopen = () => {
             updateStatus('Video Connected');
             updateConnectionStatus('Connected');
             window.videoSocket = videoSocket; // Make it globally accessible
+            videoSocket.send(JSON.stringify({ action: 'set_video_format', value: 'jpeg-patch-v1' }));
             videoSocket.send(JSON.stringify({ action: 'get_stream_status' }));
         };
         videoSocket.onmessage = (event) => {
+            if (window.videoSocket !== videoSocket) return;
             // Handle both binary (image) and text (JSON) messages
             if (event.data instanceof Blob) {
                 renderVideoBlob(event.data, performance.now());
@@ -4185,6 +4322,8 @@
         inputSocket.onmessage = handleInputMessage;
         
         inputSocket.onclose = function(event) {
+            if (window.inputSocket !== inputSocket) return;
+            if (typeof window.resetRemoteInputState === 'function') window.resetRemoteInputState();
             if (window.inputSocket === inputSocket) window.inputSocket = null;
             updateStatus(`Input disconnected: code=${event.code} reason=${event.reason}`);
             setTimeout(() => { if (typeof window.connectInput === 'function') window.connectInput(); }, 1000);
@@ -4193,6 +4332,11 @@
         inputSocket.onerror = function() {
             updateStatus("Connection Error");
         };
+
+        // Socket handlers are per connection; document input handlers are per page.
+        // Re-registering them on reconnect duplicates every remote input event.
+        if (window.__inputListenersInstalled) return;
+        window.__inputListenersInstalled = true;
 
         function sendEvent(event) {
             if (blockMouse && (event.action === 'click' || event.action === 'drag' || event.action === 'move' || event.action === 'scroll')) {
@@ -4295,6 +4439,64 @@
         }
 
         let isDragging = false;
+        const pressedButtons = new Map();
+        const pressedKeys = new Map();
+        let pendingMotion = null;
+        let motionFrame = 0;
+
+        function flushMotion() {
+            motionFrame = 0;
+            if (!pendingMotion) return;
+            const socket = window.inputSocket;
+            if (!socket || socket.readyState !== WebSocket.OPEN || blockMouse) {
+                pendingMotion = null;
+                return;
+            }
+            if (socket.bufferedAmount < 32768) {
+                sendEvent(pendingMotion);
+                pendingMotion = null;
+            }
+            motionFrame = requestAnimationFrame(flushMotion);
+        }
+
+        function queueMotion(event) {
+            const socket = window.inputSocket;
+            if (!socket || socket.readyState !== WebSocket.OPEN || blockMouse) return;
+            if (!motionFrame && socket.bufferedAmount < 32768) {
+                sendEvent(event); // First movement is immediate; only bursts are coalesced.
+            } else {
+                pendingMotion = event;
+            }
+            if (!motionFrame) motionFrame = requestAnimationFrame(flushMotion);
+        }
+
+        function clearMotion() {
+            if (motionFrame) cancelAnimationFrame(motionFrame);
+            motionFrame = 0;
+            pendingMotion = null;
+        }
+
+        window.resetRemoteInputState = function() {
+            clearMotion();
+            isDragging = false;
+            pressedButtons.clear();
+            pressedKeys.clear();
+            document.body.style.cursor = 'default';
+        };
+
+        function releaseRemoteInput() {
+            clearMotion();
+            const socket = window.inputSocket;
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                for (const [button, coords] of pressedButtons) {
+                    socket.send(JSON.stringify({ action: 'click', ...coords, button, state: 'up' }));
+                }
+                for (const key of pressedKeys.values()) socket.send(JSON.stringify({ action: 'key', key, state: 'up' }));
+            }
+            window.resetRemoteInputState();
+        }
+        window.addEventListener('blur', releaseRemoteInput);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) releaseRemoteInput(); });
 
         function getCanvasCoordinates(event) {
             const rect = canvas.getBoundingClientRect();
@@ -4317,25 +4519,32 @@
             return { x, y };
         }
         
-        document.addEventListener('contextmenu', e => e.preventDefault());
+        document.addEventListener('contextmenu', e => { if (!isOverLocalUI(e)) e.preventDefault(); });
         document.addEventListener('mousedown', event => {
             if (isOverLocalUI(event)) return;
             if (window.__snapSelecting) return;
-            isDragging = true;
+            if (blockMouse || ![0, 2].includes(event.button)) return;
             const coords = getCanvasCoordinates(event);
             if (coords) {
-                sendEvent({ action: 'click', x: coords.x, y: coords.y, button: event.button === 0 ? 'left' : 'right', state: 'down' });
+                clearMotion();
+                isDragging = true;
+                const button = event.button === 0 ? 'left' : 'right';
+                pressedButtons.set(button, coords);
+                sendEvent({ action: 'click', ...coords, button, state: 'down' });
                 // Change cursor when clicking
                 document.body.style.cursor = 'grabbing';
             }
         });
         document.addEventListener('mouseup', event => {
-            if (isOverLocalUI(event)) return;
-            if (window.__snapSelecting) return;
-            isDragging = false;
-            const coords = getCanvasCoordinates(event);
+            const button = event.button === 0 ? 'left' : event.button === 2 ? 'right' : null;
+            if (!pressedButtons.has(button)) return;
+            clearMotion();
+            const coords = getCanvasCoordinates(event) || pressedButtons.get(button);
+            pressedButtons.delete(button);
+            isDragging = pressedButtons.size > 0;
             if (coords) {
-                sendEvent({ action: 'click', x: coords.x, y: coords.y, button: event.button === 0 ? 'left' : 'right', state: 'up' });
+                const socket = window.inputSocket;
+                if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ action: 'click', ...coords, button, state: 'up' }));
                 // Reset cursor to pointer
                 document.body.style.cursor = 'pointer';
             }
@@ -4345,7 +4554,8 @@
             if (window.__snapSelecting) return;
             const coords = getCanvasCoordinates(event);
             if (coords) {
-                sendEvent({ action: isDragging ? 'drag' : 'move', x: coords.x, y: coords.y });
+                for (const button of pressedButtons.keys()) pressedButtons.set(button, coords);
+                queueMotion({ action: isDragging ? 'drag' : 'move', ...coords });
                 if (!isDragging) {
                     document.body.style.cursor = 'pointer';
                 }
@@ -4359,6 +4569,7 @@
         });
         // Keyboard event handling - simple and reliable
         document.addEventListener('keydown', function(e) {
+            if (isOverLocalUI(e)) return;
             if (window.__splashVisible) return;
             if (isTerminalPanelOpen()) return;
             // When keyboard popup is open, block typing controls
@@ -4377,28 +4588,19 @@
             
             if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
                 window.inputSocket.send(JSON.stringify({ action: 'key', key: e.key, state: 'down' }));
+                pressedKeys.set(e.code || e.key, e.key);
             }
         });
 
         document.addEventListener('keyup', function(e) {
-            if (window.__splashVisible) return;
-            if (isTerminalPanelOpen()) return;
-            // When keyboard popup is open, block typing controls
-            const kb = document.getElementById('kb-overlay');
-            if (kb && kb.style.display === 'flex') return;
-            if (isKeyBlockedByUser(e)) return;
-            if (blockKeyboard) return;
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-            if (e.target && typeof e.target.closest === 'function' && e.target.closest('.CodeMirror, #code-editor')) return;
-            
+            const code = e.code || e.key;
+            if (!pressedKeys.has(code)) return;
+            const key = pressedKeys.get(code);
+            pressedKeys.delete(code);
+            const socket = window.inputSocket;
+            if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ action: 'key', key, state: 'up' }));
             e.preventDefault();
-            
-            // Reset cursor to pointer after typing
             document.body.style.cursor = 'pointer';
-            
-            if (window.inputSocket && window.inputSocket.readyState === WebSocket.OPEN) {
-                window.inputSocket.send(JSON.stringify({ action: 'key', key: e.key, state: 'up' }));
-            }
         });
     }
     if (typeof window.connectInput !== 'function') {
@@ -4558,6 +4760,10 @@
     function initializeDraggableTrigger() {
         const trigger = document.getElementById('sidebar-trigger');
         if (!trigger) return;
+        trigger.addEventListener('click', event => { if (event.detail === 0) toggleSidebar(); });
+        document.getElementById('sidebar').addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.preventDefault(); toggleSidebar(false); }
+        });
 
         // Right click: save a lossless snapshot.
         trigger.addEventListener('contextmenu', function(e){
@@ -5371,6 +5577,16 @@ registerProcessor('pcm-player', PcmPlayer);
             }
         }
 
+        function restoreAutoQuality() {
+            if (qualitySendTimer) clearTimeout(qualitySendTimer);
+            qualitySendTimer = null;
+            if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
+                window.videoSocket.send(JSON.stringify({ action: 'set_quality_auto' }));
+            } else {
+                updateStatus('Cannot change quality: video is disconnected');
+            }
+        }
+
         function updateQuality(value, immediate = false) {
             value = Number(value);
             if (!Number.isInteger(value) || value < 10 || value > 100) {
@@ -5520,6 +5736,9 @@ registerProcessor('pcm-player', PcmPlayer);
                 const splash = document.getElementById('splash-screen');
                 const form = document.getElementById('auth-form');
                 const input = document.getElementById('auth-code');
+                const submit = document.getElementById('auth-submit');
+                const authError = document.getElementById('auth-error');
+                let authenticating = false;
                 function closeSplash(){
                     window.__splashVisible = false;
                     window.__zadooAuthenticated = true;
@@ -5586,7 +5805,7 @@ registerProcessor('pcm-player', PcmPlayer);
                     setFeatureEnabled(['#btn-webcam', '#device-settings-toggle'], permissions.camera);
                     setFeatureEnabled(['#btn-terminal'], permissions.terminal);
                     setFeatureEnabled(['button[onclick="takeSnapshot(event)"]'], permissions.snapshots);
-                    setFeatureEnabled(['#perf-toggle', '#perf-region', '#perf-scale', '#perf-gray'], permissions.advanced_video);
+                    setFeatureEnabled(['#perf-toggle', '#perf-region', '#perf-scale', '#perf-gray', '#quality-slider', '#quality-auto'], permissions.advanced_video);
                     setFeatureEnabled(['#btn-refresh-url'], permissions.tunnel_refresh);
                     blockMouse = !permissions.mouse;
                     blockKeyboard = !permissions.keyboard;
@@ -5607,25 +5826,35 @@ registerProcessor('pcm-player', PcmPlayer);
                     if (!input) throw new Error('Authentication input is missing');
                     const message = error instanceof Error ? error.message : String(error);
                     input.classList.add('shake');
-                    input.value = '';
-                    input.placeholder = message;
                     input.title = message;
                     input.setAttribute('aria-invalid', 'true');
+                    authError.textContent = message;
+                    authError.hidden = false;
                     setTimeout(function(){ input.classList.remove('shake'); }, 500);
                 }
                 if (form) {
                     form.addEventListener('submit', async function(ev){
                         ev.preventDefault();
+                        if (authenticating) return;
                         const val = (input && input.value ? input.value.trim() : '');
                         if (!val) {
                             showAuthError(new Error('Access code is required'));
                             return;
                         }
                         try {
+                            authenticating = true;
+                            submit.disabled = true;
+                            submit.textContent = 'Connecting…';
+                            input.removeAttribute('aria-invalid');
+                            authError.hidden = true;
                             const result = await authenticateCode(val);
                             applyAuthenticatedSession(result);
                         } catch(error) {
                             showAuthError(error);
+                        } finally {
+                            authenticating = false;
+                            submit.disabled = false;
+                            submit.textContent = 'Connect';
                         }
                     });
                 }

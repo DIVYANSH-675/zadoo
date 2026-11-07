@@ -190,8 +190,8 @@ def assert_imports() -> None:
         fail(f"cloud agent version {settings_mod.APP_VERSION!r} does not match package version {__version__!r}")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for lock_name, required_packages in {
-        "requirements-runtime.lock": ("pillow==12.3.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
-        "requirements-build.lock": ("pip==26.2.1", "setuptools==83.0.0", "pyinstaller==6.21.0"),
+        "requirements-runtime.lock": ("pillow==13.0.0", "python-dotenv==1.2.2", "websockets==15.0.1"),
+        "requirements-build.lock": ("pip==26.2.1", "setuptools==84.1.0", "pyinstaller==6.21.0"),
         "ci_requirements.lock": ("pip==26.2.1", "pip-audit==2.10.1"),
     }.items():
         lock_text = (ROOT / lock_name).read_text(encoding="utf-8").lower()
@@ -578,6 +578,9 @@ def assert_imports() -> None:
         server._apply_quality(70)
         if not server._quality_locked_by_user:
             fail("changing quality should lock it so the user's manual choice is honored")
+        server._restore_auto_quality()
+        if server._quality_locked_by_user or server.current_quality != server.adaptive_stream.profile.quality:
+            fail("Auto quality did not restore the current adaptive profile")
         try:
             server._apply_quality(101)
         except ValueError as exc:
@@ -786,6 +789,13 @@ def assert_imports() -> None:
             fail("ConPTY removed the user's Windows PowerShell module path")
         if restored_module_path != test_module_path:
             fail("ConPTY did not restore the host PowerShell module path after spawning")
+        if not callable(getattr(original_pty_process, "setwinsize", None)):
+            fail("Installed PtyProcess has no public setwinsize API")
+        resize_calls = []
+        resize_proc = SimpleNamespace(setwinsize=lambda rows, cols: resize_calls.append((rows, cols)))
+        asyncio.run(media._resize_conpty(resize_proc, 34, 120))
+        if resize_calls != [(34, 120)]:
+            fail("ConPTY resize did not use the public API with rows, cols ordering")
 
         async def route_checks():
             class FakeConnection:
@@ -1072,6 +1082,10 @@ def assert_imports() -> None:
                     self.perf_grayscale = grayscale
                 def set_streaming_active(self, _active):
                     pass
+                def set_delta_streaming(self, _enabled):
+                    pass
+                def request_keyframe(self):
+                    pass
             dummy = DummyCapturer()
             server.screen_capturer = dummy
             if getattr(server, "adaptive_stream", None):
@@ -1127,6 +1141,7 @@ def assert_imports() -> None:
             class FakeWebSocketRequest:
                 def __init__(self, request_headers):
                     self.headers = request_headers
+                    self.path = "/video"
 
             class FakeWebSocket:
                 def __init__(self, request_headers, messages, remote_address=("smoke", 1)):
@@ -1216,6 +1231,10 @@ def assert_imports() -> None:
                 await server.video_stream_handler(quality_ws)
                 if server.current_quality != 80:
                     fail(f"video quality control set {server.current_quality}, expected 80")
+                auto_ws = FakeWebSocket(headers, [json.dumps({"action": "set_quality_auto"})])
+                await server.video_stream_handler(auto_ws)
+                if server._quality_locked_by_user:
+                    fail("video Auto quality action did not release manual lock")
             finally:
                 server.process_event = original_process_event
 
@@ -1288,6 +1307,11 @@ def assert_imports() -> None:
                     fail(f"settings disabled permissions processed control actions: {recorded_actions}")
                 if not any("Forbidden" in str(item) for item in denied_ws.sent):
                     fail("settings disabled permissions did not report forbidden control action")
+                server._apply_quality(70)
+                denied_auto = FakeWebSocket(denied_ws_headers, [json.dumps({"action": "set_quality_auto"})])
+                await server.video_stream_handler(denied_auto)
+                if not server._quality_locked_by_user or not any("Forbidden" in str(item) for item in denied_auto.sent):
+                    fail("Auto quality bypassed advanced-video permission")
             finally:
                 server.process_event = original_process_event
 
