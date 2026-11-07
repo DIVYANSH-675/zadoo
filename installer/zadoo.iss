@@ -19,6 +19,11 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
+VersionInfoProductName={#AppName}
+VersionInfoVersion={#AppVersion}
+VersionInfoTextVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 DefaultDirName={autopf}\Zadoo
 DefaultGroupName=Zadoo
 DisableProgramGroupPage=yes
@@ -36,7 +41,8 @@ PrivilegesRequired=admin
 SetupArchitecture=x64
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
-LicenseFile=NOTICE.txt
+LicenseFile=..\LICENSE
+InfoBeforeFile=NOTICE.txt
 
 [Messages]
 WelcomeLabel1=Install Zadoo
@@ -46,6 +52,8 @@ FinishedLabel=Setup has installed Zadoo on this computer. Click Finish to open S
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Zadoo\Open Zadoo"; Filename: "{app}\Zadoo.exe"; Parameters: "--open"; IconFilename: "{app}\Zadoo.exe"

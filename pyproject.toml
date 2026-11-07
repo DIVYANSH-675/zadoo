@@ -7,6 +7,8 @@ name = "zadoo-vnc"
 dynamic = ["version"]
 description = "Windows-focused web VNC runtime with screen capture, input, clipboard, and Cloudflare tunnel support."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "websockets==15.0.1",

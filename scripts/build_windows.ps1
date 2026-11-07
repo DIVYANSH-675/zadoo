@@ -40,6 +40,38 @@ function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
+function Assert-BuildPath([string]$Path) {
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $allowedRoots = @((Join-Path $Root "dist"), (Join-Path $Root "build"))
+    foreach ($allowed in $allowedRoots) {
+        if ($resolved.Equals($allowed, [StringComparison]::OrdinalIgnoreCase) -or
+            $resolved.StartsWith($allowed + [System.IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            $current = $resolved
+            while ($current -and $current.Length -ge $allowed.Length) {
+                if ((Test-Path -LiteralPath $current) -and
+                    ((Get-Item -LiteralPath $current -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    throw "Build cleanup refuses a reparse point: $current"
+                }
+                $current = Split-Path -Parent $current
+            }
+            return
+        }
+    }
+    throw "Build path is outside the intended dist/build directories: $resolved"
+}
+
+function Assert-ProductMetadata([string]$Path, [string]$Version) {
+    $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    # Inno Setup fills fixed-width version-resource fields with trailing spaces.
+    # Ignore only that padding; the remaining values must still match exactly.
+    if (([string]$info.ProductName).TrimEnd(' ') -cne "Zadoo") {
+        throw "Windows product name must be Zadoo for ${Path}; got '$($info.ProductName)'."
+    }
+    if (([string]$info.ProductVersion).TrimEnd(' ') -cne $Version -or ([string]$info.FileVersion).TrimEnd(' ') -cne $Version) {
+        throw "Windows product and file versions must be $Version for ${Path}; got '$($info.ProductVersion)' and '$($info.FileVersion)'."
+    }
+}
+
 function Assert-X64PE([string]$Path, [string]$Label) {
     $bytes = [System.IO.File]::ReadAllBytes($Path)
     if ($bytes.Length -lt 64) { throw "$Label is not a valid PE file: $Path" }
@@ -260,6 +292,9 @@ function Invoke-Sign([string]$PathToSign) {
     if ($verified.Status -ne "Valid") {
         throw "Signature verification failed for ${PathToSign}: $($verified.Status) $($verified.StatusMessage)"
     }
+    if (-not $verified.TimeStamperCertificate) {
+        throw "Signature timestamp is missing for $PathToSign."
+    }
 }
 
 function Write-ReleaseMetadata([string]$Version) {
@@ -276,11 +311,15 @@ function Write-ReleaseMetadata([string]$Version) {
     foreach ($path in $candidatePaths) {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         Assert-X64PE $path "Release artifact"
+        Assert-ProductMetadata $path $Version
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
         $relative = $path.Substring($distRoot.Length).TrimStart("\", "/").Replace("\", "/")
         $signature = Get-AuthenticodeSignature -LiteralPath $path
         if (-not $NoSelfSign -and $signature.Status -ne "Valid") {
             throw "Release artifact signature check failed for $path ($($signature.Status))."
+        }
+        if (-not $NoSelfSign -and -not $signature.TimeStamperCertificate) {
+            throw "Release artifact timestamp is missing for $path."
         }
         $artifacts += [ordered]@{
             file = $relative
@@ -356,6 +395,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Stream policy regression test failed" }
     & $PythonExe scripts\delta_frames_test.py
     if ($LASTEXITCODE -ne 0) { throw "Incremental-frame regression test failed" }
+    & $PythonExe scripts\release_metadata_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Windows release metadata regression test failed" }
     $node = Resolve-Node
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
@@ -377,9 +418,17 @@ function Build-Zadoo {
 
     $workRoot = Join-Path $Root "build\pyinstaller\x64"
     $distRoot = Join-Path $Root "dist"
+    Assert-BuildPath $distRoot
+    Assert-BuildPath $workRoot
     if (Test-Path -LiteralPath $distRoot) {
         Remove-Item -LiteralPath $distRoot -Recurse -Force
     }
+    $appVersionFile = Join-Path $workRoot "version-Zadoo.txt"
+    $portableVersionFile = Join-Path $workRoot "version-Zadoo-x64.txt"
+    & $venvPython scripts\write_version_info.py --version $Version --filename Zadoo.exe --output $appVersionFile
+    if ($LASTEXITCODE -ne 0) { throw "Windows application version resource generation failed" }
+    & $venvPython scripts\write_version_info.py --version $Version --filename Zadoo-x64.exe --output $portableVersionFile
+    if ($LASTEXITCODE -ne 0) { throw "Windows portable version resource generation failed" }
     $commonArgs = @(
         "--noconfirm",
         "--clean",
@@ -392,6 +441,8 @@ function Build-Zadoo {
         "--add-data", "$Root\brand-header.png;.",
         "--add-data", "$Root\splash.png;.",
         "--add-data", "$Root\trigger-icon.png;.",
+        "--add-data", "$Root\LICENSE;.",
+        "--add-data", "$Root\NOTICE;.",
         "--add-binary", "$cloudflared;."
     )
     $hiddenImports = @(
@@ -423,18 +474,20 @@ function Build-Zadoo {
     $commonArgs += (Join-Path $Root "zadoo_vnc\__main__.py")
 
     $oneDirDist = Join-Path $distRoot "onedir\x64"
-    & $venvPython -m PyInstaller @commonArgs --name "Zadoo" --onedir --distpath $oneDirDist --workpath (Join-Path $workRoot "onedir") --specpath (Join-Path $workRoot "spec-onedir")
+    & $venvPython -m PyInstaller @commonArgs --name "Zadoo" --onedir --version-file $appVersionFile --distpath $oneDirDist --workpath (Join-Path $workRoot "onedir") --specpath (Join-Path $workRoot "spec-onedir")
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller one-folder build failed for x64" }
     $appExe = Join-Path $oneDirDist "Zadoo\Zadoo.exe"
     Assert-X64PE $appExe "Zadoo one-folder executable"
+    Assert-ProductMetadata $appExe $Version
     Invoke-Sign $appExe
 
     if (-not $SkipPortable) {
         $portableDist = Join-Path $distRoot "portable"
-        & $venvPython -m PyInstaller @commonArgs --name "Zadoo-x64" --onefile --distpath $portableDist --workpath (Join-Path $workRoot "onefile") --specpath (Join-Path $workRoot "spec-onefile")
+        & $venvPython -m PyInstaller @commonArgs --name "Zadoo-x64" --onefile --version-file $portableVersionFile --distpath $portableDist --workpath (Join-Path $workRoot "onefile") --specpath (Join-Path $workRoot "spec-onefile")
         if ($LASTEXITCODE -ne 0) { throw "PyInstaller portable build failed for x64" }
         $portableExe = Join-Path $portableDist "Zadoo-x64.exe"
         Assert-X64PE $portableExe "Zadoo portable executable"
+        Assert-ProductMetadata $portableExe $Version
         Invoke-Sign $portableExe
     }
 
@@ -456,6 +509,7 @@ function Build-Zadoo {
             $builtInstaller = Join-Path $tempInstallerOut "Zadoo-$Version-x64-Setup.exe"
             if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Inno Setup did not create $builtInstaller" }
             Assert-X64PE $builtInstaller "Zadoo installer"
+            Assert-ProductMetadata $builtInstaller $Version
             Invoke-Sign $builtInstaller
             $finalInstaller = Join-Path $installerOut "Zadoo-$Version-x64-Setup.exe"
             Move-Item -LiteralPath $builtInstaller -Destination $finalInstaller -Force
@@ -468,12 +522,14 @@ function Build-Zadoo {
         if (-not $KeepOneDir) {
             foreach ($leftover in @($oneDirDist, $workRoot)) {
                 if ($leftover -and (Test-Path -LiteralPath $leftover)) {
+                    Assert-BuildPath $leftover
                     Remove-Item -LiteralPath $leftover -Recurse -Force
                 }
             }
             # Prune now-empty parent dirs so only dist\installer remains.
             foreach ($parent in @((Join-Path $distRoot "onedir"), (Join-Path $distRoot "portable"), (Join-Path $Root "build"))) {
                 if ((Test-Path -LiteralPath $parent) -and -not (Get-ChildItem -LiteralPath $parent -Force)) {
+                    Assert-BuildPath $parent
                     Remove-Item -LiteralPath $parent -Recurse -Force
                 }
             }
