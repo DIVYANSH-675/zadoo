@@ -1,6 +1,7 @@
 """Small native settings window for installed Zadoo builds."""
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -170,6 +171,15 @@ def _find_icon() -> str:
     return str(path)
 
 
+def _windows_animations_enabled() -> bool:
+    """Fail closed to a still illustration if the OS preference cannot be read."""
+    enabled = ctypes.c_int(0)
+    try:
+        return bool(ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0) and enabled.value)
+    except (AttributeError, OSError):
+        return False
+
+
 class ZadooSettingsWindow:
     def __init__(self, store: SettingsStore | None = None):
         self.store = store or get_settings_store()
@@ -179,7 +189,7 @@ class ZadooSettingsWindow:
         from .dpi import ensure_process_dpi_aware_once
         ensure_process_dpi_aware_once()
         self.root = Tk()
-        self.root.title("Zadoo · Your workspace")
+        self.root.title("Zadoo · Configure")
         # Match Tk scaling to the monitor DPI (tk scaling = DPI/72) so fonts and widgets are
         # sized correctly for every device, and remember the ratio for window sizing below.
         dpi = float(self.root.winfo_fpixels("1i"))
@@ -217,6 +227,9 @@ class ZadooSettingsWindow:
         self._loading = False
         self._scroll_canvases: list[tk.Canvas] = []
         self._support_window: tk.Toplevel | None = None
+        self._motion_after: str | None = None
+        self._motion_tick = 0
+        self.motion_var = tk.BooleanVar(value=_windows_animations_enabled())
         self._build_style()
         self._build_ui()
         self.reload()
@@ -331,7 +344,7 @@ class ZadooSettingsWindow:
         self.welcome_status_label = self._hint(self.account_body, "")
         self._nav_columns = 0
         self.nav_buttons = []
-        for index, name in enumerate(("Connect", "Device", "Permissions", "Alerts", "Preferences")):
+        for index, name in enumerate(("Connect", "My PC", "Permissions", "Alerts", "Preferences")):
             button = ttk.Button(self.nav, text=name, style="Nav.TButton",
                                 command=lambda i=index: self.tabs.select(i))
             self.nav_buttons.append(button)
@@ -348,7 +361,7 @@ class ZadooSettingsWindow:
         self.footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(160, e.width - 8)))
         actions = ttk.Frame(self.footer, style="Root.TFrame")
         actions.pack(fill="x")
-        ttk.Label(actions, text="All features. Always free.", style="Muted.TLabel").pack(side=LEFT)
+        ttk.Label(actions, text="Free. No limits to unlock.", style="Muted.TLabel").pack(side=LEFT)
         # Settings autosave automatically — no Save button. Keep only Start/Stop here.
         ttk.Button(actions, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
         ttk.Button(actions, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
@@ -367,6 +380,55 @@ class ZadooSettingsWindow:
         selected = self.tabs.index(self.tabs.select())
         for index, button in enumerate(getattr(self, "nav_buttons", [])):
             button.configure(style="SelectedNav.TButton" if index == selected else "Nav.TButton")
+        self._stop_setup_animation()
+        if selected == 0:
+            self._motion_tick = 0
+            self._motion_after = self.root.after(40, self._animate_setup)
+
+    def _draw_setup_story(self, event) -> None:
+        """Small vector illustration: no image decoding, GPU effects or background loop."""
+        canvas = self.setup_story
+        canvas.delete("all")
+        width = event.width
+        scale = self._ui_scale
+        y = 18 * scale
+        size = min(64 * scale, width / 4)
+        centers = (width * 0.22, width * 0.78)
+        for center, label in zip(centers, ("THIS PC", "YOUR BROWSER"), strict=True):
+            x = center - size / 2
+            canvas.create_rectangle(x, y, x + size, y + size * .62, fill=SURFACE_ALT, outline=ACCENT, width=2)
+            canvas.create_line(center, y + size * .62, center, y + size * .76, fill=ACCENT, width=2)
+            canvas.create_line(center - size * .2, y + size * .76, center + size * .2, y + size * .76, fill=ACCENT, width=2)
+            for eye in (-.13, .13):
+                ex = center + size * eye
+                canvas.create_oval(ex - 2, y + size * .23, ex + 2, y + size * .23 + 4, fill=TEXT, outline="")
+            canvas.create_arc(center - size * .13, y + size * .26, center + size * .13, y + size * .47,
+                              start=180, extent=180, style="arc", outline=TEXT, width=2)
+            canvas.create_text(center, y + size * .76 + 18 * scale, text=label, fill=MUTED,
+                               font=("Segoe UI", 8, "bold"))
+        self._story_track = (centers[0] + size * .7, centers[1] - size * .7, y + size * .32)
+        start, end, middle = self._story_track
+        canvas.create_line(start, middle, end, middle, fill=BORDER, dash=(3, 5), width=2)
+        canvas.create_oval(start - 4, middle - 4, start + 4, middle + 4, fill=ACCENT, outline="", tags="packet")
+
+    def _stop_setup_animation(self) -> None:
+        if self._motion_after is not None:
+            self.root.after_cancel(self._motion_after)
+            self._motion_after = None
+
+    def _animate_setup(self) -> None:
+        self._motion_after = None
+        if (self._hidden or not self.motion_var.get() or not self.root.winfo_viewable()
+                or self.tabs.index(self.tabs.select()) != 0 or not hasattr(self, "_story_track")):
+            return
+        self._motion_tick += 1
+        start, end, y = self._story_track
+        progress = min(1.0, self._motion_tick / 24)
+        eased = 1 - (1 - progress) ** 3
+        x = start + (end - start) * eased
+        self.setup_story.coords("packet", x - 4, y - 4, x + 4, y + 4)
+        if self._motion_tick < 24:
+            self._motion_after = self.root.after(40, self._animate_setup)
 
     def _fit_geometry(self, base_w: int, base_h: int) -> None:
         """Scale the requested size to the monitor DPI, then clamp to the screen and centre so
@@ -486,40 +548,83 @@ class ZadooSettingsWindow:
         self.tabs.add(self.tab_access, text="Access")
         body = self._tab_body(self.tab_access)
         validator = (self.root.register(self._access_code_validator), "%P")
-        self._page_heading(body, "01 / Connect", "Your PC. Ready to share.",
-                           "Choose an access code, review Permissions, then select Start Zadoo. Share the link and code only with people you trust.")
+        self._setup_hero = ttk.Frame(body, style="Surface.TFrame")
+        self._setup_hero.pack(fill="x", pady=(0, 12))
+        self._setup_intro = ttk.Frame(self._setup_hero, style="Surface.TFrame")
+        self._page_heading(self._setup_intro, "Configure / Quick start", "Connect in three easy steps.",
+                           "Set a code. Choose what viewers can do. Start sharing.")
+        self.setup_story = tk.Canvas(self._setup_hero, width=210, height=int(104 * self._ui_scale), bg=SURFACE,
+                                     highlightthickness=0, takefocus=False)
+        self.setup_story.bind("<Configure>", self._draw_setup_story)
 
-        form = ttk.Frame(body, style="Surface.TFrame")
-        form.pack(fill="x")
+        self._setup_grid = ttk.Frame(body, style="Surface.TFrame")
+        self._setup_grid.pack(fill="x")
+        form = ttk.LabelFrame(self._setup_grid, text="1  ·  Choose your access code", style="Card.TLabelframe")
         ttk.Label(form, text=f"Access code · up to {ACCESS_CODE_MAX_LENGTH} characters", style="Surface.TLabel").pack(anchor="w")
         code_row = ttk.Frame(form, style="Surface.TFrame")
         code_row.pack(fill="x", pady=(6, 0))
-        self.access_code = ttk.Entry(code_row, validate="key", validatecommand=validator, show="•")
+        self.access_code = ttk.Entry(code_row, validate="key", validatecommand=validator, show="•",
+                                     font=("Consolas", 14))
         self.access_code.pack(side=LEFT, fill="x", expand=True)
         self.show_code_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(code_row, text="Show", variable=self.show_code_var,
                         command=lambda: self.access_code.configure(show="" if self.show_code_var.get() else "•")).pack(side=RIGHT, padx=(8, 0))
-        self._hint(form, "Required to connect. Changing this code changes the credential viewers must use.")
+        self._hint(form, "This is the code viewers enter on the connection screen. Share it only with people you trust.")
 
-        ttk.Label(form, text="Email notifications · optional", style="Surface.TLabel").pack(anchor="w", pady=(8, 0))
-        self.email_to = ttk.Entry(form)
-        self.email_to.pack(fill="x", pady=(6, 0))
-        self.email_state = self._hint(form, "")
+        permissions = ttk.LabelFrame(self._setup_grid, text="2  ·  Choose viewer permissions", style="Card.TLabelframe")
+        self.permission_summary = self._hint(permissions, "Review access before you share this PC.")
+        ttk.Button(permissions, text="Review permissions  →", command=lambda: self.tabs.select(2)).pack(anchor="w")
 
         # ── Remote access (public link + start) ───────────────────────
-        self.public_url_frame = ttk.Frame(body, style="Surface.TFrame")
-        self.public_url_frame.pack(fill="x", pady=(18, 0))
-        ttk.Label(self.public_url_frame, text="Your connection link", style="Eyebrow.TLabel").pack(anchor="w")
+        self.public_url_frame = ttk.LabelFrame(self._setup_grid, text="3  ·  Start and share your link", style="Card.TLabelframe")
         url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
         url_row.pack(fill="x", pady=(2, 6))
         self.public_url_label = ttk.Label(url_row, text="Zadoo not running", style="SurfaceMuted.TLabel",
                                           font=("Segoe UI", 9), cursor="hand2")
-        self.public_url_label.pack(side=LEFT, fill="x", expand=True)
+        self.public_url_label.pack(fill="x", pady=(6, 10))
         self.public_url_label.bind("<Configure>", lambda event: self.public_url_label.configure(wraplength=max(100, event.width)))
         self.public_url_label.bind("<Button-1>", lambda _e: self._open_public_url())
-        # Start/Stop live in the always-visible footer; keep only Refresh inline with the link.
-        ttk.Button(url_row, text="Refresh", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
-        self._hint(self.public_url_frame, "Start Zadoo to create a link. Click the link to open it. Refresh replaces it; Stop ends sharing from this PC.")
+        buttons = ttk.Frame(url_row, style="Surface.TFrame")
+        buttons.pack(fill="x")
+        self.copy_link_button = ttk.Button(buttons, text="Copy link", command=self.copy_public_url, state="disabled")
+        self.copy_link_button.pack(side=LEFT)
+        ttk.Button(buttons, text="New link", command=self._refresh_public_url).pack(side=LEFT, padx=(6, 0))
+        self._hint(self.public_url_frame, "Select Start Zadoo below. When the link appears, send it with your code. New link replaces the current one; Stop ends sharing.")
+        self._setup_cards = (form, permissions, self.public_url_frame)
+        self._setup_columns = 0
+        body.bind("<Configure>", self._layout_setup, add="+")
+
+    def _layout_setup(self, event) -> None:
+        columns = 2 if event.width >= 720 * self._ui_scale else 1
+        if columns == self._setup_columns:
+            return
+        self._setup_columns = columns
+        wide = columns == 2
+        self._setup_hero.columnconfigure(0, weight=3 if wide else 1)
+        self._setup_hero.columnconfigure(1, weight=2 if wide else 0)
+        self._setup_intro.grid(row=0, column=0, sticky="ew")
+        self.setup_story.grid(row=0 if wide else 1, column=1 if wide else 0, sticky="ew")
+        for column in range(2):
+            self._setup_grid.columnconfigure(column, weight=1 if column < columns else 0,
+                                              uniform="setup" if column < columns else "")
+        for index, card in enumerate(self._setup_cards[:2]):
+            card.grid(row=0 if wide else index, column=index if wide else 0, sticky="nsew",
+                      padx=(0, 12 if wide and index == 0 else 0), pady=(0, 12))
+        self.public_url_frame.grid(row=1 if wide else 2, column=0, columnspan=columns, sticky="ew")
+
+    def copy_public_url(self) -> None:
+        if not self._runtime_running or not self._runtime_url:
+            self._set_status("No connection link yet. Select Start Zadoo and wait for the link.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._runtime_url)
+        self._set_status("Connection link copied. Share it and your access code only with someone you trust.")
+
+    def _update_permission_summary(self, *_args) -> None:
+        count = sum(bool(var.get()) for var in self.permission_vars.values())
+        text = (f"{count} of {len(PERMISSION_KEYS)} controls allowed. You choose the access on this PC."
+                if count else "View only. Viewers can see the screen; all remote controls are off.")
+        self.permission_summary.configure(text=text)
 
     def _build_account_tab(self) -> None:
         self.tab_account = ttk.Frame(self.tabs, style="Surface.TFrame")
@@ -591,6 +696,9 @@ class ZadooSettingsWindow:
         self._hint(card, "Keeps this PC available after you sign in. Windows may require administrator access to update the startup task.")
         self._check_button(card, "Keep minimized Settings on the taskbar", self.show_taskbar_var).pack(anchor="w", pady=4)
         self._hint(card, "Off: minimizing closes the Settings window, while sharing continues. Reopen Settings from the Zadoo shortcut.")
+        ttk.Checkbutton(card, text="Animate the setup illustration", variable=self.motion_var,
+                        command=self._stop_setup_animation).pack(anchor="w", pady=4)
+        self._hint(card, "Follows Windows on launch. A short animation plays only when you open Connect; nothing loops while sharing.")
         ttk.Button(card, text="Reapply startup preference", command=self.apply_startup).pack(anchor="w", pady=(4, 0))
         support = ttk.LabelFrame(body, text="Local support", style="Card.TLabelframe")
         support.pack(fill="x", pady=(14, 0))
@@ -613,6 +721,7 @@ class ZadooSettingsWindow:
         for key in PERMISSION_KEYS:
             var = tk.BooleanVar(value=False)
             self.permission_vars[key] = var
+            var.trace_add("write", self._update_permission_summary)
             card = ttk.LabelFrame(perms, style="Card.TLabelframe", padding=10)
             self._check_button(card, PERMISSION_LABELS.get(key, key), var).pack(anchor="w")
             self._hint(card, PERMISSION_HELP[key])
@@ -640,6 +749,12 @@ class ZadooSettingsWindow:
         body = self._tab_body(self.tab_alerts)
         self._page_heading(body, "04 / Alerts", "A message, one tap away.",
                            "Prepare up to four messages for connected viewers. Enable a preset and fill in its title or message, then send it from Host Controls.")
+        email_card = ttk.LabelFrame(body, text="Email notifications · optional", style="Card.TLabelframe")
+        email_card.pack(fill="x", pady=(0, 14))
+        ttk.Label(email_card, text="Send notifications to", style="Surface.TLabel").pack(anchor="w")
+        self.email_to = ttk.Entry(email_card)
+        self.email_to.pack(fill="x", pady=(6, 0))
+        self.email_state = self._hint(email_card, "")
         alert_tabs = ttk.Notebook(body)
         alert_tabs.pack(fill=BOTH, expand=True)
         for code in ("A", "B", "C", "D"):
@@ -808,6 +923,7 @@ class ZadooSettingsWindow:
         self._runtime_running = running
         self._runtime_url = url
         with suppress(tk.TclError):
+            self.copy_link_button.configure(state="normal" if running and url and not error else "disabled")
             if error:
                 self.public_url_label.configure(text=error, foreground=DANGER)
             elif running and url:
@@ -1327,6 +1443,8 @@ class ZadooSettingsWindow:
             messagebox.showerror("Zadoo", f"Could not start Zadoo: {exc}")
 
     def _on_unmap(self, event) -> None:
+        if event.widget is self.root:
+            self._stop_setup_animation()
         if event.widget is self.root and self.root.state() == "iconic" and not bool(self.show_taskbar_var.get()):
             self.root.after(80, self.hide)
 
@@ -1334,6 +1452,7 @@ class ZadooSettingsWindow:
         if self._hidden:
             return
         self._hidden = True
+        self._stop_setup_animation()
         with suppress(tk.TclError):
             self.root.withdraw()
         self.root.after(50, self.root.quit)

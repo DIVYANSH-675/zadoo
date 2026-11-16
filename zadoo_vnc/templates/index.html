@@ -2043,7 +2043,7 @@
             *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
         }
     </style>
-    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.5">
+    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.6">
 </head>
 <body>
     <!-- Tabler Icons, MIT licensed: https://github.com/tabler/tabler-icons -->
@@ -2160,23 +2160,17 @@
     <div class="blurred-background"></div>
     <div id="splash-screen">
         <div class="splash-container">
-            <section class="auth-story" aria-label="Welcome to Zadoo">
-                <div class="z-brand"><span class="z-brand-mark" aria-hidden="true">Z</span> zadoo<span class="z-eyebrow"> / remote</span></div>
-                <h1>Your desktop.<br><span>Within reach.</span></h1>
-                <p class="z-muted">A little distance, zero friction. Connect to your Windows PC from the screen in your hand.</p>
-                <div class="auth-points"><span>Browser access</span><span>Host-controlled permissions</span><span>Always free</span></div>
-            </section>
             <section class="auth-card" aria-labelledby="auth-title">
-            <div class="z-eyebrow">Make the connection</div>
-            <h2 id="auth-title">Welcome back.</h2>
-            <p class="z-muted">Your host PC is one access code away.</p>
+            <div class="z-brand"><span class="z-brand-mark" aria-hidden="true">Z</span> zadoo<span class="z-eyebrow"> / connect</span></div>
+            <h2 id="auth-title">Hello, your PC is here.</h2>
+            <p class="z-muted">Enter the code set in Zadoo's Configure window.</p>
             <form id="auth-form">
                 <label for="auth-code">Access code</label>
                 <input type="password" id="auth-code" aria-describedby="auth-hint auth-error" placeholder="Enter your access code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
             </form>
             <div class="auth-actions">
                 <button class="auth-submit" id="auth-submit" type="submit" form="auth-form">Connect</button>
-                <p class="auth-hint" id="auth-hint">Enter the access code from the host's Settings. All features are free.</p>
+                <p class="auth-hint" id="auth-hint">Ask the owner of this PC for their code. Your connection starts only after verification.</p>
                 <p id="auth-error" role="alert" hidden></p>
             </div>
             <div class="auth-footnote"><span>No account required.</span><button type="button" class="z-text-button" data-open-support>Support the developer ↗</button></div>
@@ -2310,17 +2304,9 @@
             <div id="current-fps" style="display: none;">60</div>
             <div id="uptime-display" style="display: none;">00:00:00</div>
         </div>
-        <div class="view-controls" id="view-controls" aria-label="Remote screen view controls">
-            <button type="button" id="view-mode" aria-label="Toggle fit mode" title="Toggle fit mode">Fit</button>
-            <button type="button" id="view-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
-            <span class="view-zoom-label" id="view-zoom-label" aria-live="polite">100%</span>
-            <button type="button" id="view-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
-            <button type="button" id="view-reset" aria-label="Reset pan and zoom" title="Reset pan and zoom">Reset</button>
-            <span class="dock-divider" aria-hidden="true"></span>
         <button type="button" class="sidebar-trigger" id="sidebar-trigger" title="Open Controls" aria-label="Open controls" aria-controls="sidebar" aria-expanded="false">
-            <span class="trigger-icon" aria-hidden="true"></span><span class="dock-controls-label">Controls</span>
+            <span class="trigger-icon" aria-hidden="true"></span>
         </button>
-        </div>
         
         <!-- Collapsible Sidebar -->
         <div class="sidebar" id="sidebar" aria-label="Remote controls" inert>
@@ -2328,10 +2314,21 @@
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
-                    <div class="deck-heading"><strong><span class="z-eyebrow">Zadoo / Your workspace</span>Everything within reach<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
+                    <div class="deck-heading"><strong><span class="z-eyebrow">Zadoo / Controls</span>Make yourself comfortable<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
+                    <div class="sidebar-section deck-card view-deck">
+                        <div class="section-title">Screen size</div>
+                        <div class="view-controls" id="view-controls" aria-label="Remote screen view controls">
+                            <button type="button" id="view-mode" aria-label="Toggle fit mode" title="Fit screen or fit width">Fit</button>
+                            <button type="button" id="view-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
+                            <span class="view-zoom-label" id="view-zoom-label" aria-live="polite">100%</span>
+                            <button type="button" id="view-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+                            <button type="button" id="view-reset" aria-label="Reset pan and zoom" title="Reset pan and zoom">Reset</button>
+                        </div>
+                        <p class="quality-help">Fit the whole screen, zoom in, or reset your view.</p>
+                    </div>
                     <div class="sidebar-section deck-card quality-deck">
                         <div class="section-title">Video Quality</div>
                         <div class="quality-head">
@@ -2616,13 +2613,13 @@
 <dialog id="support-dialog" class="z-dialog" aria-labelledby="support-title" aria-describedby="support-description">
     <div class="dialog-top"><h2 id="support-title">Support the developer</h2><button type="button" class="dialog-close" aria-label="Close support">&times;</button></div>
     <p class="support-copy" id="support-description">Made with care by Divyansh Gupta. If Zadoo helps you, you can leave a voluntary tip. Every feature stays free, whether you contribute or not.</p>
-    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.5" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
+    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.6" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
     <span class="support-upi">divyanshgupta675@oksbi</span>
-    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.5" download="Zadoo-developer-QR.png">Save QR</a></div>
+    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.6" download="Zadoo-developer-QR.png">Save QR</a></div>
     <p class="support-copy">Scan with any UPI app, or save the QR and open it in your payment app. Confirm the recipient is Divyansh Gupta before paying.</p>
     <div id="support-status" class="support-status" role="status"></div>
 </dialog>
-<script src="/static/ui/studio.js?v=1.1.5" defer></script>
+<script src="/static/ui/studio.js?v=1.1.6" defer></script>
 <script>
     const canvas = document.getElementById('screen');
     if (!canvas) throw new Error('Screen canvas is missing');
@@ -4774,7 +4771,7 @@
         return navigator.clipboard.readText();
     }
 
-    // The hand control lives in the fixed dock: one click/tap, no accidental dragging.
+        // The familiar hand opens the right sidebar; no bottom dock or accidental dragging.
     function initializeDraggableTrigger() {
         const trigger = document.getElementById('sidebar-trigger');
         if (!trigger) return;
