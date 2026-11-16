@@ -2885,6 +2885,10 @@
         const open = typeof force === 'boolean' ? force : !sidebar.classList.contains('open');
         sidebar.classList.toggle('open', open);
         sidebar.inert = !open;
+        if (open) {
+            sidebar.scrollTop = 0;
+            sidebar.querySelector('.sidebar-content').scrollTop = 0;
+        }
         const trigger = document.getElementById('sidebar-trigger');
         trigger.setAttribute('aria-expanded', String(open));
         trigger.setAttribute('aria-label', open ? 'Close controls' : 'Open controls');
