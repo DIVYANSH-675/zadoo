@@ -8,6 +8,8 @@ Follow the source/build commands in `README.md`. Installed builds use `%LOCALAPP
 
 Open Settings, set an access code, choose permissions, and select **Start Zadoo**. The public link appears after cloudflared starts. A dashboard account is optional. Source test hosts can use `ZADOO_DISABLE_TUNNEL=1` and `ZADOO_ALLOW_DIRECT_ACCESS=1`; direct LAN access is denied by default.
 
+Silent uninstall (`/SILENT` or `/VERYSILENT`) always keeps settings and logs, including any legacy ProgramData copy, and does not display a data-deletion prompt. Interactive uninstall defaults to keeping data; deletion requires an explicit Yes. The application files, shortcuts and startup task are still removed.
+
 The host uses port 6173. Check local health with:
 
 ```powershell
@@ -57,6 +59,8 @@ $credential = $null
 Verify every SHA-256 and Authenticode status in `dist/release-manifest.json`. Public artifacts must report `signed: true` and `Valid`. GitHub's protected `release` environment needs `ZADOO_SIGN_PFX_BASE64` and `ZADOO_SIGN_PFX_PASSWORD`. Push an annotated tag matching the package version, then dispatch `windows-x64-release.yml` from that tag. The workflow rejects unsigned output, mismatched versions, and duplicate releases.
 
 ## Release-candidate verification
+
+The Windows CI workflow builds the immutable 1.1.4 baseline and runs `scripts/installer_e2e_test.ps1` on a disposable GitHub-hosted runner. It verifies a fresh install, same-version repair, upgrade, every installed payload hash, startup task and shortcuts, installed HTTP/auth/assets/shutdown, and both silent uninstall modes with current-user and legacy data preserved. The harness refuses developer PCs, self-hosted runners, existing Zadoo installations/data, and unexpected test paths. It does not replace interactive, hardware, browser or trusted-signature testing.
 
 - On a separate Windows x64 machine, verify the installer signature/hash, perform a fresh install, and confirm the startup task and Settings launch.
 - Upgrade a configured version 1.0 host. Confirm the access code, permissions, alerts and optional device link remain; no credit panel or sign-in gate may appear.

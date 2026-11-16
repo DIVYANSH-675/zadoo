@@ -41,7 +41,7 @@ zadoo-vnc = "zadoo_vnc.app:main"
 packages = ["zadoo_vnc"]
 
 [tool.setuptools.package-data]
-zadoo_vnc = ["templates/*.html", "static/vendor/*"]
+zadoo_vnc = ["templates/*.html", "static/vendor/*", "static/ui/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "zadoo_vnc.__version__"}

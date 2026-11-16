@@ -1,5 +1,15 @@
-Zadoo Security Notice
+Your PC. Your permissions.
 
-Zadoo lets a person with a valid access code and share link view this Windows PC and, depending on the permissions you enable, control mouse, keyboard, clipboard, audio, microphone, camera, terminal, snapshots, tunnel refresh, and remote alerts.
+Zadoo lets someone with your connection link and valid access code view this Windows PC. Only install it on a computer you own or are authorized to manage.
 
-Only install and run Zadoo on computers you own or are authorized to manage. Keep your access code and share links private. Stop Zadoo or refresh its public link when an old link should no longer work.
+1. KEEP YOUR CODE PRIVATE
+Share your access code and connection link only with people you trust. Do not post them publicly.
+
+2. CHOOSE WHAT VIEWERS CAN DO
+In Settings > Permissions, allow only the controls you need. Permissions cover the mouse, keyboard, clipboard, computer audio, microphone, camera, terminal commands, snapshots, video controls, link refresh and alerts. Terminal access can run commands on this PC.
+
+3. STOP SHARING WHEN YOU ARE DONE
+Select Stop in Settings to stop Zadoo. Refresh creates a new public link. You can change startup behavior in Preferences.
+
+EVERY FEATURE IS FREE
+No subscription or payment is required. The optional Support section shows the developer's QR code; contributing does not unlock features or change access.

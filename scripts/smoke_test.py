@@ -910,9 +910,15 @@ def assert_imports() -> None:
             if asset_response.headers.get("Cache-Control") != "public, max-age=31536000, immutable":
                 fail("content-versioned image was not served with immutable caching")
             index_template = load_template("index.html")
-            for asset_version in ("b0e399b76691", "a8ff7f23c7aa", "7cc869410b1c"):
-                if f"?v={asset_version}" not in index_template:
-                    fail(f"index template is missing image content version {asset_version}")
+            for asset_reference in ("/trigger-icon.png?v=7cc869410b1c",
+                                    f"/static/ui/studio.css?v={__version__}",
+                                    f"/static/ui/studio.js?v={__version__}"):
+                if asset_reference not in index_template:
+                    fail(f"index template is missing versioned UI asset {asset_reference}")
+            for ui_asset in ("studio.css", "studio.js", "developer-qr.png"):
+                response = await request(server, f"/static/ui/{ui_asset}", headers)
+                if response.status_code != 200 or response.body != load_static(f"ui/{ui_asset}"):
+                    fail(f"UI asset route returned invalid content: {ui_asset}")
             for mobile_marker in (
                 'id="view-controls"',
                 "remoteView.mode",

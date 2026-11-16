@@ -397,6 +397,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Incremental-frame regression test failed" }
     & $PythonExe scripts\release_metadata_test.py
     if ($LASTEXITCODE -ne 0) { throw "Windows release metadata regression test failed" }
+    & $PythonExe scripts\installer_ui_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Installer UI regression test failed" }
     $node = Resolve-Node
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py
