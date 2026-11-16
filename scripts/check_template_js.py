@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = ROOT / "zadoo_vnc" / "templates"
-VENDOR_DIR = ROOT / "zadoo_vnc" / "static" / "vendor"
+STATIC_DIR = ROOT / "zadoo_vnc" / "static"
 
 
 class ScriptCollector(HTMLParser):
@@ -58,7 +58,7 @@ def main() -> None:
                 result = subprocess.run([node, "--check", str(js_path)], capture_output=True, text=True)
                 if result.returncode != 0:
                     failures.append(f"{html_path.name} script {index}: {result.stderr.strip() or result.stdout.strip()}")
-        for js_path in sorted(VENDOR_DIR.glob("*.js")):
+        for js_path in sorted(STATIC_DIR.rglob("*.js")):
             result = subprocess.run([node, "--check", str(js_path)], capture_output=True, text=True)
             if result.returncode != 0:
                 failures.append(f"{js_path.name}: {result.stderr.strip() or result.stdout.strip()}")
@@ -66,7 +66,7 @@ def main() -> None:
         for failure in failures:
             print(f"FAIL: {failure}")
         raise SystemExit(1)
-    print("OK: template and vendor JavaScript syntax")
+    print("OK: template, UI and vendor JavaScript syntax")
 
 
 if __name__ == "__main__":

@@ -91,6 +91,9 @@ class RoutesMixin:
         "/api/alert": "remote_alerts",
     }
     STATIC_ASSETS = {
+        "/static/ui/studio.css": ("ui/studio.css", "text/css; charset=utf-8"),
+        "/static/ui/studio.js": ("ui/studio.js", "text/javascript; charset=utf-8"),
+        "/static/ui/developer-qr.png": ("ui/developer-qr.png", "image/png"),
         "/static/vendor/codemirror-5.65.21.min.css": (
             "vendor/codemirror-5.65.21.min.css",
             "text/css; charset=utf-8",

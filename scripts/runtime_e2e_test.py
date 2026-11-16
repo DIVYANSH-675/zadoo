@@ -51,12 +51,36 @@ def media_check(path, headers):
         return len(chunk)
 
 
+def screen_check(headers):
+    result = {}
+    with connect(BASE.replace("http", "ws") + "/video", origin=BASE, additional_headers=headers, open_timeout=15) as stream:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            frame = stream.recv(timeout=15)
+            if isinstance(frame, bytes):
+                if not frame.startswith(bytes.fromhex("ffd8")) or not frame.endswith(bytes.fromhex("ffd9")):
+                    raise AssertionError("Screen stream returned an invalid JPEG")
+                result["screen_jpeg_bytes"] = len(frame)
+                break
+        else:
+            raise TimeoutError("Screen stream did not produce a JPEG")
+    with request("/snapshot?fmt=png", headers) as response:
+        image = response.read()
+        if not image.startswith(bytes.fromhex("89504e470d0a1a0a")) or not image.endswith(bytes.fromhex("49454e44ae426082")):
+            raise AssertionError("Snapshot returned an invalid PNG")
+        result["snapshot_png_bytes"] = len(image)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, help="Packaged executable; omitted for source")
     parser.add_argument("--runtime-python", default=sys.executable)
     parser.add_argument("--hardware", action="store_true", help="Briefly test microphone, speaker loopback and camera without saving media")
+    parser.add_argument("--control-only", action="store_true", help="CI install check: HTTP/auth/assets/stop only, without browser, screen or hardware checks")
     args = parser.parse_args()
+    if args.control_only and args.hardware:
+        parser.error("--control-only cannot be combined with --hardware")
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 6173)) == 0:
             raise RuntimeError("E2E requires port 6173 to be free; existing host was not touched")
@@ -82,22 +106,12 @@ def main():
                     raise AssertionError("Access-code authentication failed")
                 cookie = "; ".join(value.split(";", 1)[0] for value in auth.headers.get_all("Set-Cookie"))
             headers = {"Cookie": cookie}
-            with connect(BASE.replace("http", "ws") + "/video", origin=BASE, additional_headers=headers, open_timeout=15) as stream:
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    frame = stream.recv(timeout=15)
-                    if isinstance(frame, bytes):
-                        if not frame.startswith(bytes.fromhex("ffd8")) or not frame.endswith(bytes.fromhex("ffd9")):
-                            raise AssertionError("Screen stream returned an invalid JPEG")
-                        result["screen_jpeg_bytes"] = len(frame)
-                        break
-                else:
-                    raise TimeoutError("Screen stream did not produce a JPEG")
-            with request("/snapshot?fmt=png", headers) as response:
-                image = response.read()
-                if not image.startswith(bytes.fromhex("89504e470d0a1a0a")) or not image.endswith(bytes.fromhex("49454e44ae426082")):
-                    raise AssertionError("Snapshot returned an invalid PNG")
-                result["snapshot_png_bytes"] = len(image)
+            if not args.control_only:
+                result.update(screen_check(headers))
+            for asset in ("studio.css", "studio.js", "developer-qr.png"):
+                with request("/static/ui/" + asset, headers) as response:
+                    if response.status != 200 or not response.read():
+                        raise AssertionError(f"Installed UI asset is unavailable: {asset}")
             for route in ("/api/local/credits", "/api/local/topup-order", "/api/local/topup-verify"):
                 try:
                     with request(route, headers):
@@ -120,8 +134,9 @@ def main():
                             raise AssertionError(f"Camera did not return a JPEG: {frame!r}")
                         result["camera_jpeg_bytes"] = len(frame)
             subprocess.run([sys.executable, str(ROOT / "scripts/smoke_test.py"), "--live", BASE], cwd=ROOT, env=env, check=True)
-            subprocess.run([sys.executable, str(ROOT / "scripts/viewer_ui_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
-            subprocess.run([sys.executable, str(ROOT / "scripts/terminal_e2e_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
+            if not args.control_only:
+                subprocess.run([sys.executable, str(ROOT / "scripts/viewer_ui_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
+                subprocess.run([sys.executable, str(ROOT / "scripts/terminal_e2e_test.py"), "--code", CODE], cwd=ROOT, env=env, check=True)
             with connect(BASE.replace("http", "ws") + "/rpc", origin=BASE, open_timeout=10) as rpc:
                 rpc.send(json.dumps({"id": "free-e2e-stop", "action": "runtime.stop", "params": {"admin_code": CODE}}))
                 if not json.loads(rpc.recv(timeout=10))["success"]:
@@ -132,7 +147,7 @@ def main():
             with socket.socket() as probe:
                 if probe.connect_ex(("127.0.0.1", 6173)) == 0:
                     raise AssertionError("Runtime did not release its port")
-            result["browser_live_smoke_clean_shutdown"] = "pass"
+            result["control_http_auth_assets_clean_shutdown" if args.control_only else "browser_live_smoke_clean_shutdown"] = "pass"
         finally:
             if process.poll() is None:
                 subprocess.run([windows_system_executable("taskkill.exe"), "/PID", str(process.pid), "/T", "/F"], check=False, capture_output=True)

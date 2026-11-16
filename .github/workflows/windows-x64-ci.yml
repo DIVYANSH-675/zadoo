@@ -60,7 +60,26 @@ jobs:
           $ErrorActionPreference = "Stop"
           $python = (Get-Command python).Source
           $node = (Get-Command node).Source
-          .\scripts\build_windows.ps1 -NoSelfSign -InstallMissingTools -PythonPath $python -NodePath $node
+          .\scripts\build_windows.ps1 -NoSelfSign -KeepOneDir -InstallMissingTools -PythonPath $python -NodePath $node
+
+      - name: Check out immutable 1.1.4 upgrade baseline
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: 44567571c7a122d76ddf21d11265ddf2269908d6
+          path: build/upgrade-baseline
+          persist-credentials: false
+
+      - name: Build upgrade baseline and test real installer lifecycle
+        timeout-minutes: 15
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Get-Location).Path
+          $python = (Get-Command python).Source
+          $node = (Get-Command node).Source
+          & "$root\build\upgrade-baseline\scripts\build_windows.ps1" -NoSelfSign -SkipPortable -InstallMissingTools -PythonPath $python -NodePath $node
+          Set-Location $root
+          .\scripts\installer_e2e_test.ps1 -PreviousInstaller "$root\build\upgrade-baseline\dist\installer\Zadoo-1.1.4-x64-Setup.exe"
 
       - name: Generate runtime SBOM
         shell: powershell

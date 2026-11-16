@@ -2043,6 +2043,7 @@
             *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
         }
     </style>
+    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.5">
 </head>
 <body>
     <!-- Tabler Icons, MIT licensed: https://github.com/tabler/tabler-icons -->
@@ -2159,17 +2160,27 @@
     <div class="blurred-background"></div>
     <div id="splash-screen">
         <div class="splash-container">
-            <div class="splash-art">
-            <img src="/splash.png?v=a8ff7f23c7aa" alt="Authentication">
+            <section class="auth-story" aria-label="Welcome to Zadoo">
+                <div class="z-brand"><span class="z-brand-mark" aria-hidden="true">Z</span> zadoo<span class="z-eyebrow"> / remote</span></div>
+                <h1>Your desktop.<br><span>Within reach.</span></h1>
+                <p class="z-muted">A little distance, zero friction. Connect to your Windows PC from the screen in your hand.</p>
+                <div class="auth-points"><span>Browser access</span><span>Host-controlled permissions</span><span>Always free</span></div>
+            </section>
+            <section class="auth-card" aria-labelledby="auth-title">
+            <div class="z-eyebrow">Make the connection</div>
+            <h2 id="auth-title">Welcome back.</h2>
+            <p class="z-muted">Your host PC is one access code away.</p>
             <form id="auth-form">
-                <input type="password" id="auth-code" aria-label="Access code" aria-describedby="auth-hint auth-error" placeholder="Enter Code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
+                <label for="auth-code">Access code</label>
+                <input type="password" id="auth-code" aria-describedby="auth-hint auth-error" placeholder="Enter your access code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
             </form>
-            </div>
             <div class="auth-actions">
                 <button class="auth-submit" id="auth-submit" type="submit" form="auth-form">Connect</button>
                 <p class="auth-hint" id="auth-hint">Enter the access code from the host's Settings. All features are free.</p>
                 <p id="auth-error" role="alert" hidden></p>
             </div>
+            <div class="auth-footnote"><span>No account required.</span><button type="button" class="z-text-button" data-open-support>Support the developer ↗</button></div>
+            </section>
         </div>
     </div>
     <div id="controller-alert-stack" class="controller-alert-stack" aria-live="assertive" aria-atomic="false"></div>
@@ -2305,12 +2316,11 @@
             <span class="view-zoom-label" id="view-zoom-label" aria-live="polite">100%</span>
             <button type="button" id="view-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
             <button type="button" id="view-reset" aria-label="Reset pan and zoom" title="Reset pan and zoom">Reset</button>
-        </div>
-        
-        <!-- Floating Sidebar Trigger -->
+            <span class="dock-divider" aria-hidden="true"></span>
         <button type="button" class="sidebar-trigger" id="sidebar-trigger" title="Open Controls" aria-label="Open controls" aria-controls="sidebar" aria-expanded="false">
-            <div class="trigger-icon"></div>
+            <span class="trigger-icon" aria-hidden="true"></span><span class="dock-controls-label">Controls</span>
         </button>
+        </div>
         
         <!-- Collapsible Sidebar -->
         <div class="sidebar" id="sidebar" aria-label="Remote controls" inert>
@@ -2318,8 +2328,7 @@
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
-                    <img class="sidebar-logo" src="/brand-header.png?v=b0e399b76691" alt="Zadoo Remote Control Panel"/>
-                    <div class="deck-heading"><strong>Remote controls<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
+                    <div class="deck-heading"><strong><span class="z-eyebrow">Zadoo / Your workspace</span>Everything within reach<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
@@ -2380,17 +2389,17 @@
                     <div class="sidebar-section deck-card">
                         <div class="section-title">Clipboard</div>
                         <div class="clipboard-grid">
-                            <button class="sidebar-btn deck-action" id="btn-clipboard-pull" onclick="getRemoteClipboard()" title="Pull from remote">
+                            <button class="sidebar-btn deck-action" id="btn-clipboard-pull" onclick="getRemoteClipboard()" title="Read text from the host PC clipboard">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-download"></use></svg>
-                                <span>Pull</span>
+                                <span>Read text</span>
                             </button>
-                            <button class="sidebar-btn deck-action" id="btn-clipboard-push" onclick="setRemoteClipboard()" title="Push to remote">
+                            <button class="sidebar-btn deck-action" id="btn-clipboard-push" onclick="setRemoteClipboard()" title="Send text to the host PC clipboard">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-upload"></use></svg>
-                                <span>Push</span>
+                                <span>Send text</span>
                             </button>
                             <button class="sidebar-btn deck-action" id="btn-clipboard-image" onclick="selectRemoteClipboardImage()" title="Push image to remote clipboard">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-upload"></use></svg>
-                                <span>Image</span>
+                                <span>Send image</span>
                             </button>
                             <input id="clipboard-image-input" type="file" accept="image/png,image/jpeg" hidden onchange="pushRemoteClipboardImage(this)" />
                         </div>
@@ -2417,6 +2426,7 @@
 
                     <div class="sidebar-section deck-card">
                         <div class="section-title">Focus Area</div>
+                        <p class="quality-help" style="margin:0 0 12px">Send a smaller area of the host screen. Higher scale reduces detail to save bandwidth.</p>
                         <div class="focus-row">
                             <button class="sidebar-btn perf-toggle focus-toggle" id="perf-toggle" onclick="togglePerformanceMode(event)" title="Focus Area">
                                 <span class="btn-label">Off</span>
@@ -2432,7 +2442,7 @@
                                 <option value="2">2x</option>
                                 <option value="3">3x</option>
                             </select>
-                            <label class="perf-check focus-gray" title="Grayscale"><input type="checkbox" id="perf-gray" onchange="sendPerformanceSettings()"> Gray</label>
+                            <label class="perf-check focus-gray" title="Remove color to reduce data usage"><input type="checkbox" id="perf-gray" onchange="sendPerformanceSettings()"> Grayscale · less data</label>
                         </div>
                     </div>
 
@@ -2491,6 +2501,7 @@
                         </div>
                     </div>
 
+                    <button type="button" class="support-entry" data-open-support><span><strong>Enjoying Zadoo?</strong><small>Support the developer · Completely optional</small></span><span class="support-heart" aria-hidden="true">♡</span></button>
                     <div class="sidebar-footer-actions">
                         <button class="public-link-toggle" id="public-link-toggle" onclick="togglePublicLinkPanel(event)" aria-expanded="false" title="Show public link">
                             <span>Public Link</span>
@@ -2602,6 +2613,16 @@
 
         
     </div>
+<dialog id="support-dialog" class="z-dialog" aria-labelledby="support-title" aria-describedby="support-description">
+    <div class="dialog-top"><h2 id="support-title">Support the developer</h2><button type="button" class="dialog-close" aria-label="Close support">&times;</button></div>
+    <p class="support-copy" id="support-description">Made with care by Divyansh Gupta. If Zadoo helps you, you can leave a voluntary tip. Every feature stays free, whether you contribute or not.</p>
+    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.5" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
+    <span class="support-upi">divyanshgupta675@oksbi</span>
+    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.5" download="Zadoo-developer-QR.png">Save QR</a></div>
+    <p class="support-copy">Scan with any UPI app, or save the QR and open it in your payment app. Confirm the recipient is Divyansh Gupta before paying.</p>
+    <div id="support-status" class="support-status" role="status"></div>
+</dialog>
+<script src="/static/ui/studio.js?v=1.1.5" defer></script>
 <script>
     const canvas = document.getElementById('screen');
     if (!canvas) throw new Error('Screen canvas is missing');
@@ -4425,11 +4446,12 @@
 
         function isOverLocalUI(ev) {
             if (window.__splashVisible) return true;
+            if (document.getElementById('support-dialog').open) return true;
             const target = ev && ev.target;
             if (!target || typeof target.closest !== 'function') return false;
             return !!target.closest(
                 '#splash-screen, #sidebar, #notepad-panel, .terminal-panel, #kb-overlay, ' +
-                '#webcam-container, #sidebar-trigger, #view-controls'
+                '#webcam-container, #sidebar-trigger, #view-controls, #support-dialog'
             );
         }
 
@@ -4752,74 +4774,13 @@
         return navigator.clipboard.readText();
     }
 
-    // Draggable trigger functionality
-    let isDragging = false;
-    let dragOffset = { x: 0, y: 0 };
-    let hasBeenDragged = false;
-
+    // The hand control lives in the fixed dock: one click/tap, no accidental dragging.
     function initializeDraggableTrigger() {
         const trigger = document.getElementById('sidebar-trigger');
         if (!trigger) return;
-        trigger.addEventListener('click', event => { if (event.detail === 0) toggleSidebar(); });
+        trigger.addEventListener('click', () => toggleSidebar());
         document.getElementById('sidebar').addEventListener('keydown', event => {
             if (event.key === 'Escape') { event.preventDefault(); toggleSidebar(false); }
-        });
-
-        // Right click: save a lossless snapshot.
-        trigger.addEventListener('contextmenu', function(e){
-            e.preventDefault();
-            const fakeBtn = { currentTarget: { innerHTML: '', disabled: false } };
-            takeFullSnapshot(fakeBtn);
-        });
-
-        trigger.addEventListener('mousedown', function(e) {
-            if (e.target.classList.contains('trigger-button')) return; // Don't drag when clicking the button
-            if (e.button !== 0) return; // Only left button for drag/open
-            
-            isDragging = true;
-            hasBeenDragged = false;
-            trigger.classList.add('dragging');
-            
-            const rect = trigger.getBoundingClientRect();
-            dragOffset.x = e.clientX - rect.left;
-            dragOffset.y = e.clientY - rect.top;
-            
-            e.preventDefault();
-        });
-
-        document.addEventListener('mousemove', function(e) {
-            if (!isDragging) return;
-            
-            hasBeenDragged = true;
-            const x = e.clientX - dragOffset.x;
-            const y = e.clientY - dragOffset.y;
-            
-            // Keep trigger within viewport bounds
-            const maxX = window.innerWidth - trigger.offsetWidth;
-            const maxY = window.innerHeight - trigger.offsetHeight;
-            
-            const boundedX = Math.max(0, Math.min(x, maxX));
-            const boundedY = Math.max(0, Math.min(y, maxY));
-            
-            trigger.style.left = boundedX + 'px';
-            trigger.style.top = boundedY + 'px';
-            trigger.style.right = 'auto';
-            trigger.style.transform = 'none';
-            
-            e.preventDefault();
-        });
-
-        document.addEventListener('mouseup', function(e) {
-            if (e.button !== 0) return; // Only left button opens sidebar
-            if (!isDragging) return;
-            
-            isDragging = false;
-            trigger.classList.remove('dragging');
-            
-            // If it was just a click (not dragged), toggle sidebar
-            if (!hasBeenDragged) {
-                toggleSidebar();
-            }
         });
     }
 
@@ -5742,7 +5703,7 @@ registerProcessor('pcm-player', PcmPlayer);
                 function closeSplash(){
                     window.__splashVisible = false;
                     window.__zadooAuthenticated = true;
-                    document.body.style.overflow = 'auto';
+                    document.body.style.overflow = 'hidden';
                     document.body.classList.remove('splash-active');
                     if (input) input.blur();
                     const canvas = document.getElementById('screen');

@@ -35,7 +35,8 @@ WizardImageFile=wizard-large.bmp
 WizardSmallImageFile=wizard-small.bmp
 Compression=lzma2
 SolidCompression=yes
-WizardStyle=modern
+WizardStyle=modern dark polar includetitlebar
+DisableWelcomePage=no
 SetupLogging=yes
 PrivilegesRequired=admin
 SetupArchitecture=x64
@@ -45,12 +46,16 @@ LicenseFile=..\LICENSE
 InfoBeforeFile=NOTICE.txt
 
 [Messages]
-WelcomeLabel1=Install Zadoo
-WelcomeLabel2=This setup will install Zadoo, create the Windows startup entry, and open the local settings window after Finish.
-FinishedHeadingLabel=Zadoo is ready
-FinishedLabel=Setup has installed Zadoo on this computer. Click Finish to open Settings.
+WelcomeLabel1=Your desktop. Within reach.
+WelcomeLabel2=Welcome to Zadoo — remote access with a clean workspace and every feature free.%n%nSetup installs the Windows app and a startup task for your Windows sign-in. You can change startup behavior in Preferences.%n%nAfter installation, choose an access code, review permissions, and start sharing. You stay in control.
+FinishedHeadingLabel=Your workspace is ready.
+FinishedLabel=Zadoo is installed. Open Settings to get connected:%n%n1. Choose your private access code.%n2. Review what viewers are allowed to do.%n3. Select Start Zadoo, then share your connection link.%n%nNo subscription. No feature unlocks. Optional developer support is available inside the app.
+SelectDirLabel3=Choose where Zadoo will be installed. The default location works for most people.
+SelectTasksLabel2=Choose the shortcuts you would like. Zadoo's Windows startup preference can be changed later in Settings.
+InfoBeforeLabel=Before connecting, take a moment to understand what you are sharing.
 
 [Files]
+Source: "mascot-poses.png"; Flags: dontcopy
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
@@ -64,19 +69,27 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Run]
 Filename: "{cmd}"; Parameters: "/C schtasks /Create /TN ""Zadoo"" /TR ""\""{app}\Zadoo.exe\"""" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden waituntilterminated
-Filename: "{app}\Zadoo.exe"; Parameters: "--settings"; Description: "Launch Zadoo setup"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Zadoo.exe"; Parameters: "--settings"; Description: "Open Zadoo Settings — choose access code and permissions"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C schtasks /Delete /TN ""Zadoo"" /F"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteZadooStartupTask"
 
 [Code]
+#include "story.iss"
+
 function InitializeUninstall(): Boolean;
 begin
   Result := True;
+  { Unattended removal must never wait for input or erase user data. }
+  if UninstallSilent() then
+  begin
+    Log('Silent uninstall: retaining Zadoo settings and logs.');
+    Exit;
+  end;
   if DirExists(ExpandConstant('{localappdata}\Zadoo')) or
      DirExists(ExpandConstant('{commonappdata}\Zadoo')) then
   begin
-    if MsgBox('Delete this Windows user''s Zadoo settings and logs, including any legacy ProgramData copy?', mbConfirmation, MB_YESNO) = IDYES then
+    if SuppressibleMsgBox('Delete this Windows user''s Zadoo settings and logs, including any legacy ProgramData copy?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
     begin
       DelTree(ExpandConstant('{localappdata}\Zadoo'), True, True, True);
       DelTree(ExpandConstant('{commonappdata}\Zadoo'), True, True, True);
