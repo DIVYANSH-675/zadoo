@@ -28,9 +28,9 @@ Logs are under `%LOCALAPPDATA%\Zadoo\logs` and are bounded/rotated. **Export Dia
 
 Zadoo's original code is licensed under Apache-2.0; bundled dependencies retain their own licenses. The build embeds the project license and notice, sets `ProductName=Zadoo` and matching product/file versions, and rejects mismatched Windows metadata.
 
-The free SignPath Foundation application is being prepared, not approved. The current release workflow still requires a separately obtained trusted PFX; it is not connected to SignPath. Do not add a fake certificate, mark an unsigned manifest as signed, or enable the website download before verification.
+The initial free SignPath Foundation application was not approved. Zadoo does not currently have an approved trusted code-signing provider. The trusted-signed release workflow still requires a separately obtained trusted PFX; it is not connected to SignPath. Do not add a fake certificate, mark an unsigned manifest as signed, or describe an unsigned preview as a trusted-signed release.
 
-To complete the SignPath route:
+If pursuing the SignPath route again:
 
 1. The owner completes [the official application](https://signpath.org/apply), provides truthful reputation evidence and contact details, and personally reviews the provider agreements. MFA is required on GitHub and SignPath.
 2. Wait for eligibility/certificate approval and configure the project's named author, reviewer and release-approver roles. Review dependency licensing and the application's network/privacy disclosures with the provider.
@@ -56,7 +56,15 @@ Remove-Item Env:\ZADOO_SIGN_PFX_PASSWORD
 $credential = $null
 ```
 
-Verify every SHA-256 and Authenticode status in `dist/release-manifest.json`. Public artifacts must report `signed: true` and `Valid`. GitHub's protected `release` environment needs `ZADOO_SIGN_PFX_BASE64` and `ZADOO_SIGN_PFX_PASSWORD`. Push an annotated tag matching the package version, then dispatch `windows-x64-release.yml` from that tag. The workflow rejects unsigned output, mismatched versions, and duplicate releases.
+Verify every SHA-256 and Authenticode status in `dist/release-manifest.json`. Trusted-signed release artifacts must report `signed: true` and `Valid`. GitHub's protected `release` environment needs `ZADOO_SIGN_PFX_BASE64` and `ZADOO_SIGN_PFX_PASSWORD`. Push an annotated tag matching the package version, then dispatch `windows-x64-release.yml` from that tag. The workflow rejects unsigned output, mismatched versions, and duplicate releases.
+
+### Approved unsigned preview
+
+The owner explicitly authorized a separate, clearly labelled public preview after the signing application was rejected. [Release `v1.1.5-preview.1`](https://github.com/DIVYANSH-675/zadoo/releases/tag/v1.1.5-preview.1) points to source commit `d0d5b36221abcddc186841e71743f6084099cdf8` and contains `Zadoo-1.1.5-x64-Unsigned-Preview-Setup.exe` (68,666,872 bytes; SHA-256 `8e876885f44f00b0bd0a2072802028dd6b747bd497f0df3a17c4dca5f2bf205b`). This is the locally built and tested installer, not a signed artifact or a claim of CI build provenance.
+
+The preview manifest records `channel: unsigned-preview`, `signed: false` and `authenticode_status: NotSigned`. The website pins this exact prerelease, source commit, size and digest, and uses `/api/download/windows-preview` separately from the unchanged trusted-signed route. A different unsigned binary requires an explicit review and pin update; it is never accepted automatically as a signed fallback.
+
+The website and release notes disclose that Windows may show an unknown-publisher or SmartScreen warning. Do not disable Windows security protections. A checksum confirms file integrity, not publisher identity or software safety.
 
 ## Release-candidate verification
 
