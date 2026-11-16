@@ -50,7 +50,9 @@ The public connection uses a Cloudflare HTTPS tunnel. Traffic passes through Clo
 .\scripts\build_windows.ps1 -NoSelfSign -InstallMissingTools
 ```
 
-Build inputs are hash-locked. Python 3.11.9 x64, Node.js 24.18.0 x64, Inno Setup 7.0.2 x64, and the pinned signed cloudflared binary are verified. Output is under `dist\portable` and `dist\installer`, with a SHA-256 manifest. Unsigned artifacts are for testing; public releases require a real code-signing certificate. The build never creates or trusts a substitute certificate.
+Build inputs are hash-locked. Python 3.11.9 x64, Node.js 24.18.0 x64, Inno Setup 7.0.2 x64, and the pinned signed cloudflared binary are verified. Output is under `dist\portable` and `dist\installer`, with a SHA-256 manifest. Trusted-signed releases require a real code-signing certificate. The build never creates or trusts a substitute certificate.
+
+The owner has separately approved [Zadoo 1.1.5 as an unsigned public preview](https://github.com/DIVYANSH-675/zadoo/releases/tag/v1.1.5-preview.1). Its filename and download page explicitly say **unsigned preview**. Windows may show an unknown-publisher or SmartScreen warning; do not disable Windows security protections. The checksum identifies the reviewed file but does not authenticate its publisher or guarantee software safety. Download and verification details are on the [official website](https://zadoo-web.vercel.app/download). The trusted-signed release workflow remains unchanged.
 
 ## Verify
 
