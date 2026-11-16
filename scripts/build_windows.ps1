@@ -399,6 +399,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Windows release metadata regression test failed" }
     & $PythonExe scripts\installer_ui_test.py
     if ($LASTEXITCODE -ne 0) { throw "Installer UI regression test failed" }
+    & $PythonExe scripts\settings_ui_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Configure window layout checks failed" }
     $node = Resolve-Node
     $env:Path = (Split-Path -Parent $node) + [System.IO.Path]::PathSeparator + $env:Path
     & $PythonExe scripts\check_template_js.py

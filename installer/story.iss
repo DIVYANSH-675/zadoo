@@ -23,6 +23,8 @@ var
   StoryClips: array[0..2] of TPanel;
   StorySprites: array[0..2] of TBitmapImage;
   StoryClipTops: array[0..2] of Integer;
+  StorySparkles: array[0..17] of TPanel;
+  StorySparkleTops: array[0..17] of Integer;
   StoryMotion: TNewCheckBox;
   StoryStep: TNewStaticText;
   StoryInstallTitle: TNewStaticText;
@@ -64,6 +66,8 @@ begin
 end;
 
 procedure AddStorySprite(Parent: TWinControl; Scene, X, Y, Size, Pose: Integer);
+var
+  I, Index, SparkX, SparkY: Integer;
 begin
   StoryClips[Scene] := AddStoryPanel(Parent, X, Y, Size, Size);
   StoryClipTops[Scene] := Y;
@@ -74,6 +78,17 @@ begin
   StorySprites[Scene].Stretch := True;
   StorySprites[Scene].PngImage.LoadFromFile(ExpandConstant('{tmp}\mascot-poses.png'));
   SetStoryPose(Scene, Pose);
+  { Reuse native controls for tiny confetti, not GIFs, web views or new assets. }
+  for I := 0 to 5 do
+  begin
+    Index := Scene * 6 + I;
+    if I mod 2 = 0 then SparkX := X + Size div 10
+    else SparkX := X + Size * 9 div 10;
+    SparkY := Y + Size * (2 + (I div 2) * 2) div 10;
+    StorySparkles[Index] := AddStoryPanel(Parent, SparkX, SparkY, ScaleX(3 + I mod 2), ScaleY(3 + I mod 2));
+    StorySparkles[Index].Color := StoryCyan;
+    StorySparkleTops[Index] := SparkY;
+  end;
 end;
 
 procedure StopStoryMotion();
@@ -87,6 +102,12 @@ begin
   end;
   for I := 0 to 2 do
     if StoryClips[I] <> nil then StoryClips[I].Top := StoryClipTops[I];
+  for I := 0 to 17 do
+    if StorySparkles[I] <> nil then
+    begin
+      StorySparkles[I].Top := StorySparkleTops[I];
+      StorySparkles[I].Color := StoryMuted;
+    end;
   if StoryActiveScene >= 0 then
     if StorySprites[StoryActiveScene] <> nil then
       SetStoryPose(StoryActiveScene, StoryBasePose);
@@ -94,7 +115,7 @@ end;
 
 procedure StoryTimerTick(Window: HWND; Message: UINT; Event: UINT_PTR; Time: DWORD);
 var
-  Phase, Offset, Pose: Integer;
+  Phase, Offset, Pose, I, Index: Integer;
 begin
   Inc(StoryTick);
   #ifdef ZadooVisualPreview
@@ -110,11 +131,21 @@ begin
   if (StoryActiveScene < 0) or (GetForegroundWindow() <> WizardForm.Handle) then Exit;
   Phase := StoryTick mod 24;
   if Phase > 12 then Phase := 24 - Phase;
-  Offset := (Phase div 3) - 2;
+  Offset := (Phase div 2) - 3;
   StoryClips[StoryActiveScene].Top := StoryClipTops[StoryActiveScene] + ScaleY(Offset);
   Pose := StoryBasePose;
-  if (StoryActiveScene = 0) and ((StoryTick mod 36) >= 33) then Pose := 1;
+  if (StoryActiveScene = 0) and ((StoryTick mod 36) >= 27) then Pose := 1;
+  if (StoryActiveScene = 1) and ((StoryTick mod 32) >= 24) then Pose := 1;
+  if (StoryActiveScene = 2) and ((StoryTick mod 32) >= 24) then Pose := 0;
   SetStoryPose(StoryActiveScene, Pose);
+  for I := 0 to 5 do
+  begin
+    Index := StoryActiveScene * 6 + I;
+    Phase := (StoryTick + I * 4) mod 24;
+    StorySparkles[Index].Top := StorySparkleTops[Index] - ScaleY(Phase div 2);
+    if Phase < 16 then StorySparkles[Index].Color := StoryCyan
+    else StorySparkles[Index].Color := StoryMuted;
+  end;
   #ifdef ZadooVisualPreview
   if (StoryTick = 8) or (StoryTick = 24) then
     Log('Zadoo story: rendered scene=' + IntToStr(StoryActiveScene) + ' pose=' + IntToStr(Pose) + ' offset=' + IntToStr(Offset));
@@ -218,7 +249,7 @@ begin
   StoryMotion.Caption := 'Animations';
   StoryMotion.SetBounds(ScaleX(16), WizardForm.NextButton.Top, ScaleX(94), WizardForm.NextButton.Height);
   StoryMotion.Anchors := [akLeft, akBottom];
-  StoryMotion.Hint := 'Optional character motion. Starts with your Windows animation preference.';
+  StoryMotion.Hint := 'Optional character motion and confetti. Starts with your Windows animation preference.';
   AllowMotion := False;
   if ReadAnimationPreference(SPI_GETCLIENTAREAANIMATION, 0, AllowMotion, 0) then
     StoryMotion.Checked := AllowMotion;
