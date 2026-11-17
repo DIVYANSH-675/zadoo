@@ -32,6 +32,7 @@ def main():
         context.add_init_script("""(() => {
             window.__testListeners = {};
             window.__testInput = [];
+            window.__testLocalRequests = [];
             Object.defineProperty(navigator, 'clipboard', {value: {writeText: async value => { window.__testClipboard = value; }}});
             const add = EventTarget.prototype.addEventListener;
             EventTarget.prototype.addEventListener = function(name, ...rest) {
@@ -43,6 +44,7 @@ def main():
             WebSocket.prototype.send = function(data) {
                 if (new URL(this.url).pathname === '/input' && typeof data === 'string') {
                     const value = JSON.parse(data);
+                    if (value.action === 'get_public_url') window.__testLocalRequests.push(value.action);
                     if (['move','drag','click','key','scroll'].includes(value.action)) {
                         window.__testInput.push(value); return;
                     }
@@ -53,6 +55,8 @@ def main():
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(args.base, wait_until="domcontentloaded")
+        page.wait_for_function("document.querySelector('.splash-art img').naturalWidth === 1200")
+        expect(page.locator(".splash-art img")).to_have_attribute("src", "/splash.png?v=a8ff7f23c7aa")
         check(not page.locator("#support-qr").get_attribute("src"), "QR must load only when support is opened")
         for width, height in [(320, 568), (390, 844), (768, 1024), (667, 375), (844, 390), (1280, 900)]:
             page.set_viewport_size({"width": width, "height": height})
@@ -91,10 +95,14 @@ def main():
         page.locator("#sidebar-trigger").press("Enter")
         expect(page.locator("#sidebar-trigger")).to_have_attribute("aria-expanded", "true")
         expect(page.locator(".deck-close")).to_be_focused()
+        page.wait_for_function("document.querySelector('.sidebar-logo').naturalWidth === 768")
         check(page.locator("#sidebar #view-controls").count() == 1, "View controls must live inside the sidebar")
+        panel = page.locator("#sidebar").bounding_box()
+        check(panel and abs(panel["width"] - 300) < 1, "The approved sidebar must stay compact")
+        check("free" not in page.locator("#sidebar").inner_text().lower(), "Do not show a free badge in the sidebar")
         for button in ["#view-mode", "#view-zoom-out", "#view-zoom-in", "#view-reset"]:
             box = page.locator(button).bounding_box()
-            check(box and min(box["width"], box["height"]) >= 44, f"Small touch target: {button}")
+            check(box and min(box["width"], box["height"]) >= 30, f"Small desktop target: {button}")
         page.locator("#view-zoom-in").click()
         expect(page.locator("#view-zoom-label")).to_have_text("125%")
         page.locator("#view-zoom-out").click()
@@ -107,7 +115,38 @@ def main():
         page.locator("#view-mode").click()
         expect(page.locator("#view-mode")).to_have_text("Fit")
         check(page.locator("#sidebar").evaluate("e => getComputedStyle(e).transitionProperty === 'transform, visibility'"), "Panel must animate position, not layout")
+        expect(page.locator("#sidebar-fps")).not_to_be_visible()
+        page.locator("#connection-details > summary").press("Enter")
         expect(page.locator("#sidebar-fps")).to_be_visible()
+        page.locator("#connection-details > summary").press("Enter")
+        expect(page.locator("#sidebar-fps")).not_to_be_visible()
+        page.locator("#capture-details > summary").press("Enter")
+        expect(page.locator("#perf-region")).to_be_visible()
+        page.locator("#capture-details > summary").press("Enter")
+        expect(page.locator("#perf-region")).not_to_be_visible()
+        page.evaluate("""() => {
+            window.__testPublicResponses = [];
+            window.inputSocket.addEventListener('message', event => {
+                const value = JSON.parse(event.data);
+                if (value.type === 'public_url_response') window.__testPublicResponses.push(value);
+            });
+        }""")
+        previous_requests = page.evaluate("window.__testLocalRequests.length")
+        page.locator("#public-link-toggle").press("Enter")
+        expect(page.locator("#public-link-section")).to_be_visible()
+        page.wait_for_function("previous => window.__testLocalRequests.length > previous", arg=previous_requests)
+        page.wait_for_function("window.__testPublicResponses.length > 0")
+        response = page.evaluate("window.__testPublicResponses.at(-1)")
+        expect(page.locator("#link-text")).to_have_text(response["url"] if response["success"] else response["error"])
+        page.locator("#public-link-toggle").press("Enter")
+        expect(page.locator("#public-link-section")).not_to_be_visible()
+        page.locator("#device-settings-toggle").click()
+        expect(page.locator("#device-settings-panel")).to_be_visible()
+        expect(page.locator("#camera-select-trigger")).to_be_visible()
+        expect(page.locator("#mic-select")).to_be_visible()
+        check(page.locator("#sidebar").evaluate("e => e.scrollWidth <= e.clientWidth"), "Device settings overflow")
+        page.locator("#device-settings-toggle").click()
+        expect(page.locator("#device-settings-panel")).not_to_be_visible()
         page.locator("#quality-slider").press("End")
         expect(page.locator("#quality-auto")).to_have_attribute("aria-pressed", "false")
         page.locator("#quality-auto").click()
@@ -159,7 +198,7 @@ def main():
         check(page.locator("#sidebar").evaluate("e => getComputedStyle(e).transitionDuration === '0s'"), "Reduced motion is not respected")
         check(not errors, errors)
         browser.close()
-    print(json.dumps({"authentication_form": "pass", "keyboard_panel_navigation": "pass", "fit_zoom_reset": "pass", "optional_support": "pass", "quality_manual_auto": "pass", "reconnects_without_duplicate_input": 5, "mobile_tablet_widths": [320, 390, 768, 820, 844, 1280], "reduced_motion": "pass", "browser_errors": errors}, indent=2))
+    print(json.dumps({"authentication_form": "pass", "keyboard_panel_navigation": "pass", "native_disclosures_and_public_link_refresh": "pass", "compact_sidebar_without_free_badge": "pass", "fit_zoom_reset": "pass", "optional_support": "pass", "quality_manual_auto": "pass", "reconnects_without_duplicate_input": 5, "mobile_tablet_widths": [320, 390, 768, 820, 844, 1280], "reduced_motion": "pass", "browser_errors": errors}, indent=2))
 
 
 if __name__ == "__main__":

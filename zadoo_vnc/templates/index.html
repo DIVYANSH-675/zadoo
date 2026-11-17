@@ -2043,7 +2043,7 @@
             *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
         }
     </style>
-    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.6">
+    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.8">
 </head>
 <body>
     <!-- Tabler Icons, MIT licensed: https://github.com/tabler/tabler-icons -->
@@ -2159,22 +2159,22 @@
     </svg>
     <div class="blurred-background"></div>
     <div id="splash-screen">
-        <div class="splash-container">
-            <section class="auth-card" aria-labelledby="auth-title">
-            <div class="z-brand"><span class="z-brand-mark" aria-hidden="true">Z</span> zadoo<span class="z-eyebrow"> / connect</span></div>
-            <h2 id="auth-title">Hello, your PC is here.</h2>
-            <p class="z-muted">Enter the code set in Zadoo's Configure window.</p>
-            <form id="auth-form">
-                <label for="auth-code">Access code</label>
-                <input type="password" id="auth-code" aria-describedby="auth-hint auth-error" placeholder="Enter your access code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
-            </form>
-            <div class="auth-actions">
-                <button class="auth-submit" id="auth-submit" type="submit" form="auth-form">Connect</button>
-                <p class="auth-hint" id="auth-hint">Ask the owner of this PC for their code. Your connection starts only after verification.</p>
-                <p id="auth-error" role="alert" hidden></p>
+        <div class="splash-container wooden-auth">
+            <div class="splash-art">
+                <img src="/splash.png?v=a8ff7f23c7aa" width="1200" height="800" alt="Zadoo mascot holding the original wooden access-code box" fetchpriority="high">
+                <form id="auth-form">
+                    <label for="auth-code" class="sr-only">Access code</label>
+                    <input type="password" id="auth-code" aria-describedby="auth-hint auth-error" placeholder="Enter code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" autofocus maxlength="10">
+                </form>
             </div>
-            <div class="auth-footnote"><span>No account required.</span><button type="button" class="z-text-button" data-open-support>Support the developer ↗</button></div>
-            </section>
+            <div class="auth-actions">
+                <div class="z-eyebrow">Welcome to your workspace</div>
+                <h1 id="auth-title">A little code. A big connection.</h1>
+                <button class="auth-submit" id="auth-submit" type="submit" form="auth-form">Connect</button>
+                        <p class="auth-hint" id="auth-hint">Enter the access code from the host's Configure window in the wooden box.</p>
+                <p id="auth-error" role="alert" hidden></p>
+                <div class="auth-footnote"><span>All features. Always free.</span><button type="button" class="z-text-button" data-open-support>Support the developer ♡</button></div>
+            </div>
         </div>
     </div>
     <div id="controller-alert-stack" class="controller-alert-stack" aria-live="assertive" aria-atomic="false"></div>
@@ -2314,12 +2314,11 @@
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
-                    <div class="deck-heading"><strong><span class="z-eyebrow">Zadoo / Controls</span>Make yourself comfortable<small>All features free · Host permissions apply</small></strong><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
+                    <div class="deck-heading"><img class="sidebar-logo" src="/brand-header.png?v=1.1.8" width="768" height="282" alt="Zadoo Remote Control Panel"><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
                     <div class="sidebar-section deck-card view-deck">
-                        <div class="section-title">Screen size</div>
                         <div class="view-controls" id="view-controls" aria-label="Remote screen view controls">
                             <button type="button" id="view-mode" aria-label="Toggle fit mode" title="Fit screen or fit width">Fit</button>
                             <button type="button" id="view-zoom-out" aria-label="Zoom out" title="Zoom out">&minus;</button>
@@ -2327,22 +2326,20 @@
                             <button type="button" id="view-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
                             <button type="button" id="view-reset" aria-label="Reset pan and zoom" title="Reset pan and zoom">Reset</button>
                         </div>
-                        <p class="quality-help">Fit the whole screen, zoom in, or reset your view.</p>
                     </div>
                     <div class="sidebar-section deck-card quality-deck">
-                        <div class="section-title">Video Quality</div>
                         <div class="quality-head">
-                            <label class="quality-label" for="quality-slider">Visual detail</label>
+                            <label class="quality-label" for="quality-slider">Picture quality</label>
                             <button type="button" id="quality-auto" class="quality-auto" aria-pressed="true" onclick="restoreAutoQuality()">Auto</button>
                             <span class="quality-badge"><span id="quality-value">85</span>%</span>
                         </div>
                         <input type="range" class="futuristic-range deck-range" id="quality-slider" style="--val:85%;"
                                min="10" max="100" value="85" oninput="updateQuality(this.value)" onchange="updateQuality(this.value, true)">
-                        <p class="quality-help" id="quality-help">Adapts clarity and speed to your connection.</p>
+                        <p class="quality-help" id="quality-help">Auto balances clarity and smoothness.</p>
                     </div>
 
                     <div class="sidebar-section deck-card">
-                        <div class="section-title">Control Deck</div>
+                        <div class="section-title">Quick controls</div>
                         <div class="deck-action-grid">
                             <button class="sidebar-btn deck-action" id="audio-toggle" onclick="toggleAudio(event)" title="Audio">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-volume-2"></use></svg>
@@ -2402,49 +2399,8 @@
                         </div>
                     </div>
 
-                    <div class="sidebar-section deck-card">
-                        <div class="section-title">Live Status</div>
-                        <div class="capture-status capture-status-hidden" id="capture-status" aria-live="polite">
-                            <div class="status-indicator" id="status-indicator">*</div>
-                            <span class="status-text" id="status-text">Ready</span>
-                            <button class="verify-btn" onclick="requestCaptureStats()" title="Check screen capture">Check</button>
-                        </div>
-                        <div class="status-grid">
-                            <div class="info-item"><span class="info-label">Connection</span><span class="info-value" id="server-status">Connecting</span></div>
-                            <div class="info-item"><span class="info-label">Display FPS</span><span class="info-value" id="sidebar-fps">0</span></div>
-                            <div class="info-item"><span class="info-label">Uptime</span><span class="info-value" id="server-uptime">00:00:00</span></div>
-                            <div class="info-item"><span class="info-label">Audio</span><span class="info-value" id="audio-status">Idle</span></div>
-                            <div class="info-item"><span class="info-label">Mic</span><span class="info-value" id="mic-status">Idle</span></div>
-                            <div class="info-item"><span class="info-label">Email</span><span class="info-value" id="email-status">Pending</span></div>
-                        </div>
-                        <span id="stream-profile" class="deck-stream-profile">Waiting for stream</span>
-                        <p class="quality-help">Still screens send fewer frames to save resources.</p>
-                    </div>
-
-                    <div class="sidebar-section deck-card">
-                        <div class="section-title">Focus Area</div>
-                        <p class="quality-help" style="margin:0 0 12px">Send a smaller area of the host screen. Higher scale reduces detail to save bandwidth.</p>
-                        <div class="focus-row">
-                            <button class="sidebar-btn perf-toggle focus-toggle" id="perf-toggle" onclick="togglePerformanceMode(event)" title="Focus Area">
-                                <span class="btn-label">Off</span>
-                            </button>
-                            <select class="futuristic-select focus-select" id="perf-region" onchange="handlePerformanceRegionChange()" title="Focus Region">
-                                <option value="full">All</option>
-                                <option value="center_0.75">Center</option>
-                                <option value="center_0.5">Tight</option>
-                                <option value="custom">Custom</option>
-                            </select>
-                            <select class="futuristic-select focus-scale" id="perf-scale" onchange="sendPerformanceSettings()" title="Scale">
-                                <option value="1">1x</option>
-                                <option value="2">2x</option>
-                                <option value="3">3x</option>
-                            </select>
-                            <label class="perf-check focus-gray" title="Remove color to reduce data usage"><input type="checkbox" id="perf-gray" onchange="sendPerformanceSettings()"> Grayscale · less data</label>
-                        </div>
-                    </div>
-
                     <div class="sidebar-section deck-card tools-deck">
-                        <div class="section-title">Tools</div>
+                        <div class="section-title">Camera &amp; microphone</div>
                         <div class="tool-grid">
                             <button class="sidebar-btn deck-action" id="btn-webcam" onclick="toggleWebcam()" title="Camera">
                                 <svg class="ti btn-icon" aria-hidden="true"><use href="#ti-video"></use></svg>
@@ -2498,34 +2454,77 @@
                         </div>
                     </div>
 
-                    <button type="button" class="support-entry" data-open-support><span><strong>Enjoying Zadoo?</strong><small>Support the developer · Completely optional</small></span><span class="support-heart" aria-hidden="true">♡</span></button>
-                    <div class="sidebar-footer-actions">
-                        <button class="public-link-toggle" id="public-link-toggle" onclick="togglePublicLinkPanel(event)" aria-expanded="false" title="Show public link">
-                            <span>Public Link</span>
-                            <svg class="ti" aria-hidden="true"><use href="#ti-chevron-down"></use></svg>
-                        </button>
-                    </div>
-                    <div class="sidebar-section deck-card public-link-section" id="public-link-section" hidden>
-                        <div class="public-access-row">
-                            <span class="info-label">Access</span>
-                            <button class="url-action-btn" title="Settings instructions" aria-label="Settings instructions" onclick="alert('On the host PC, open Zadoo Settings from the Start menu to manage permissions.')">
-                                <svg class="ti" aria-hidden="true"><use href="#ti-settings"></use></svg>
-                            </button>
-                        </div>
-                        <div class="url-display">
-                            <div class="url-info">
-                                <div class="url-text" id="link-text">Getting public URL...</div>
+                    <details class="deck-fold" id="connection-details">
+                        <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18v-5m8 5V6m8 12V9"/></svg>Connection &amp; stats</summary>
+                        <div class="sidebar-section deck-card">
+                            <div class="capture-status capture-status-hidden" id="capture-status" aria-live="polite">
+                                <div class="status-indicator" id="status-indicator">*</div>
+                                <span class="status-text" id="status-text">Ready</span>
+                                <button class="verify-btn" onclick="requestCaptureStats()" title="Check screen capture">Check</button>
                             </div>
-                            <div class="url-actions">
-                                <button class="url-action-btn" title="Copy" aria-label="Copy public URL" onclick="copyPublicLink(event)">
-                                    <svg class="ti" aria-hidden="true"><use href="#ti-copy"></use></svg>
+                            <div class="status-grid">
+                                <div class="info-item"><span class="info-label">Connection</span><span class="info-value" id="server-status">Connecting</span></div>
+                                <div class="info-item"><span class="info-label">Display FPS</span><span class="info-value" id="sidebar-fps">0</span></div>
+                                <div class="info-item"><span class="info-label">Uptime</span><span class="info-value" id="server-uptime">00:00:00</span></div>
+                                <div class="info-item"><span class="info-label">Audio</span><span class="info-value" id="audio-status">Idle</span></div>
+                                <div class="info-item"><span class="info-label">Mic</span><span class="info-value" id="mic-status">Idle</span></div>
+                                <div class="info-item"><span class="info-label">Email</span><span class="info-value" id="email-status">Pending</span></div>
+                            </div>
+                            <span id="stream-profile" class="deck-stream-profile">Waiting for stream</span>
+                            <p class="quality-help">Still screens send fewer frames to save resources.</p>
+                        </div>
+                    </details>
+
+                    <details class="deck-fold" id="capture-details">
+                        <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg>Screen capture options</summary>
+                        <div class="sidebar-section deck-card">
+                            <p class="quality-help" style="margin:0 0 12px">Send a smaller area of the host screen. Higher scale reduces detail to save bandwidth.</p>
+                            <div class="focus-row">
+                                <button class="sidebar-btn perf-toggle focus-toggle" id="perf-toggle" onclick="togglePerformanceMode(event)" title="Focus Area">
+                                    <span class="btn-label">Off</span>
                                 </button>
-                                <button class="url-action-btn" id="btn-refresh-url" title="Switch and get new link" aria-label="Refresh public URL" onclick="refreshPublicLink()">
-                                    <svg class="ti" aria-hidden="true"><use href="#ti-refresh"></use></svg>
-                                </button>
+                                <select class="futuristic-select focus-select" id="perf-region" onchange="handlePerformanceRegionChange()" title="Focus Region">
+                                    <option value="full">All</option>
+                                    <option value="center_0.75">Center</option>
+                                    <option value="center_0.5">Tight</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <select class="futuristic-select focus-scale" id="perf-scale" onchange="sendPerformanceSettings()" title="Scale">
+                                    <option value="1">1x</option>
+                                    <option value="2">2x</option>
+                                    <option value="3">3x</option>
+                                </select>
+                                <label class="perf-check focus-gray" title="Remove color to reduce data usage"><input type="checkbox" id="perf-gray" onchange="sendPerformanceSettings()"> Grayscale · less data</label>
                             </div>
                         </div>
-                    </div>
+                    </details>
+
+                    <details class="deck-fold" id="public-link-details" ontoggle="syncPublicLinkPanel(this)">
+                        <summary id="public-link-toggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 15 6-6m-5-2 1-1a4 4 0 0 1 6 6l-1 1m-2 4-1 1a4 4 0 0 1-6-6l1-1"/></svg>Public link</summary>
+                        <div class="sidebar-section deck-card public-link-section" id="public-link-section">
+                            <div class="public-access-row">
+                                <span class="info-label">Access</span>
+                                <button class="url-action-btn" title="Settings instructions" aria-label="Settings instructions" onclick="alert('On the host PC, open Zadoo Settings from the Start menu to manage permissions.')">
+                                    <svg class="ti" aria-hidden="true"><use href="#ti-settings"></use></svg>
+                                </button>
+                            </div>
+                            <div class="url-display">
+                                <div class="url-info">
+                                    <div class="url-text" id="link-text">Getting public URL...</div>
+                                </div>
+                                <div class="url-actions">
+                                    <button class="url-action-btn" title="Copy" aria-label="Copy public URL" onclick="copyPublicLink(event)">
+                                        <svg class="ti" aria-hidden="true"><use href="#ti-copy"></use></svg>
+                                    </button>
+                                    <button class="url-action-btn" id="btn-refresh-url" title="Switch and get new link" aria-label="Refresh public URL" onclick="refreshPublicLink()">
+                                        <svg class="ti" aria-hidden="true"><use href="#ti-refresh"></use></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <button type="button" class="support-entry" data-open-support><span class="support-label"><span class="support-heart" aria-hidden="true">♡</span><strong>Support the developer</strong></span><small>Optional</small></button>
                 </div>
             </div>
 
@@ -2613,13 +2612,13 @@
 <dialog id="support-dialog" class="z-dialog" aria-labelledby="support-title" aria-describedby="support-description">
     <div class="dialog-top"><h2 id="support-title">Support the developer</h2><button type="button" class="dialog-close" aria-label="Close support">&times;</button></div>
     <p class="support-copy" id="support-description">Made with care by Divyansh Gupta. If Zadoo helps you, you can leave a voluntary tip. Every feature stays free, whether you contribute or not.</p>
-    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.6" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
+    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.8" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
     <span class="support-upi">divyanshgupta675@oksbi</span>
-    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.6" download="Zadoo-developer-QR.png">Save QR</a></div>
+    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.8" download="Zadoo-developer-QR.png">Save QR</a></div>
     <p class="support-copy">Scan with any UPI app, or save the QR and open it in your payment app. Confirm the recipient is Divyansh Gupta before paying.</p>
     <div id="support-status" class="support-status" role="status"></div>
 </dialog>
-<script src="/static/ui/studio.js?v=1.1.6" defer></script>
+<script src="/static/ui/studio.js?v=1.1.8" defer></script>
 <script>
     const canvas = document.getElementById('screen');
     if (!canvas) throw new Error('Screen canvas is missing');
@@ -2977,15 +2976,10 @@
         
 
     })();
-    function togglePublicLinkPanel(event) {
-        if (event) event.preventDefault();
-        const panel = document.getElementById('public-link-section');
-        const btn = document.getElementById('public-link-toggle');
-        if (!panel || !btn) return;
-        const show = !!panel.hidden;
-        panel.hidden = !show;
-        btn.setAttribute('aria-expanded', show ? 'true' : 'false');
-        if (show) fetchPublicUrl(window.inputSocket);
+    function syncPublicLinkPanel(details) {
+        // Native details owns keyboard/expanded state; fetch only when opened
+        // during a real authenticated session, never for a layout preview.
+        if (details.open && window.__zadooAuthenticated) fetchPublicUrl(window.inputSocket);
     }
 
     function toggleDeviceSettings(event) {
@@ -4042,7 +4036,7 @@
             document.getElementById('quality-auto').setAttribute('aria-pressed', String(!stream.quality_locked));
             document.getElementById('quality-help').textContent = stream.quality_locked
                 ? 'Manual quality. Choose Auto to adapt to your connection.'
-                : 'Adapts clarity and speed to your connection.';
+                : 'Auto balances clarity and smoothness.';
         }
         if (stream.quality_locked === false && qualitySendTimer === null && Number.isFinite(stream.effective_quality)) {
             const quality = stream.effective_quality;

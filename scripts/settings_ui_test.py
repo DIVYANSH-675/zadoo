@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import sys
 import tempfile
@@ -12,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from zadoo_vnc.settings import PERMISSION_KEYS, SettingsStore  # noqa: E402
-from zadoo_vnc.settings_window import ZadooSettingsWindow  # noqa: E402
+from zadoo_vnc.settings_window import StudioCard, ZadooSettingsWindow  # noqa: E402
 
 
 def descendants(widget):
@@ -30,6 +31,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
+    if not args.preview:
+        # Geometry callbacks must settle. A hidden-tab wrapping regression once
+        # kept Tk's idle queue busy forever before the assertions could run.
+        faulthandler.dump_traceback_later(30, exit=True)
     with tempfile.TemporaryDirectory(prefix="zadoo-ui-test-") as folder, \
             patch("zadoo_vnc.settings_window.startup_task_exists", return_value=False), \
             patch.object(ZadooSettingsWindow, "_poll_runtime_status"), \
@@ -48,7 +53,8 @@ def main():
         errors = []
         app.root.report_callback_exception = lambda _kind, value, _trace: errors.append(str(value))
         try:
-            for width, height in ((480, 360), (640, 480), (880, 700)):
+            check(app._brand_large.width() > 0 and app._mascot_image.width() > 0, "Original Zadoo branding did not load")
+            for width, height in ((480, 360), (640, 480), (880, 700), (1060, 740)):
                 app.root.geometry(f"{int(width * app._ui_scale)}x{int(height * app._ui_scale)}")
                 for tab in range(5):
                     app.tabs.select(tab)
@@ -58,6 +64,10 @@ def main():
                     left = canvas.winfo_rootx()
                     right = left + canvas.winfo_width()
                     for widget in descendants(canvas):
+                        if isinstance(widget, StudioCard) and widget.winfo_ismapped():
+                            check(widget._shell.winfo_x() == 0 and widget._shell.winfo_y() == 0
+                                  and widget._shell.winfo_width() == widget.winfo_width(),
+                                  "Rounded card surface must include the content padding")
                         if not widget.winfo_ismapped() or widget.winfo_class() not in ("TButton", "TEntry", "TCheckbutton", "TLabel"):
                             continue
                         x = widget.winfo_rootx()
@@ -65,9 +75,10 @@ def main():
                             errors.append(f"{width}x{height} tab {tab}: {widget.winfo_class()} exceeds page width: {widget}")
                     if app.status_label.winfo_height() == 1:
                         errors.append(f"Footer clipped at {width}x{height}")
-                expected_columns = 3 if width < 700 else 5
+                expected_columns = 1 if width >= 820 else (5 if width >= 650 else 3)
                 if app._nav_columns != expected_columns:
                     errors.append(f"Navigation did not reflow at {width}px")
+                check(app._wide_shell == (width >= 820), f"Configure shell did not reflow at {width}px")
             payload = app._collect_payload()
             check(set(payload["permissions"]) == set(PERMISSION_KEYS), "Permission mapping changed")
             check(payload["access_code"] == "UI-PREVIEW", "Access code changed")
@@ -102,7 +113,8 @@ def main():
             check(not errors, "\n".join(errors))
         finally:
             app.root.destroy()
-        print(json.dumps({"native_layouts": ["480x360", "640x480", "880x700"], "pages": 5,
+            faulthandler.cancel_dump_traceback_later()
+        print(json.dumps({"native_layouts": ["480x360", "640x480", "880x700", "1060x740"], "pages": 5,
                           "permission_mapping": "pass", "support_dialog": "pass", "callback_errors": errors}, indent=2))
 
 

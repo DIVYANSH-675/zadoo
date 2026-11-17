@@ -31,14 +31,15 @@ from .settings import (
 )
 from .windows_startup import set_startup_task, startup_task_exists
 
-BG = "#080e14"
-SURFACE = "#101e29"
-SURFACE_ALT = "#19323f"
-TEXT = "#edf8ff"
-MUTED = "#a2bac9"
-BORDER = "#304d5e"
-ACCENT = "#60dbea"
-ACCENT_DARK = "#89e9f3"
+BG = "#10171c"
+SURFACE = "#1a2933"
+SURFACE_ALT = "#263d4b"
+TEXT = "#f2f7fa"
+MUTED = "#a5bac5"
+BORDER = "#354d59"
+ACCENT = "#43cdeb"
+ACCENT_DARK = "#7be1f5"
+GOLD = "#ffbc55"
 DANGER = "#ffaaaa"
 SUPPORT_UPI = "divyanshgupta675@oksbi"
 
@@ -180,6 +181,45 @@ def _windows_animations_enabled() -> bool:
         return False
 
 
+def _wrap_visible_label(label: ttk.Label, minimum: int = 100) -> None:
+    """Wrap to allocated width, never to a hidden notebook page's requested size."""
+    def resize(_event):
+        if not label.winfo_viewable():
+            return
+        width = max(minimum, label.winfo_width() - 4)
+        if int(label.cget("wraplength") or 0) != width:
+            label.configure(wraplength=width)
+    label.bind("<Configure>", resize)
+    label.bind("<Map>", resize)
+
+
+class StudioCard(ttk.Frame):
+    """Rounded, resize-only native surface; no timers, images or third-party widgets."""
+
+    def __init__(self, parent, title: str = "", padding: int = 16):
+        super().__init__(parent, style="CardShell.TFrame", padding=padding)
+        self._shell = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0, takefocus=False)
+        # Paint through the padding as well; the default "inside" mode shrinks
+        # the surface to the content area and makes text appear edge-aligned.
+        self._shell.place(x=0, y=0, relwidth=1, relheight=1, bordermode="ignore")
+        self.tk.call("lower", self._shell._w)
+        self._shell.bind("<Configure>", self._paint)
+        if title:
+            label = ttk.Label(self, text=title, style="CardTitle.TLabel", wraplength=220)
+            label.pack(fill="x", pady=(0, 12))
+            _wrap_visible_label(label)
+
+    def _paint(self, event) -> None:
+        w, h = event.width - 1, event.height - 1
+        r = min(20, w / 2, h / 2)
+        self._shell.delete("surface")
+        self._shell.create_polygon(
+            r, 1, w-r, 1, w, 1, w, r, w, h-r, w, h, w-r, h,
+            r, h, 1, h, 1, h-r, 1, r, 1, 1,
+            smooth=True, splinesteps=18, fill=SURFACE, outline=BORDER, tags="surface",
+        )
+
+
 class ZadooSettingsWindow:
     def __init__(self, store: SettingsStore | None = None):
         self.store = store or get_settings_store()
@@ -199,7 +239,7 @@ class ZadooSettingsWindow:
         self.root.tk.call("tk", "scaling", dpi / 72.0)
         self.root.minsize(min(int(480 * self._ui_scale), self.root.winfo_screenwidth() - 40),
                           min(int(360 * self._ui_scale), self.root.winfo_screenheight() - 96))
-        self._fit_geometry(880, 700)
+        self._fit_geometry(1060, 740)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.root.bind("<Unmap>", self._on_unmap)
@@ -231,8 +271,10 @@ class ZadooSettingsWindow:
         self._motion_tick = 0
         self.motion_var = tk.BooleanVar(value=_windows_animations_enabled())
         self._build_style()
+        self._load_brand_images()
         self._build_ui()
         self.reload()
+        self._apply_native_titlebar()
         self._wire_autosave()  # settings persist automatically (no Save button)
         self._poll_runtime_status()  # start the live public-link / running-state poll
         if self._dashboard_linked():
@@ -243,13 +285,15 @@ class ZadooSettingsWindow:
         style.theme_use("clam")
         style.configure(".", font=("Segoe UI", 10), background=BG, foreground=TEXT)
         style.configure("Root.TFrame", background=BG)
+        style.configure("CardShell.TFrame", background=BG)
         style.configure("Surface.TFrame", background=SURFACE)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Surface.TLabel", background=SURFACE, foreground=TEXT)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("SurfaceMuted.TLabel", background=SURFACE, foreground=MUTED)
-        style.configure("Eyebrow.TLabel", background=SURFACE, foreground=ACCENT, font=("Segoe UI", 9, "bold"))
-        style.configure("Section.TLabel", background=SURFACE, foreground=TEXT, font=("Segoe UI", 18, "bold"))
+        style.configure("Eyebrow.TLabel", background=BG, foreground=GOLD, font=("Segoe UI", 9, "bold"))
+        style.configure("Section.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 21, "bold"))
+        style.configure("CardTitle.TLabel", background=SURFACE, foreground=GOLD, font=("Segoe UI", 10, "bold"))
         style.configure("Status.TLabel", background=BG, foreground=MUTED)
         style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 25, "bold"))
         style.configure(
@@ -267,32 +311,34 @@ class ZadooSettingsWindow:
         style.map("TButton", background=[("active", SURFACE_ALT)], foreground=[("disabled", MUTED)])
         style.configure(
             "Primary.TButton",
-            background=ACCENT,
-            foreground="#06212c",
-            bordercolor=ACCENT,
+            background=GOLD,
+            foreground="#342106",
+            bordercolor="#ffd58b",
             font=("Segoe UI", 10, "bold"),
             padding=(16, 8),
         )
-        style.map("Primary.TButton", background=[("active", ACCENT_DARK), ("pressed", ACCENT_DARK)])
-        style.configure("Nav.TButton", padding=(10, 10), background=BG, foreground=MUTED, borderwidth=0)
+        style.map("Primary.TButton", background=[("active", "#ffd58b"), ("pressed", "#eba83c")])
+        style.configure("Nav.TButton", padding=(10, 13), background=BG, foreground=MUTED, borderwidth=0, anchor="w")
         style.map("Nav.TButton", background=[("active", SURFACE_ALT)])
-        style.configure("SelectedNav.TButton", padding=(10, 10), background=SURFACE_ALT, foreground=ACCENT, bordercolor=BORDER)
+        style.configure("SelectedNav.TButton", padding=(10, 13), background=SURFACE_ALT, foreground=GOLD, bordercolor=BORDER, anchor="w")
         style.map("SelectedNav.TButton", background=[("active", SURFACE_ALT)])
         style.configure(
             "TEntry",
-            fieldbackground=SURFACE,
+            fieldbackground="#111e27",
             foreground=TEXT,
             bordercolor=BORDER,
             lightcolor=BORDER,
             darkcolor=BORDER,
             insertcolor=TEXT,
-            padding=6,
+            padding=10,
         )
         style.map("TEntry", fieldbackground=[("disabled", SURFACE_ALT), ("readonly", SURFACE_ALT)],
                   bordercolor=[("focus", ACCENT)], foreground=[("readonly", TEXT)])
         style.configure("TCheckbutton", background=SURFACE, foreground=TEXT, padding=(4, 4))
         style.map("TCheckbutton", background=[("active", SURFACE)], indicatorbackground=[("selected", ACCENT)])
-        style.configure("Vertical.TScrollbar", background=SURFACE_ALT, troughcolor=SURFACE, borderwidth=0, arrowsize=13)
+        style.configure("Vertical.TScrollbar", background=SURFACE_ALT, troughcolor=BG, bordercolor=BG,
+                        lightcolor=SURFACE_ALT, darkcolor=SURFACE_ALT, arrowcolor=MUTED, borderwidth=0, arrowsize=13)
+        style.map("Vertical.TScrollbar", background=[("active", "#425b67"), ("pressed", "#425b67")])
         style.configure("TNotebook", background=BG, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, borderwidth=0, tabmargins=(0, 8, 0, 0))
         style.configure("TNotebook.Tab", background=SURFACE_ALT, foreground=MUTED, padding=(18, 9), borderwidth=0)
         style.map(
@@ -301,7 +347,8 @@ class ZadooSettingsWindow:
             foreground=[("selected", TEXT), ("active", TEXT)],
         )
         style.layout("Main.TNotebook.Tab", [])
-        style.configure("Main.TNotebook", background=SURFACE, borderwidth=0, tabmargins=0)
+        style.configure("Main.TNotebook", background=BG, bordercolor=BG, lightcolor=BG, darkcolor=BG,
+                        borderwidth=0, tabmargins=0)
         style.configure(
             "Card.TLabelframe",
             background=SURFACE,
@@ -316,24 +363,56 @@ class ZadooSettingsWindow:
             font=("Segoe UI", 10, "bold"),
         )
 
-    def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=16, style="Root.TFrame")
-        outer.pack(fill=BOTH, expand=True)
+    def _apply_native_titlebar(self) -> None:
+        """Match this window's title bar to its theme; never changes a Windows setting."""
+        self.root.update_idletasks()
+        try:
+            get_parent = ctypes.windll.user32.GetParent
+            get_parent.argtypes = [ctypes.c_void_p]
+            get_parent.restype = ctypes.c_void_p
+            set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            set_attribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+            enabled = ctypes.c_int(1)
+            set_attribute(get_parent(self.root.winfo_id()), 20, ctypes.byref(enabled), ctypes.sizeof(enabled))
+        except (AttributeError, OSError):
+            logging.debug("Native dark title bar is unavailable on this Windows version")
 
-        header = ttk.Frame(outer, style="Root.TFrame")
+    def _load_brand_images(self) -> None:
+        from PIL import Image, ImageTk
+        with Image.open(resource_path("brand-header.png")) as logo:
+            self._brand_large = ImageTk.PhotoImage(logo.resize((int(206 * self._ui_scale), int(76 * self._ui_scale)), Image.Resampling.LANCZOS))
+            self._brand_small = ImageTk.PhotoImage(logo.resize((int(138 * self._ui_scale), int(51 * self._ui_scale)), Image.Resampling.LANCZOS))
+        with Image.open(resource_path("app_icon.ico")) as logo:
+            self._mascot_image = ImageTk.PhotoImage(logo.resize((int(54 * self._ui_scale), int(54 * self._ui_scale)), Image.Resampling.LANCZOS))
+
+    def _build_ui(self) -> None:
+        outer = ttk.Frame(self.root, style="Root.TFrame")
+        self._outer = outer
+        outer.pack(fill=BOTH, expand=True)
+        self._rail = ttk.Frame(outer, padding=14, style="Root.TFrame")
+        self._workspace = ttk.Frame(outer, padding=(12, 18, 18, 16), style="Root.TFrame")
+        # The outer grid owns this size; wrapped labels on hidden tabs must not
+        # feed their requested widths back into the shell's geometry.
+        self._workspace.pack_propagate(False)
+        self._wide_shell = None
+        header = ttk.Frame(self._rail, style="Root.TFrame")
         header.pack(fill="x")
         branding = ttk.Frame(header, style="Root.TFrame")
         branding.pack(side=LEFT, fill="x", expand=True)
-        ttk.Label(branding, text="zadoo", style="Title.TLabel").pack(anchor="w")
+        self.brand_label = ttk.Label(branding, image=self._brand_large, style="TLabel")
+        self.brand_label.pack(anchor="w")
         self.state_label = ttk.Label(branding, text="", style="Muted.TLabel")
-        self.state_label.pack(anchor="w", pady=(0, 4))
-        ttk.Button(header, text="♡  Support", command=self.show_support).pack(side=RIGHT, padx=(8, 0))
+        self.state_label.pack(anchor="w", pady=(10, 4))
+        self._support_button = ttk.Button(header, text="♡", width=3, command=self.show_support)
 
-        self.nav = ttk.Frame(outer, style="Root.TFrame")
+        self.nav = ttk.Frame(self._rail, style="Root.TFrame")
         self.nav.pack(fill="x", pady=(16, 0))
+        self._rail_note = ttk.Frame(self._rail, style="Root.TFrame")
+        ttk.Label(self._rail_note, text="Made for your everyday.", style="Muted.TLabel").pack(anchor="w", pady=(18, 8))
+        ttk.Button(self._rail_note, text="♡  Support the developer", command=self.show_support).pack(fill="x")
 
         # Build tabs (but do not pack immediately, will be packed dynamically in reload())
-        self.tabs = ttk.Notebook(outer, style="Main.TNotebook", takefocus=False)
+        self.tabs = ttk.Notebook(self._workspace, style="Main.TNotebook", takefocus=False)
         self._build_access_tab()
         self._build_account_tab()
         self._build_permissions_tab()
@@ -349,32 +428,56 @@ class ZadooSettingsWindow:
                                 command=lambda i=index: self.tabs.select(i))
             self.nav_buttons.append(button)
         self.nav.bind("<Configure>", self._layout_nav)
+        outer.bind("<Configure>", self._layout_shell)
         self.tabs.bind("<<NotebookTabChanged>>", self._sync_nav)
         self._sync_nav()
         self.root.bind("<MouseWheel>", self._scroll_settings, add="+")
         self.root.bind("<FocusIn>", self._reveal_focus, add="+")
 
         # Build footer (but do not pack immediately)
-        self.footer = ttk.Frame(outer, style="Root.TFrame")
+        self.footer = ttk.Frame(self._workspace, style="Root.TFrame")
         self.status_label = ttk.Label(self.footer, text="Changes save automatically", style="Status.TLabel")
         self.status_label.pack(fill="x", pady=(0, 8))
         self.footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(160, e.width - 8)))
         actions = ttk.Frame(self.footer, style="Root.TFrame")
         actions.pack(fill="x")
-        ttk.Label(actions, text="Free. No limits to unlock.", style="Muted.TLabel").pack(side=LEFT)
+        ttk.Label(actions, text="Always free", style="Muted.TLabel").pack(side=LEFT)
         # Settings autosave automatically — no Save button. Keep only Start/Stop here.
         ttk.Button(actions, text="Stop", command=self.stop_zadoo).pack(side=RIGHT, padx=(6, 0))
         ttk.Button(actions, text="Start Zadoo", command=self.start_zadoo, style="Primary.TButton").pack(side=RIGHT, padx=(6, 0))
 
-    def _layout_nav(self, event) -> None:
-        columns = 5 if event.width >= 670 * self._ui_scale else 3
+    def _layout_shell(self, event) -> None:
+        wide = event.width >= 820 * self._ui_scale
+        if wide == self._wide_shell:
+            return
+        self._wide_shell = wide
+        self._outer.columnconfigure(0, weight=0 if wide else 1)
+        self._outer.columnconfigure(1, weight=1 if wide else 0)
+        self._outer.rowconfigure(0, weight=1 if wide else 0)
+        self._outer.rowconfigure(1, weight=0 if wide else 1)
+        self._rail.grid(row=0, column=0, sticky="nsew")
+        self._workspace.grid(row=0 if wide else 1, column=1 if wide else 0, sticky="nsew")
+        self.brand_label.configure(image=self._brand_large if wide else self._brand_small)
+        if wide:
+            self._support_button.pack_forget()
+            self._rail_note.pack(side="bottom", fill="x")
+        else:
+            self._rail_note.pack_forget()
+            self._support_button.pack(side=RIGHT, padx=(8, 0))
+        self._nav_columns = 0
+        self._layout_nav(None)
+
+    def _layout_nav(self, _event) -> None:
+        columns = 1 if self._wide_shell else (5 if self.root.winfo_width() >= 650 * self._ui_scale else 3)
         if columns == self._nav_columns:
             return
         self._nav_columns = columns
         for column in range(5):
             self.nav.columnconfigure(column, weight=1 if column < columns else 0, uniform="nav" if column < columns else "")
         for index, button in enumerate(self.nav_buttons):
-            button.grid(row=index // columns, column=index % columns, sticky="ew", padx=2, pady=2)
+            button.configure(text=f"0{index + 1}   {('Connect', 'My PC', 'Permissions', 'Alerts', 'Preferences')[index]}" if self._wide_shell
+                             else ("Connect", "My PC", "Permissions", "Alerts", "Preferences")[index])
+            button.grid(row=index // columns, column=index % columns, sticky="ew", padx=2, pady=4 if self._wide_shell else 2)
 
     def _sync_nav(self, _event=None) -> None:
         selected = self.tabs.index(self.tabs.select())
@@ -386,27 +489,17 @@ class ZadooSettingsWindow:
             self._motion_after = self.root.after(40, self._animate_setup)
 
     def _draw_setup_story(self, event) -> None:
-        """Small vector illustration: no image decoding, GPU effects or background loop."""
+        """Reuse the actual app logo; decode it once, never in the animation loop."""
         canvas = self.setup_story
         canvas.delete("all")
         width = event.width
         scale = self._ui_scale
-        y = 18 * scale
-        size = min(64 * scale, width / 4)
-        centers = (width * 0.22, width * 0.78)
-        for center, label in zip(centers, ("THIS PC", "YOUR BROWSER"), strict=True):
-            x = center - size / 2
-            canvas.create_rectangle(x, y, x + size, y + size * .62, fill=SURFACE_ALT, outline=ACCENT, width=2)
-            canvas.create_line(center, y + size * .62, center, y + size * .76, fill=ACCENT, width=2)
-            canvas.create_line(center - size * .2, y + size * .76, center + size * .2, y + size * .76, fill=ACCENT, width=2)
-            for eye in (-.13, .13):
-                ex = center + size * eye
-                canvas.create_oval(ex - 2, y + size * .23, ex + 2, y + size * .23 + 4, fill=TEXT, outline="")
-            canvas.create_arc(center - size * .13, y + size * .26, center + size * .13, y + size * .47,
-                              start=180, extent=180, style="arc", outline=TEXT, width=2)
-            canvas.create_text(center, y + size * .76 + 18 * scale, text=label, fill=MUTED,
-                               font=("Segoe UI", 8, "bold"))
-        self._story_track = (centers[0] + size * .7, centers[1] - size * .7, y + size * .32)
+        canvas.create_image(36 * scale, 42 * scale, image=self._mascot_image)
+        canvas.create_text(76 * scale, 33 * scale, text="Your control room", fill=GOLD,
+                           font=("Segoe UI", 10, "bold"), anchor="w")
+        canvas.create_text(76 * scale, 54 * scale, text="All features. Always free.", fill=MUTED,
+                           font=("Segoe UI", 9), anchor="w")
+        self._story_track = (18 * scale, max(30 * scale, width - 18 * scale), 83 * scale)
         start, end, middle = self._story_track
         canvas.create_line(start, middle, end, middle, fill=BORDER, dash=(3, 5), width=2)
         canvas.create_oval(start - 4, middle - 4, start + 4, middle + 4, fill=ACCENT, outline="", tags="packet")
@@ -445,12 +538,12 @@ class ZadooSettingsWindow:
 
     def _tab_body(self, parent):
         """Width-tracking page; scrolling keeps all controls accessible on small displays."""
-        canvas = tk.Canvas(parent, bg=SURFACE, highlightthickness=0, bd=0, takefocus=False)
+        canvas = tk.Canvas(parent, bg=BG, highlightthickness=0, bd=0, takefocus=False)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         scrollbar.pack(side=RIGHT, fill="y")
         canvas.pack(side=LEFT, fill=BOTH, expand=True)
         canvas.configure(yscrollcommand=scrollbar.set)
-        inner = ttk.Frame(canvas, padding=20, style="Surface.TFrame")
+        inner = ttk.Frame(canvas, padding=(8, 8, 10, 20), style="Root.TFrame")
         item = canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(item, width=event.width))
         inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -483,16 +576,17 @@ class ZadooSettingsWindow:
             parent = getattr(parent, "master", None)
 
     def _hint(self, parent, text: str):
-        label = ttk.Label(parent, text=text, style="SurfaceMuted.TLabel", justify=LEFT, wraplength=280)
+        page_surface = isinstance(parent, ttk.Frame) and parent.cget("style") == "Root.TFrame"
+        label = ttk.Label(parent, text=text, style="Muted.TLabel" if page_surface else "SurfaceMuted.TLabel", justify=LEFT, wraplength=280)
         label.pack(fill="x", pady=(4, 12))
-        label.bind("<Configure>", lambda event: label.configure(wraplength=max(120, event.width)))
+        _wrap_visible_label(label, 120)
         return label
 
     def _page_heading(self, parent, eyebrow: str, title: str, detail: str) -> None:
         ttk.Label(parent, text=eyebrow.upper(), style="Eyebrow.TLabel").pack(anchor="w", pady=(0, 6))
         heading = ttk.Label(parent, text=title, style="Section.TLabel", wraplength=300)
         heading.pack(fill="x")
-        heading.bind("<Configure>", lambda event: heading.configure(wraplength=max(120, event.width)))
+        _wrap_visible_label(heading, 120)
         self._hint(parent, detail)
 
     def show_support(self) -> None:
@@ -548,18 +642,18 @@ class ZadooSettingsWindow:
         self.tabs.add(self.tab_access, text="Access")
         body = self._tab_body(self.tab_access)
         validator = (self.root.register(self._access_code_validator), "%P")
-        self._setup_hero = ttk.Frame(body, style="Surface.TFrame")
+        self._setup_hero = ttk.Frame(body, style="Root.TFrame")
         self._setup_hero.pack(fill="x", pady=(0, 12))
-        self._setup_intro = ttk.Frame(self._setup_hero, style="Surface.TFrame")
-        self._page_heading(self._setup_intro, "Configure / Quick start", "Connect in three easy steps.",
-                           "Set a code. Choose what viewers can do. Start sharing.")
-        self.setup_story = tk.Canvas(self._setup_hero, width=210, height=int(104 * self._ui_scale), bg=SURFACE,
+        self._setup_intro = ttk.Frame(self._setup_hero, style="Root.TFrame")
+        self._page_heading(self._setup_intro, "Your workspace / Connect", "Let's get you connected.",
+                           "Three simple steps. You're in control the whole way.")
+        self.setup_story = tk.Canvas(self._setup_hero, width=int(240 * self._ui_scale), height=int(104 * self._ui_scale), bg=BG,
                                      highlightthickness=0, takefocus=False)
         self.setup_story.bind("<Configure>", self._draw_setup_story)
 
-        self._setup_grid = ttk.Frame(body, style="Surface.TFrame")
+        self._setup_grid = ttk.Frame(body, style="Root.TFrame")
         self._setup_grid.pack(fill="x")
-        form = ttk.LabelFrame(self._setup_grid, text="1  ·  Choose your access code", style="Card.TLabelframe")
+        form = StudioCard(self._setup_grid, "01  /  Your access code")
         ttk.Label(form, text=f"Access code · up to {ACCESS_CODE_MAX_LENGTH} characters", style="Surface.TLabel").pack(anchor="w")
         code_row = ttk.Frame(form, style="Surface.TFrame")
         code_row.pack(fill="x", pady=(6, 0))
@@ -571,18 +665,18 @@ class ZadooSettingsWindow:
                         command=lambda: self.access_code.configure(show="" if self.show_code_var.get() else "•")).pack(side=RIGHT, padx=(8, 0))
         self._hint(form, "This is the code viewers enter on the connection screen. Share it only with people you trust.")
 
-        permissions = ttk.LabelFrame(self._setup_grid, text="2  ·  Choose viewer permissions", style="Card.TLabelframe")
+        permissions = StudioCard(self._setup_grid, "02  /  You're in control")
         self.permission_summary = self._hint(permissions, "Review access before you share this PC.")
         ttk.Button(permissions, text="Review permissions  →", command=lambda: self.tabs.select(2)).pack(anchor="w")
 
         # ── Remote access (public link + start) ───────────────────────
-        self.public_url_frame = ttk.LabelFrame(self._setup_grid, text="3  ·  Start and share your link", style="Card.TLabelframe")
+        self.public_url_frame = StudioCard(self._setup_grid, "03  /  Your connection link")
         url_row = ttk.Frame(self.public_url_frame, style="Surface.TFrame")
         url_row.pack(fill="x", pady=(2, 6))
         self.public_url_label = ttk.Label(url_row, text="Zadoo not running", style="SurfaceMuted.TLabel",
                                           font=("Segoe UI", 9), cursor="hand2")
         self.public_url_label.pack(fill="x", pady=(6, 10))
-        self.public_url_label.bind("<Configure>", lambda event: self.public_url_label.configure(wraplength=max(100, event.width)))
+        _wrap_visible_label(self.public_url_label)
         self.public_url_label.bind("<Button-1>", lambda _e: self._open_public_url())
         buttons = ttk.Frame(url_row, style="Surface.TFrame")
         buttons.pack(fill="x")
@@ -635,7 +729,7 @@ class ZadooSettingsWindow:
                            "Name this PC so it is easy to recognize. Dashboard sign-in is optional; remote access works without it.")
 
         # ── Profile card ──────────────────────────────────────────────
-        self.profile_card = ttk.LabelFrame(body, text="Signed-in account", style="Card.TLabelframe")
+        self.profile_card = StudioCard(body, "Your account")
 
         avatar_frame = ttk.Frame(self.profile_card, style="Surface.TFrame")
         avatar_frame.pack(side=LEFT, padx=(0, 12))
@@ -660,13 +754,13 @@ class ZadooSettingsWindow:
         ttk.Button(self.profile_card, text="Sign Out", command=self.sign_out).pack(side=RIGHT, padx=(0, 4))
 
         # ── Device name container ─────────────────────────────────────
-        self.device_name_frame = ttk.Frame(body, style="Surface.TFrame")
+        self.device_name_frame = StudioCard(body, "This computer")
         ttk.Label(self.device_name_frame, text="Device name", style="Surface.TLabel").pack(anchor="w")
         self.device_name = ttk.Entry(self.device_name_frame)
         self.device_name.pack(fill="x", pady=(2, 10))
 
         # ── Sign-in Container ─────────────────────────────────────────
-        self.signin_frame = ttk.Frame(body, style="Surface.TFrame")
+        self.signin_frame = StudioCard(body, "Connect your dashboard")
         ttk.Label(self.signin_frame, text="Dashboard · optional", style="Eyebrow.TLabel").pack(anchor="w", pady=(5, 10))
         self._hint(self.signin_frame, "Select Sign in, complete the browser steps, then return here. Use Check sign-in if the status has not updated.")
 
@@ -690,7 +784,7 @@ class ZadooSettingsWindow:
         body = self._tab_body(self.tab_runtime)
         self._page_heading(body, "05 / Preferences", "Fits your routine.",
                            "Choose how Zadoo behaves on this PC. Changes save automatically.")
-        card = ttk.LabelFrame(body, text="Windows behavior", style="Card.TLabelframe")
+        card = StudioCard(body, "Make Zadoo fit your day")
         card.pack(fill="x")
         self._check_button(card, "Start when I sign in to Windows", self.autostart_var).pack(anchor="w", pady=4)
         self._hint(card, "Keeps this PC available after you sign in. Windows may require administrator access to update the startup task.")
@@ -700,7 +794,7 @@ class ZadooSettingsWindow:
                         command=self._stop_setup_animation).pack(anchor="w", pady=4)
         self._hint(card, "Follows Windows on launch. A short animation plays only when you open Connect; nothing loops while sharing.")
         ttk.Button(card, text="Reapply startup preference", command=self.apply_startup).pack(anchor="w", pady=(4, 0))
-        support = ttk.LabelFrame(body, text="Local support", style="Card.TLabelframe")
+        support = StudioCard(body, "A little help, if you need it")
         support.pack(fill="x", pady=(14, 0))
         self._hint(support, "Save recent logs and system details to a file when troubleshooting. Known access codes, tokens, IDs, email and public links are redacted. Review the file before sharing it.")
         ttk.Button(support, text="Export Diagnostics", command=self.export_diagnostics).pack(anchor="w", pady=(10, 0))
@@ -715,14 +809,14 @@ class ZadooSettingsWindow:
         body = self._tab_body(self.tab_permissions)
         self._page_heading(body, "03 / Permissions", "You decide what's allowed.",
                            "These switches apply to viewers using your access code. Enable only what they need; your screen can still be viewed when controls are off.")
-        perms = ttk.Frame(body, style="Surface.TFrame")
+        perms = ttk.Frame(body, style="Root.TFrame")
         perms.pack(fill="x")
         cards = []
         for key in PERMISSION_KEYS:
             var = tk.BooleanVar(value=False)
             self.permission_vars[key] = var
             var.trace_add("write", self._update_permission_summary)
-            card = ttk.LabelFrame(perms, style="Card.TLabelframe", padding=10)
+            card = StudioCard(perms, padding=14)
             self._check_button(card, PERMISSION_LABELS.get(key, key), var).pack(anchor="w")
             self._hint(card, PERMISSION_HELP[key])
             cards.append(card)
@@ -738,7 +832,7 @@ class ZadooSettingsWindow:
                 card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0, 8 if columns == 2 and index % 2 == 0 else 0), pady=(0, 8))
         perms.bind("<Configure>", layout_permissions)
 
-        actions = ttk.Frame(body, style="Surface.TFrame")
+        actions = ttk.Frame(body, style="Root.TFrame")
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Allow all controls", command=self.allow_all_permissions).pack(side=LEFT)
         ttk.Button(actions, text="View only", command=self.clear_permissions).pack(side=LEFT, padx=(6, 0))
@@ -749,7 +843,7 @@ class ZadooSettingsWindow:
         body = self._tab_body(self.tab_alerts)
         self._page_heading(body, "04 / Alerts", "A message, one tap away.",
                            "Prepare up to four messages for connected viewers. Enable a preset and fill in its title or message, then send it from Host Controls.")
-        email_card = ttk.LabelFrame(body, text="Email notifications · optional", style="Card.TLabelframe")
+        email_card = StudioCard(body, "Email notifications · optional")
         email_card.pack(fill="x", pady=(0, 14))
         ttk.Label(email_card, text="Send notifications to", style="Surface.TLabel").pack(anchor="w")
         self.email_to = ttk.Entry(email_card)
