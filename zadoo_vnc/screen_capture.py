@@ -6,13 +6,21 @@ import math
 import threading
 import time
 
-import bettercam
 import mss
 import numpy as np
+from comtypes import COMError
 from imagecodecs import JPEG8
 from imagecodecs._jpeg8 import jpeg8_encode
+from mss.exception import ScreenShotError
 
 from .delta_frames import DeltaFrameEncoder
+from .dxgi_capture import (
+    CaptureUnavailable,
+    capture_error_text,
+    create_camera,
+    recoverable_com_error,
+    release_camera_resources,
+)
 
 
 class _OwnedFrameProcessor:
@@ -65,6 +73,10 @@ class ScreenCapturer(threading.Thread):
         self._keyframe_requested = threading.Event()
         self.quality_locked_by_user = False
         self._last_jpeg_subsampling = '420'
+        self._stop_capture_event = threading.Event()
+        self._recovery_started = None
+        self._recovery_attempts = 0
+        self._recovery_timeout = 30.0
 
     def set_delta_streaming(self, enabled):
         if not isinstance(enabled, bool):
@@ -127,7 +139,7 @@ class ScreenCapturer(threading.Thread):
             return self.capture_stats['sequence'], self.latest_frame_jpeg
 
     def run(self):
-        self.is_running = True
+        self.is_running = not self._stop_capture_event.is_set()
 
         next_deadline = time.perf_counter()
         while self.is_running:
@@ -139,6 +151,11 @@ class ScreenCapturer(threading.Thread):
             try:
                 capture_start = time.perf_counter()
                 frame = self._grab_screen_bettercam()
+                if self._recovery_started is not None:
+                    logging.info("Screen capture recovered after %s attempts", self._recovery_attempts)
+                    self.last_error = None
+                    self._recovery_started = None
+                    self._recovery_attempts = 0
                 source_region_applied = self._capture_source_region_applied
                 capture_ms = (time.perf_counter() - capture_start) * 1000.0
                 current_time = time.time()
@@ -175,8 +192,18 @@ class ScreenCapturer(threading.Thread):
                             self.capture_stats['last_encode_ms'] = encode_ms
                         self._notify_frame_ready()
                                 
+            except (CaptureUnavailable, COMError, ScreenShotError) as exc:
+                if isinstance(exc, COMError) and not recoverable_com_error(exc):
+                    self.last_error = f"Screen capture failed: {capture_error_text(exc)}"
+                    logging.exception(self.last_error)
+                    self.is_running = False
+                    break
+                if not self._recover_capture(exc):
+                    break
+                next_deadline = time.perf_counter()
+                continue
             except Exception as exc:
-                self.last_error = f"Screen capture failed: {exc}"
+                self.last_error = f"Screen capture failed: {capture_error_text(exc)}"
                 logging.exception(self.last_error)
                 self.is_running = False
                 break
@@ -195,14 +222,46 @@ class ScreenCapturer(threading.Thread):
         
         self._release_bettercam()
 
+    def _recover_capture(self, error):
+        now = time.monotonic()
+        if self._recovery_started is None:
+            self._recovery_started = now
+        self._recovery_attempts += 1
+        elapsed = now - self._recovery_started
+        reason = capture_error_text(error)
+        self.last_error = f"Screen capture recovering: {reason}"
+        logging.warning(self.last_error)
+        self._release_bettercam()
+        self.request_keyframe()
+        with self.frame_lock:
+            self.capture_stats['current_fps'] = 0.0
+            self.capture_stats['produced_fps'] = 0.0
+            self.capture_stats['produced_kbps'] = 0.0
+        if elapsed >= self._recovery_timeout:
+            self.last_error = f"Screen capture recovery failed after {self._recovery_timeout:g} seconds: {reason}"
+            logging.error(self.last_error)
+            self.is_running = False
+            self._notify_frame_ready()
+            return False
+        delay = min(0.25 * (2 ** min(self._recovery_attempts - 1, 3)),
+                    self._recovery_timeout - elapsed)
+        if self._stop_capture_event.wait(delay):
+            self.is_running = False
+            return False
+        return self.is_running
+
     def _grab_screen_bettercam(self):
         """Return a new desktop frame, or None when the desktop is unchanged."""
         if self.bettercam_camera is None:
             # Keep DirectX's native BGRA layout. libjpeg-turbo converts it directly,
             # avoiding BetterCam's OpenCV conversion and an extra full-frame copy.
-            self.bettercam_camera = bettercam.create(device_idx=0, output_idx=0, output_color="BGRA")
+            self.bettercam_camera = create_camera()
             self.bettercam_camera._processor = _OwnedFrameProcessor(self.bettercam_camera._processor)
         if self._initial_frame_pending:
+            if self._recovery_started is not None:
+                # A successful GDI snapshot alone must not hide a still-broken
+                # duplication device. None is valid here: unchanged desktop.
+                self.bettercam_camera.grab()
             self._initial_frame_pending = False
             self._capture_source_region_applied = False
             frame = self._capture_initial_frame()
@@ -234,14 +293,7 @@ class ScreenCapturer(threading.Thread):
         if cam is None:
             return
         cam.stop()
-        # BetterCam 1.0.0 calls Release() before discarding comtypes pointers,
-        # so comtypes releases the same COM references again in __del__.
-        # Dropping each smart pointer lets its owner release the reference once.
-        cam._duplicator.texture = None
-        cam._duplicator.duplicator = None
-        cam._stagesurf.texture = None
-        cam._stagesurf.width = 0
-        cam._stagesurf.height = 0
+        release_camera_resources(cam)
 
     def _encode_frame(self, frame):
         return self._encode_pixels(self._prepare_frame(frame))
@@ -330,6 +382,9 @@ class ScreenCapturer(threading.Thread):
             'jpeg_subsampling': self._last_jpeg_subsampling,
             'detail_refresh_pending': self._delta_encoder.detail_refresh_pending,
             'error': self.last_error,
+            'capture_state': ('recovering' if self.is_running and self._recovery_started is not None
+                              else 'failed' if self.last_error else 'ready' if is_working else 'starting'),
+            'recovery_attempts': self._recovery_attempts,
             'is_working': is_working
         }
 
@@ -436,4 +491,5 @@ class ScreenCapturer(threading.Thread):
 
     def stop(self):
         self.is_running = False
+        self._stop_capture_event.set()
         self._streaming_event.set()

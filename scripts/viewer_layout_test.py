@@ -12,7 +12,7 @@ _DLL_DIRECTORY = os.add_dll_directory(str(Path(sys.prefix) / "Scripts")) if os.n
 from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT.parent / "outputs" / "zadoo-1.1.8-ui"
+OUTPUT = ROOT.parent / "outputs" / "zadoo-1.1.9-ui"
 SIZES = [(320, 568), (390, 844), (768, 1024), (667, 375), (844, 390), (1280, 900)]
 TOUCH_SIZES = [(320, 568), (390, 844), (844, 390)]
 

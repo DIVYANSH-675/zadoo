@@ -391,6 +391,8 @@ function Invoke-SourceChecks([string]$PythonExe) {
     if ($LASTEXITCODE -ne 0) { throw "Free-mode integration test failed" }
     & $PythonExe scripts\frame_dispatch_test.py
     if ($LASTEXITCODE -ne 0) { throw "Frame-dispatch regression test failed" }
+    & $PythonExe scripts\capture_recovery_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Capture recovery regression test failed" }
     & $PythonExe scripts\stream_policy_test.py
     if ($LASTEXITCODE -ne 0) { throw "Stream policy regression test failed" }
     & $PythonExe scripts\delta_frames_test.py

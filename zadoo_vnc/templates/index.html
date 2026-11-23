@@ -2043,7 +2043,7 @@
             *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
         }
     </style>
-    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.8">
+    <link rel="stylesheet" href="/static/ui/studio.css?v=1.1.9">
 </head>
 <body>
     <!-- Tabler Icons, MIT licensed: https://github.com/tabler/tabler-icons -->
@@ -2300,6 +2300,7 @@
             <div id="snapshot-selection-box"></div>
             <!-- Hidden status element for JavaScript -->
             <div id="status" style="display: none;">Connecting...</div>
+            <div id="capture-notice" role="status" aria-live="polite" hidden></div>
             <div id="current-quality" style="display: none;">85</div>
             <div id="current-fps" style="display: none;">60</div>
             <div id="uptime-display" style="display: none;">00:00:00</div>
@@ -2314,7 +2315,7 @@
             <div class="sidebar-content">
                 <!-- Header -->
                 <div class="sidebar-header">
-                    <div class="deck-heading"><img class="sidebar-logo" src="/brand-header.png?v=1.1.8" width="768" height="282" alt="Zadoo Remote Control Panel"><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
+                    <div class="deck-heading"><img class="sidebar-logo" src="/brand-header.png?v=1.1.9" width="768" height="282" alt="Zadoo Remote Control Panel"><button type="button" class="deck-close" onclick="toggleSidebar(false)" aria-label="Close controls">&times;</button></div>
                 </div>
                 
                 <div id="sidebar-main" class="sidebar-main deck-main">
@@ -2612,13 +2613,13 @@
 <dialog id="support-dialog" class="z-dialog" aria-labelledby="support-title" aria-describedby="support-description">
     <div class="dialog-top"><h2 id="support-title">Support the developer</h2><button type="button" class="dialog-close" aria-label="Close support">&times;</button></div>
     <p class="support-copy" id="support-description">Made with care by Divyansh Gupta. If Zadoo helps you, you can leave a voluntary tip. Every feature stays free, whether you contribute or not.</p>
-    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.8" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
+    <img id="support-qr" class="support-qr" data-src="/static/ui/developer-qr.png?v=1.1.9" width="1440" height="2000" alt="Google Pay QR for Divyansh Gupta, UPI ID divyanshgupta675@oksbi">
     <span class="support-upi">divyanshgupta675@oksbi</span>
-    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.8" download="Zadoo-developer-QR.png">Save QR</a></div>
+    <div class="support-actions"><button type="button" id="support-copy-upi">Copy UPI ID</button><a href="/static/ui/developer-qr.png?v=1.1.9" download="Zadoo-developer-QR.png">Save QR</a></div>
     <p class="support-copy">Scan with any UPI app, or save the QR and open it in your payment app. Confirm the recipient is Divyansh Gupta before paying.</p>
     <div id="support-status" class="support-status" role="status"></div>
 </dialog>
-<script src="/static/ui/studio.js?v=1.1.8" defer></script>
+<script src="/static/ui/studio.js?v=1.1.9" defer></script>
 <script>
     const canvas = document.getElementById('screen');
     if (!canvas) throw new Error('Screen canvas is missing');
@@ -5499,6 +5500,8 @@ registerProcessor('pcm-player', PcmPlayer);
 
         setInterval(sendClientStreamStats, 1000);
         setInterval(sendStreamPing, 2000);
+        // Small health messages also work when capture has stopped producing video.
+        setInterval(() => requestCaptureStats(false), 2000);
 
         function updateStatus(text) {
             document.getElementById('status').textContent = text;
@@ -5618,10 +5621,10 @@ registerProcessor('pcm-player', PcmPlayer);
             sendPerformanceSettings();
         }
 
-        function requestCaptureStats() {
+        function requestCaptureStats(showChecking = true) {
             if (window.videoSocket && window.videoSocket.readyState === WebSocket.OPEN) {
                 window.videoSocket.send(JSON.stringify({action: 'get_capture_stats'}));
-                updateCaptureStatus('checking', 'Checking...');
+                if (showChecking) updateCaptureStatus('checking', 'Checking...');
             }
         }
 
@@ -5670,10 +5673,19 @@ registerProcessor('pcm-player', PcmPlayer);
                 profile_name: stats.stream_profile
             });
             
+            const notice = document.getElementById('capture-notice');
             if (stats.is_working) {
                 updateCaptureStatus('working', 'Ready');
+                notice.hidden = true;
+                notice.textContent = '';
             } else {
-                updateCaptureStatus('error', 'Not working');
+                const recovering = stats.capture_state === 'recovering';
+                const message = typeof stats.error === 'string' && stats.error.trim()
+                    ? stats.error : 'Screen capture is not ready. Check that the host desktop is unlocked.';
+                updateCaptureStatus(recovering ? 'warning' : 'error', message);
+                // Use textContent: error text is data, never HTML.
+                notice.textContent = message;
+                notice.hidden = false;
             }
         }
 

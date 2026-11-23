@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -86,11 +87,39 @@ async def check_dispatch(with_slow_client, delta=False):
     print(f"FRAME_DISPATCH: PASS 20/20 fast frames; delta={delta}; {label}")
 
 
+async def check_fatal_capture_status():
+    capture = Capture()
+    capture.is_running = False
+    capture.last_error = "Screen capture recovery failed after 30 seconds: E_ACCESSDENIED"
+    fast, slow = Client(), Client(blocked=True)
+    server = SimpleNamespace(
+        stop_event=asyncio.Event(), frame_ready_event=asyncio.Event(),
+        _video_send_tasks={}, video_clients={fast, slow}, screen_capturer=capture,
+        _capture_stats_payload=lambda: {"is_working": False, "error": capture.last_error},
+    )
+    server.frame_ready_event.set()
+    started = time.monotonic()
+    try:
+        await MediaMixin.broadcast_frames(server)
+    except RuntimeError as exc:
+        if str(exc) != capture.last_error:
+            raise AssertionError("Fatal capture error changed during shutdown") from exc
+    else:
+        raise AssertionError("Fatal capture failure did not shut down the broadcaster")
+    if time.monotonic() - started > 1.5:
+        raise AssertionError("Slow viewer blocked capture-failure shutdown")
+    payload = json.loads(fast.frames[0])
+    if payload["type"] != "capture_stats" or payload["stats"]["error"] != capture.last_error:
+        raise AssertionError("Viewer did not receive the exact capture failure")
+    print("FRAME_DISPATCH: PASS exact fatal capture error delivered; slow viewer cannot block shutdown")
+
+
 async def main():
     await check_dispatch(False)
     await check_dispatch(True)
     await check_dispatch(False, delta=True)
     await check_dispatch(True, delta=True)
+    await check_fatal_capture_status()
 
 
 if __name__ == "__main__":

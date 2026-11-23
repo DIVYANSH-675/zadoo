@@ -980,6 +980,13 @@ class MediaMixin:
             sequence, frame = self.screen_capturer.get_latest_frame_packet()
             if frame is None or sequence == last_sequence:
                 if not self.screen_capturer.is_running and self.screen_capturer.last_error:
+                    # Preserve the exact terminal failure before shutdown closes
+                    # the sockets. A slow viewer must not delay shutdown forever.
+                    message = json.dumps({'type': 'capture_stats', 'stats': self._capture_stats_payload()})
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(asyncio.gather(
+                            *(ws.send(message) for ws in list(self.video_clients)), return_exceptions=True,
+                        ), timeout=0.5)
                     raise RuntimeError(self.screen_capturer.last_error)
                 continue
             if not frame:
